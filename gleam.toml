@@ -6,7 +6,7 @@ version = "0.0.1"
 #
 description = "A reactive web framework for Gleam with server-client state synchronisation."
 licences = ["Apache-2.0"]
-# repository = { type = "github", user = "", repo = "" }
+repository = { type = "github", user = "haleywhazel", repo = "lily" }
 # links = [{ title = "Website", href = "" }]
 #
 # For a full reference of all the available options, you can have a look at
