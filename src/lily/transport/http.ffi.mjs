@@ -124,10 +124,9 @@ export function connect(postUrl, eventsUrl, handler) {
     }
   };
 
-  eventSource.onerror = function (error) {
+  eventSource.onerror = function (_error) {
     isConnected = false;
     handler.on_disconnect();
-    console.error("EventSource error:", error);
     // Browser automatically attempts to reconnect (SSE built-in behaviour)
   };
 

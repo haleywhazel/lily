@@ -18,7 +18,7 @@
 ////   |> client.start
 //// }
 ////
-//// fn decode_name_input(event: Dynamic) -> Result(Msg, Nil) {
+//// fn decode_name_input(event: Dynamic) -> Result(Message, Nil) {
 ////   use target <- result.try(dynamic.field("target", dynamic.dynamic)(event))
 ////   use value <- result.try(dynamic.field("value", dynamic.string)(target))
 ////   Ok(SetName(value))
@@ -42,10 +42,10 @@ import lily/client.{type Runtime}
 /// Fires when an element loses focus.
 @target(javascript)
 pub fn on_blur(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn() -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn() -> message,
+) -> Runtime(model, message) {
   setup_simple_event(selector, "blur", fn() {
     client.send_message(runtime, handler())
   })
@@ -56,10 +56,10 @@ pub fn on_blur(
 /// updates, use `on_input` instead.
 @target(javascript)
 pub fn on_change(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(String) -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn(String) -> message,
+) -> Runtime(model, message) {
   setup_value_event(selector, "change", fn(value) {
     client.send_message(runtime, handler(value))
   })
@@ -72,13 +72,13 @@ pub fn on_change(
 /// this handler.
 @target(javascript)
 pub fn on_click(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  decoder decoder: fn(String) -> Result(msg, Nil),
-) -> Runtime(model, msg) {
-  setup_click_event(selector, fn(msg_name) {
-    case decoder(msg_name) {
-      Ok(msg) -> client.send_message(runtime, msg)
+  decoder decoder: fn(String) -> Result(message, Nil),
+) -> Runtime(model, message) {
+  setup_click_event(selector, fn(message_name) {
+    case decoder(message_name) {
+      Ok(message) -> client.send_message(runtime, message)
       Error(Nil) -> Nil
     }
   })
@@ -89,10 +89,10 @@ pub fn on_click(
 /// coordinates (x, y) relative to the viewport.
 @target(javascript)
 pub fn on_context_menu(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(Int, Int) -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn(Int, Int) -> message,
+) -> Runtime(model, message) {
   setup_coordinate_event(selector, "contextmenu", fn(x, y) {
     client.send_message(runtime, handler(x, y))
   })
@@ -102,10 +102,10 @@ pub fn on_context_menu(
 /// Fires when text is copied to the clipboard.
 @target(javascript)
 pub fn on_copy(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn() -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn() -> message,
+) -> Runtime(model, message) {
   setup_simple_event(selector, "copy", fn() {
     client.send_message(runtime, handler())
   })
@@ -115,10 +115,10 @@ pub fn on_copy(
 /// Fires when text is cut to the clipboard.
 @target(javascript)
 pub fn on_cut(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn() -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn() -> message,
+) -> Runtime(model, message) {
   setup_simple_event(selector, "cut", fn() {
     client.send_message(runtime, handler())
   })
@@ -128,10 +128,10 @@ pub fn on_cut(
 /// Fires on double-click events.
 @target(javascript)
 pub fn on_double_click(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn() -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn() -> message,
+) -> Runtime(model, message) {
   setup_simple_event(selector, "dblclick", fn() {
     client.send_message(runtime, handler())
   })
@@ -143,10 +143,10 @@ pub fn on_double_click(
 /// consider throttling if performing expensive operations.
 @target(javascript)
 pub fn on_drag(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(Int, Int) -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn(Int, Int) -> message,
+) -> Runtime(model, message) {
   setup_coordinate_event(selector, "drag", fn(x, y) {
     client.send_message(runtime, handler(x, y))
   })
@@ -156,10 +156,10 @@ pub fn on_drag(
 /// Fires once when a drag operation ends (mouse released).
 @target(javascript)
 pub fn on_drag_end(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn() -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn() -> message,
+) -> Runtime(model, message) {
   setup_simple_event(selector, "dragend", fn() {
     client.send_message(runtime, handler())
   })
@@ -171,10 +171,10 @@ pub fn on_drag_end(
 /// `event.preventDefault()` in the browser to enable dropping.
 @target(javascript)
 pub fn on_drag_over(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(Int, Int) -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn(Int, Int) -> message,
+) -> Runtime(model, message) {
   setup_coordinate_event(selector, "dragover", fn(x, y) {
     client.send_message(runtime, handler(x, y))
   })
@@ -185,10 +185,10 @@ pub fn on_drag_over(
 /// (x, y).
 @target(javascript)
 pub fn on_drag_start(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(Int, Int) -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn(Int, Int) -> message,
+) -> Runtime(model, message) {
   setup_coordinate_event(selector, "dragstart", fn(x, y) {
     client.send_message(runtime, handler(x, y))
   })
@@ -199,10 +199,10 @@ pub fn on_drag_start(
 /// drop coordinates (x, y).
 @target(javascript)
 pub fn on_drop(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(Int, Int) -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn(Int, Int) -> message,
+) -> Runtime(model, message) {
   setup_coordinate_event(selector, "drop", fn(x, y) {
     client.send_message(runtime, handler(x, y))
   })
@@ -212,10 +212,10 @@ pub fn on_drop(
 /// Fires when an element receives focus.
 @target(javascript)
 pub fn on_focus(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn() -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn() -> message,
+) -> Runtime(model, message) {
   setup_simple_event(selector, "focus", fn() {
     client.send_message(runtime, handler())
   })
@@ -226,10 +226,10 @@ pub fn on_focus(
 /// blur), use `on_change` instead.
 @target(javascript)
 pub fn on_input(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(String) -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn(String) -> message,
+) -> Runtime(model, message) {
   setup_value_event(selector, "input", fn(value) {
     client.send_message(runtime, handler(value))
   })
@@ -240,10 +240,10 @@ pub fn on_input(
 /// "ArrowUp", "a").
 @target(javascript)
 pub fn on_key_down(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(String) -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn(String) -> message,
+) -> Runtime(model, message) {
   setup_key_event(selector, "keydown", fn(key) {
     client.send_message(runtime, handler(key))
   })
@@ -254,10 +254,10 @@ pub fn on_key_down(
 /// "ArrowUp", "a").
 @target(javascript)
 pub fn on_key_up(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(String) -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn(String) -> message,
+) -> Runtime(model, message) {
   setup_key_event(selector, "keyup", fn(key) {
     client.send_message(runtime, handler(key))
   })
@@ -268,10 +268,10 @@ pub fn on_key_up(
 /// relative to the viewport.
 @target(javascript)
 pub fn on_mouse_down(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(Int, Int) -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn(Int, Int) -> message,
+) -> Runtime(model, message) {
   setup_coordinate_event(selector, "mousedown", fn(x, y) {
     client.send_message(runtime, handler(x, y))
   })
@@ -281,10 +281,10 @@ pub fn on_mouse_down(
 /// Fires when the mouse enters an element's boundary. Does not bubble.
 @target(javascript)
 pub fn on_mouse_enter(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn() -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn() -> message,
+) -> Runtime(model, message) {
   setup_simple_event(selector, "mouseenter", fn() {
     client.send_message(runtime, handler())
   })
@@ -294,10 +294,10 @@ pub fn on_mouse_enter(
 /// Fires when the mouse leaves an element's boundary. Does not bubble.
 @target(javascript)
 pub fn on_mouse_leave(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn() -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn() -> message,
+) -> Runtime(model, message) {
   setup_simple_event(selector, "mouseleave", fn() {
     client.send_message(runtime, handler())
   })
@@ -309,10 +309,10 @@ pub fn on_mouse_leave(
 /// throttling for expensive operations.
 @target(javascript)
 pub fn on_mouse_move(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(Int, Int) -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn(Int, Int) -> message,
+) -> Runtime(model, message) {
   setup_coordinate_event(selector, "mousemove", fn(x, y) {
     client.send_message(runtime, handler(x, y))
   })
@@ -323,10 +323,10 @@ pub fn on_mouse_move(
 /// relative to the viewport.
 @target(javascript)
 pub fn on_mouse_up(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(Int, Int) -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn(Int, Int) -> message,
+) -> Runtime(model, message) {
   setup_coordinate_event(selector, "mouseup", fn(x, y) {
     client.send_message(runtime, handler(x, y))
   })
@@ -336,10 +336,10 @@ pub fn on_mouse_up(
 /// Fires when text is pasted from the clipboard.
 @target(javascript)
 pub fn on_paste(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn() -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn() -> message,
+) -> Runtime(model, message) {
   setup_simple_event(selector, "paste", fn() {
     client.send_message(runtime, handler())
   })
@@ -350,10 +350,10 @@ pub fn on_paste(
 /// coordinates (x, y). Pointer events unify mouse, touch, and pen input.
 @target(javascript)
 pub fn on_pointer_down(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(Int, Int) -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn(Int, Int) -> message,
+) -> Runtime(model, message) {
   setup_coordinate_event(selector, "pointerdown", fn(x, y) {
     client.send_message(runtime, handler(x, y))
   })
@@ -365,10 +365,10 @@ pub fn on_pointer_down(
 /// input.
 @target(javascript)
 pub fn on_pointer_move(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(Int, Int) -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn(Int, Int) -> message,
+) -> Runtime(model, message) {
   setup_coordinate_event(selector, "pointermove", fn(x, y) {
     client.send_message(runtime, handler(x, y))
   })
@@ -379,10 +379,10 @@ pub fn on_pointer_move(
 /// coordinates (x, y). Pointer events unify mouse, touch, and pen input.
 @target(javascript)
 pub fn on_pointer_up(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(Int, Int) -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn(Int, Int) -> message,
+) -> Runtime(model, message) {
   setup_coordinate_event(selector, "pointerup", fn(x, y) {
     client.send_message(runtime, handler(x, y))
   })
@@ -393,10 +393,10 @@ pub fn on_pointer_up(
 /// "window".
 @target(javascript)
 pub fn on_resize(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn() -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn() -> message,
+) -> Runtime(model, message) {
   setup_simple_event(selector, "resize", fn() {
     client.send_message(runtime, handler())
   })
@@ -406,10 +406,10 @@ pub fn on_resize(
 /// Fires when an element's scroll position changes.
 @target(javascript)
 pub fn on_scroll(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn() -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn() -> message,
+) -> Runtime(model, message) {
   setup_simple_event(selector, "scroll", fn() {
     client.send_message(runtime, handler())
   })
@@ -420,10 +420,10 @@ pub fn on_scroll(
 /// submission behavior automatically.
 @target(javascript)
 pub fn on_submit(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn() -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn() -> message,
+) -> Runtime(model, message) {
   setup_simple_event_prevent_default(selector, "submit", fn() {
     client.send_message(runtime, handler())
   })
@@ -433,10 +433,10 @@ pub fn on_submit(
 /// Fires when all touches are removed from the screen.
 @target(javascript)
 pub fn on_touch_end(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn() -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn() -> message,
+) -> Runtime(model, message) {
   setup_simple_event(selector, "touchend", fn() {
     client.send_message(runtime, handler())
   })
@@ -447,10 +447,10 @@ pub fn on_touch_end(
 /// touch coordinates (x, y). Note: This can fire very frequently.
 @target(javascript)
 pub fn on_touch_move(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(Int, Int) -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn(Int, Int) -> message,
+) -> Runtime(model, message) {
   setup_coordinate_event(selector, "touchmove", fn(x, y) {
     client.send_message(runtime, handler(x, y))
   })
@@ -461,10 +461,10 @@ pub fn on_touch_move(
 /// coordinates (x, y).
 @target(javascript)
 pub fn on_touch_start(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(Int, Int) -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn(Int, Int) -> message,
+) -> Runtime(model, message) {
   setup_coordinate_event(selector, "touchstart", fn(x, y) {
     client.send_message(runtime, handler(x, y))
   })
@@ -475,10 +475,10 @@ pub fn on_touch_start(
 /// delta_y) indicating scroll direction and amount.
 @target(javascript)
 pub fn on_wheel(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(Float, Float) -> msg,
-) -> Runtime(model, msg) {
+  handler handler: fn(Float, Float) -> message,
+) -> Runtime(model, message) {
   setup_wheel_event(selector, fn(delta_x, delta_y) {
     client.send_message(runtime, handler(delta_x, delta_y))
   })

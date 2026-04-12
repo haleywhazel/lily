@@ -1,0 +1,8 @@
+{
+  "name": "lily",
+  "private": true,
+  "description": "JavaScript test dependencies for Lily",
+  "devDependencies": {
+    "jsdom": "^25.0.0"
+  }
+}

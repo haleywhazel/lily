@@ -14,6 +14,8 @@
 // EXPORT FUNCTIONS
 // =============================================================================
 
+import { Some } from "../../gleam_stdlib/gleam/option.mjs";
+
 /** Create server with closure-scoped mutable state */
 export function createServer(
   initialState,
@@ -43,7 +45,7 @@ export function createServer(
 
     /** Set the message hook */
     setHook(hook) {
-      state = { ...state, on_message_hook: { tag: "Some", 0: hook } };
+      state = { ...state, on_message_hook: new Some(hook) };
     },
   };
 }

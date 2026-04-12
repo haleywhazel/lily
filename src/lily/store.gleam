@@ -16,14 +16,14 @@
 ////   Model(count: Int, user: String)
 //// }
 ////
-//// pub type Msg {
+//// pub type Message {
 ////   Increment
 ////   Decrement
 ////   SetUser(String)
 //// }
 ////
-//// pub fn update(model: Model, msg: Msg) -> Model {
-////   case msg {
+//// pub fn update(model: Model, message: Message) -> Model {
+////   case message {
 ////     Increment -> Model(..model, count: model.count + 1)
 ////     Decrement -> Model(..model, count: model.count - 1)
 ////     SetUser(name) -> Model(..model, user: name)

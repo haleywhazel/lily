@@ -1,11 +1,12 @@
 //// HTTP/SSE transport for client-server communication. Uses Server-Sent
-//// Events (SSE) for server→client and POST for client→server. Useful when
+//// Events (SSE) for server to client and POST for client to server. Useful when
 //// WebSocket connections are blocked by corporate firewalls.
 ////
 //// The transport uses Server-Sent Events (SSE) via the EventSource API for
-//// server→client messages and POST requests with JSON payloads for
-//// client→server messages. Connection status is tracked via SSE `onopen` and
-//// `onerror` events, and messages persist in localStorage while disconnected
+//// server to client messages and POST requests with JSON payloads for
+//// client to server messages. Connection status is tracked via SSE `onopen`
+//// and `onerror` events, and messages persist in localStorage while
+//// disconnected.
 ////
 //// ```gleam
 //// import lily/client
@@ -45,9 +46,9 @@ import lily/transport.{type Connector, type Handler}
 // PUBLIC TYPES
 // =============================================================================
 
+@target(javascript)
 /// Configuration for HTTP transport. Requires both a POST URL (for client to
 /// server messages) and an SSE events URL (for server to client messages).
-@target(javascript)
 pub opaque type Config {
   Config(post_url: String, events_url: String)
 }
@@ -56,6 +57,7 @@ pub opaque type Config {
 // PUBLIC FUNCTIONS
 // =============================================================================
 
+@target(javascript)
 /// Create a new HTTP transport configuration. The `post_url` is used for
 /// sending messages to the server (client to server), and the `events_url` is
 /// used for receiving Server-Sent Events (server to client).
@@ -68,11 +70,14 @@ pub opaque type Config {
 ///   events_url: "/api/events",
 /// )
 /// ```
-@target(javascript)
-pub fn config(post_url post_url: String, events_url events_url: String) -> Config {
+pub fn config(
+  post_url post_url: String,
+  events_url events_url: String,
+) -> Config {
   Config(post_url: post_url, events_url: events_url)
 }
 
+@target(javascript)
 /// Returns a connector function that establishes an HTTP/SSE connection. This
 /// connector can be passed to `client.connect`.
 ///
@@ -88,10 +93,10 @@ pub fn config(post_url post_url: String, events_url events_url: String) -> Confi
 ///   serialiser: my_serialiser,
 /// )
 /// ```
-@target(javascript)
 pub fn connect(config: Config) -> Connector {
   fn(handler: Handler) {
-    let transport_handle = http_connect(config.post_url, config.events_url, handler)
+    let transport_handle =
+      http_connect(config.post_url, config.events_url, handler)
     transport.new(
       send: fn(text) { http_send(transport_handle, text) },
       close: fn() { http_close(transport_handle) },
@@ -129,6 +134,6 @@ fn http_send(_handle: HttpHandle, _text: String) -> Nil {
   Nil
 }
 
-/// Opaque handle to the HTTP/SSE connection state returned by the FFI.
 @target(javascript)
+/// Opaque handle to the HTTP/SSE connection state returned by the FFI.
 type HttpHandle

@@ -20,6 +20,8 @@
 // CONSTRUCTOR REGISTRY
 // =============================================================================
 
+import { Ok, Error, NonEmpty, Empty } from "../gleam.mjs";
+
 /**
  * Maps constructor name → constructor function.
  * Built automatically during encode and model walk.
@@ -79,22 +81,34 @@ export function autoEncode(value) {
 
 /**
  * Automatically decode JSON to a Gleam value using the constructor registry.
- * Returns the decoded value on success, throws an error on failure.
+ * Returns Ok(value) on success, Error(undefined) on failure.
+ * This is the exported function used by decode.new_primitive_decoder.
  */
 export function autoDecode(json) {
+  try {
+    return new Ok(autoDecodeInner(json));
+  } catch (_e) {
+    return new Error(undefined);
+  }
+}
+
+/**
+ * Inner recursive decode — returns raw value or throws on unknown constructor.
+ */
+function autoDecodeInner(json) {
   // Primitives
   if (json === null) return undefined; // Gleam's Nil
   if (typeof json === "boolean") return json;
   if (typeof json === "string") return json;
   if (typeof json === "number") return json;
 
-  // Array → List
+  // Array → Gleam List
   if (Array.isArray(json)) {
-    // Build Gleam list from right to left
-    let result = undefined; // Empty list
+    // Build Gleam list from right to left using proper NonEmpty/Empty instances
+    let result = new Empty();
     for (let i = json.length - 1; i >= 0; i--) {
-      const decodedItem = autoDecode(json[i]);
-      result = { head: decodedItem, tail: result };
+      const decodedItem = autoDecodeInner(json[i]);
+      result = new NonEmpty(decodedItem, result);
     }
     return result;
   }
@@ -105,7 +119,7 @@ export function autoDecode(json) {
     const ctor = constructorRegistry.get(tag);
 
     if (!ctor) {
-      throw new Error(
+      throw new globalThis.Error(
         `Unknown constructor: ${tag}. Did you forget to call transport.register()?`,
       );
     }
@@ -114,7 +128,7 @@ export function autoDecode(json) {
     const fields = [];
     let fieldIndex = 0;
     while (String(fieldIndex) in json) {
-      fields.push(autoDecode(json[String(fieldIndex)]));
+      fields.push(autoDecodeInner(json[String(fieldIndex)]));
       fieldIndex++;
     }
 

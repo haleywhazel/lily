@@ -21,7 +21,7 @@
 //// import lustre/element/html
 ////
 //// // View function
-//// fn counter_view(count: Int) -> Element(Msg) {
+//// fn counter_view(count: Int) -> Element(Message) {
 ////   html.div([], [
 ////     html.p([], [element.text("Count: " <> int.to_string(count))]),
 ////     html.button([event.on_click(Increment)], [element.text("+")]),
@@ -33,7 +33,7 @@
 ////   |> component.mount("#app", to_html: element.to_string, view: counter_view)
 ////   |> component.simple(
 ////     selector: "#counter",
-////     slice: fn(m) { m.count },
+////     slice: fn(model) { model.count },
 ////     render: fn(count) { html.p([], [element.text(int.to_string(count))]) },
 ////   )
 ////   |> client.start
@@ -86,7 +86,7 @@ pub type CompareStrategy {
 /// create components instead. The `html` type parameter is user-provided and
 /// can be any type that represents HTML markup.
 @target(javascript)
-pub opaque type Component(model, msg, html) {
+pub opaque type Component(model, message, html) {
   /// Static content that renders once with no subscription to model changes
   Static(content: html)
 
@@ -121,10 +121,7 @@ pub opaque type Component(model, msg, html) {
   ///   })
   /// }
   /// ```
-  Each(
-    produce: fn(model) -> List(#(String, html)),
-    compare: CompareStrategy,
-  )
+  Each(produce: fn(model) -> List(#(String, html)), compare: CompareStrategy)
 
   /// Keyed list with patch-based rendering for each child
   ///
@@ -149,14 +146,14 @@ pub opaque type Component(model, msg, html) {
   )
 
   /// Container for multiple components (no wrapper element created)
-  Fragment(children: List(Component(model, msg, html)))
+  Fragment(children: List(Component(model, message, html)))
 
   /// Wraps a component to disable it when the connection status is `False`.
   /// The `connected` function extracts connection status from the model.
   /// When disconnected, event handlers are disabled and accessibility
   /// attributes are added.
   RequireConnection(
-    inner: Component(model, msg, html),
+    inner: Component(model, message, html),
     connected: fn(model) -> Bool,
   )
 }
@@ -216,7 +213,7 @@ pub fn each(
   slice slice: fn(model) -> List(item),
   key key: fn(item) -> key,
   render render: fn(item) -> html,
-) -> Component(model, msg, html) {
+) -> Component(model, message, html) {
   Each(
     produce: fn(model) {
       list.map(slice(model), fn(item) {
@@ -265,7 +262,7 @@ pub fn each_live(
   key key: fn(item) -> key,
   initial initial: fn(item) -> html,
   patch patch: fn(item) -> List(Patch),
-) -> Component(model, msg, html) {
+) -> Component(model, message, html) {
   EachLive(
     keys: fn(model) {
       list.map(slice(model), fn(item) { string.inspect(key(item)) })
@@ -291,18 +288,18 @@ pub fn each_live(
 /// ## Example
 ///
 /// ```gleam
-/// fn app() -> Component(Model, Msg, Element(Msg)) {
+/// fn app() -> Component(Model, Message, Element(Message)) {
 ///   component.fragment([
 ///     component.static(html.h1([], [html.text("My App")])),
 ///     component.simple(...),
 ///     component.each(...),
 ///   ])
-/// }
+///   }
 /// ```
 @target(javascript)
 pub fn fragment(
-  children: List(Component(model, msg, html)),
-) -> Component(model, msg, html) {
+  children: List(Component(model, message, html)),
+) -> Component(model, message, html) {
   Fragment(children)
 }
 
@@ -336,7 +333,7 @@ pub fn live(
   slice slice: fn(model) -> a,
   initial initial: html,
   patch patch: fn(a) -> List(Patch),
-) -> Component(model, msg, html) {
+) -> Component(model, message, html) {
   Live(
     slice: fn(model) { to_dynamic(slice(model)) },
     initial: initial,
@@ -365,11 +362,11 @@ pub fn live(
 /// ```
 @target(javascript)
 pub fn mount(
-  runtime: Runtime(model, msg),
+  runtime: Runtime(model, message),
   selector selector: String,
   to_html to_html: fn(html) -> String,
-  view view: fn(model) -> Component(model, msg, html),
-) -> Runtime(model, msg) {
+  view view: fn(model) -> Component(model, message, html),
+) -> Runtime(model, message) {
   // Clear any previous mount at this selector
   client.clear_component_cache(runtime, selector)
 
@@ -404,9 +401,9 @@ pub fn mount(
 /// ```
 @target(javascript)
 pub fn require_connection(
-  component: Component(model, msg, html),
+  component: Component(model, message, html),
   connected connected: fn(model) -> Bool,
-) -> Component(model, msg, html) {
+) -> Component(model, message, html) {
   RequireConnection(inner: component, connected: connected)
 }
 
@@ -430,7 +427,7 @@ pub fn require_connection(
 pub fn simple(
   slice slice: fn(model) -> a,
   render render: fn(a) -> html,
-) -> Component(model, msg, html) {
+) -> Component(model, message, html) {
   Simple(
     slice: fn(model) { to_dynamic(slice(model)) },
     view: fn(model) { render(slice(model)) },
@@ -447,7 +444,7 @@ pub fn simple(
 /// component.static(html.h1([], [html.text("My App")]))
 /// ```
 @target(javascript)
-pub fn static(content: html) -> Component(model, msg, html) {
+pub fn static(content: html) -> Component(model, message, html) {
   Static(content)
 }
 
@@ -471,8 +468,8 @@ pub fn static(content: html) -> Component(model, msg, html) {
 /// ```
 @target(javascript)
 pub fn structural(
-  component: Component(model, msg, html),
-) -> Component(model, msg, html) {
+  component: Component(model, message, html),
+) -> Component(model, message, html) {
   case component {
     Static(content) -> Static(content)
     Simple(slice, view, _) ->
@@ -484,8 +481,7 @@ pub fn structural(
         apply: apply,
         compare: StructuralEqual,
       )
-    Each(produce, _) ->
-      Each(produce: produce, compare: StructuralEqual)
+    Each(produce, _) -> Each(produce: produce, compare: StructuralEqual)
     EachLive(keys, initial, apply, _) ->
       EachLive(
         keys: keys,
@@ -506,7 +502,7 @@ pub fn structural(
 /// Get the model from the runtime
 @target(javascript)
 @external(javascript, "./component.ffi.mjs", "getModel")
-fn get_model(_runtime: Runtime(model, msg)) -> model {
+fn get_model(_runtime: Runtime(model, message)) -> model {
   // This will never run
   panic as "getModel is only available in JavaScript"
 }
@@ -516,12 +512,12 @@ fn get_model(_runtime: Runtime(model, msg)) -> model {
 @target(javascript)
 @external(javascript, "./component.ffi.mjs", "renderTree")
 fn render_tree(
-  _runtime: Runtime(model, msg),
+  _runtime: Runtime(model, message),
   _root_selector: String,
-  _component: Component(model, msg, html),
+  _component: Component(model, message, html),
   _model: model,
   _to_html: fn(html) -> String,
-  _store: Runtime(model, msg),
+  _store: Runtime(model, message),
   _depth: Int,
 ) -> Nil {
   Nil
