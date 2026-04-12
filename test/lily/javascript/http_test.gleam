@@ -10,7 +10,7 @@ import lily/client
 @target(javascript)
 import lily/store
 @target(javascript)
-import lily/test_fixtures.{type Model, type Message}
+import lily/test_fixtures.{type Message, type Model}
 @target(javascript)
 import lily/test_ref
 @target(javascript)
@@ -63,7 +63,11 @@ pub fn http_connect_creates_event_source_test() {
     )
     |> http.connect
   let _r =
-    client.connect(runtime, with: connector, serialiser: test_fixtures.custom_serialiser())
+    client.connect(
+      runtime,
+      with: connector,
+      serialiser: test_fixtures.custom_serialiser(),
+    )
   // An EventSource should have been created
   is_null(test_setup.get_last_event_source())
   |> should.be_false
@@ -81,7 +85,11 @@ pub fn http_connect_calls_on_reconnect_test() {
     transport.new(send: fn(_) { Nil }, close: fn() { Nil })
   }
   let _r =
-    client.connect(runtime, with: connector, serialiser: test_fixtures.custom_serialiser())
+    client.connect(
+      runtime,
+      with: connector,
+      serialiser: test_fixtures.custom_serialiser(),
+    )
   test_ref.get(reconnect_ref)
   |> should.be_true
 }
@@ -98,7 +106,11 @@ pub fn http_connect_calls_on_disconnect_test() {
     transport.new(send: fn(_) { Nil }, close: fn() { Nil })
   }
   let _r =
-    client.connect(runtime, with: connector, serialiser: test_fixtures.custom_serialiser())
+    client.connect(
+      runtime,
+      with: connector,
+      serialiser: test_fixtures.custom_serialiser(),
+    )
   test_ref.get(disconnect_ref)
   |> should.be_true
 }
@@ -110,10 +122,7 @@ pub fn http_connect_receives_messages_test() {
   let runtime = new_runtime()
   let received_ref = test_ref.new("")
   let connector = fn(handler: transport.Handler) {
-    transport.new(
-      send: fn(_) { Nil },
-      close: fn() { Nil },
-    )
+    transport.new(send: fn(_) { Nil }, close: fn() { Nil })
     |> fn(t) {
       handler.on_receive("test-message")
       test_ref.set(received_ref, "received")
@@ -121,7 +130,11 @@ pub fn http_connect_receives_messages_test() {
     }
   }
   let _r =
-    client.connect(runtime, with: connector, serialiser: test_fixtures.custom_serialiser())
+    client.connect(
+      runtime,
+      with: connector,
+      serialiser: test_fixtures.custom_serialiser(),
+    )
   test_ref.get(received_ref)
   |> should.equal("received")
 }
@@ -138,7 +151,11 @@ pub fn http_connect_via_eventsource_open_fires_reconnect_test() {
     )
     |> http.connect
   let _r =
-    client.connect(runtime, with: connector, serialiser: test_fixtures.custom_serialiser())
+    client.connect(
+      runtime,
+      with: connector,
+      serialiser: test_fixtures.custom_serialiser(),
+    )
   let es = test_setup.get_last_event_source()
   // Trigger SSE open — should fire on_reconnect
   test_setup.trigger_event_source_open(es)
@@ -158,7 +175,11 @@ pub fn http_connect_via_eventsource_error_fires_disconnect_test() {
     )
     |> http.connect
   let _r =
-    client.connect(runtime, with: connector, serialiser: test_fixtures.custom_serialiser())
+    client.connect(
+      runtime,
+      with: connector,
+      serialiser: test_fixtures.custom_serialiser(),
+    )
   let es = test_setup.get_last_event_source()
   // Trigger SSE error — should fire on_disconnect
   test_setup.trigger_event_source_error(es)
@@ -182,7 +203,11 @@ pub fn http_send_when_disconnected_queues_test() {
     )
     |> http.connect
   let _r =
-    client.connect(runtime, with: connector, serialiser: test_fixtures.custom_serialiser())
+    client.connect(
+      runtime,
+      with: connector,
+      serialiser: test_fixtures.custom_serialiser(),
+    )
   // SSE not opened — isConnected is False — message should queue
   client.dispatch(runtime)(test_fixtures.Increment)
   let queued = read_local_storage("lily_http_pending")
@@ -213,7 +238,11 @@ pub fn http_close_shuts_down_event_source_test() {
     t
   }
   let _r =
-    client.connect(runtime, with: connector, serialiser: test_fixtures.custom_serialiser())
+    client.connect(
+      runtime,
+      with: connector,
+      serialiser: test_fixtures.custom_serialiser(),
+    )
   let es = test_setup.get_last_event_source()
   // Get the transport and close it
   let t = test_ref.get(transport_ref)

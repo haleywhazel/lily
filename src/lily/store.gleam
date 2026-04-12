@@ -112,7 +112,10 @@ pub fn unsubscribe(
 /// for batch rendering, when messages and updates occur much faster than the
 /// render refresh rate.
 @internal
-pub fn apply(store: Store(model, message), message message: message) -> Store(model, message) {
+pub fn apply(
+  store: Store(model, message),
+  message message: message,
+) -> Store(model, message) {
   let new_model = store.update(store.model, message)
   Store(..store, model: new_model)
 }

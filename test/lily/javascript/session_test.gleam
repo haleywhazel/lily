@@ -14,7 +14,7 @@ import lily/session
 @target(javascript)
 import lily/store
 @target(javascript)
-import lily/test_fixtures.{type Model, type Message}
+import lily/test_fixtures.{type Message, type Model}
 @target(javascript)
 import lily/test_setup
 
@@ -28,8 +28,8 @@ fn new_runtime() -> client.Runtime(Model, Message) {
   |> client.start
 }
 
-/// Persistence that tracks the `name` field in localStorage.
 @target(javascript)
+/// Persistence that tracks the `name` field in localStorage.
 fn name_persistence() -> session.Persistence(Model) {
   session.persistence()
   |> session.field(

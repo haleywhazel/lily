@@ -5,7 +5,7 @@
 import gleeunit/should
 @target(javascript)
 import lily/test_fixtures.{
-  type Model, type Message, Decrement, Increment, Noop, Reset, SetName,
+  type Message, type Model, Decrement, Increment, Noop, Reset, SetName,
 }
 @target(javascript)
 import lily/transport.{
@@ -22,14 +22,20 @@ fn ser() {
 }
 
 @target(javascript)
-fn roundtrip_msg(msg: Message) -> Result(transport.Protocol(Model, Message), Nil) {
+fn roundtrip_msg(
+  msg: Message,
+) -> Result(transport.Protocol(Model, Message), Nil) {
   let encoded = transport.encode(ClientMessage(payload: msg), serialiser: ser())
   transport.decode(encoded, serialiser: ser())
 }
 
 @target(javascript)
-fn roundtrip_snapshot(model: Model, seq: Int) -> Result(transport.Protocol(Model, Message), Nil) {
-  let encoded = transport.encode(Snapshot(sequence: seq, state: model), serialiser: ser())
+fn roundtrip_snapshot(
+  model: Model,
+  seq: Int,
+) -> Result(transport.Protocol(Model, Message), Nil) {
+  let encoded =
+    transport.encode(Snapshot(sequence: seq, state: model), serialiser: ser())
   transport.decode(encoded, serialiser: ser())
 }
 
@@ -153,7 +159,10 @@ pub fn auto_js_roundtrip_nested_test() {
       decode_model: transport.automatic().decode_model,
     )
   let encoded =
-    transport.encode(Snapshot(sequence: 1, state: nested), serialiser: nested_ser)
+    transport.encode(
+      Snapshot(sequence: 1, state: nested),
+      serialiser: nested_ser,
+    )
   transport.decode(encoded, serialiser: nested_ser)
   |> should.equal(Ok(Snapshot(sequence: 1, state: nested)))
 }
@@ -169,7 +178,10 @@ pub fn auto_js_roundtrip_list_field_test() {
       decode_model: transport.automatic().decode_model,
     )
   let encoded =
-    transport.encode(Snapshot(sequence: 0, state: with_list), serialiser: list_ser)
+    transport.encode(
+      Snapshot(sequence: 0, state: with_list),
+      serialiser: list_ser,
+    )
   transport.decode(encoded, serialiser: list_ser)
   |> should.equal(Ok(Snapshot(sequence: 0, state: with_list)))
 }

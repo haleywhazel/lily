@@ -10,9 +10,7 @@ import lily/server
 @target(erlang)
 import lily/store
 @target(erlang)
-import lily/test_fixtures.{
-  type Model, type Message, Increment, SetName,
-}
+import lily/test_fixtures.{type Message, type Model, Increment, SetName}
 @target(erlang)
 import lily/transport
 
@@ -32,8 +30,8 @@ fn new_server() -> server.Server(Model, Message) {
   srv
 }
 
-/// Connect a mock client that captures received messages in a Subject.
 @target(erlang)
+/// Connect a mock client that captures received messages in a Subject.
 fn connect_client(
   srv: server.Server(Model, Message),
   client_id: String,
@@ -43,20 +41,20 @@ fn connect_client(
   subj
 }
 
-/// Receive one message from Subject with a 200ms timeout.
 @target(erlang)
+/// Receive one message from Subject with a 200ms timeout.
 fn recv(subj: process.Subject(String)) -> Result(String, Nil) {
   process.receive(subj, within: 200)
 }
 
-/// Encode a client protocol message.
 @target(erlang)
+/// Encode a client protocol message.
 fn encode_client(msg: Message) -> String {
   transport.encode(transport.ClientMessage(payload: msg), serialiser: ser())
 }
 
-/// Encode a resync request.
 @target(erlang)
+/// Encode a resync request.
 fn encode_resync(seq: Int) -> String {
   transport.encode(transport.Resync(after_sequence: seq), serialiser: ser())
 }
@@ -205,9 +203,7 @@ pub fn server_multiple_clients_broadcast_test() {
   case recv(s2) {
     Ok(msg) -> {
       transport.decode(msg, serialiser: ser())
-      |> should.equal(
-        Ok(transport.Acknowledge(sequence: 1)),
-      )
+      |> should.equal(Ok(transport.Acknowledge(sequence: 1)))
     }
     Error(_) -> should.fail()
   }
@@ -226,12 +222,7 @@ pub fn server_resync_sends_snapshot_test() {
     Ok(msg) -> {
       transport.decode(msg, serialiser: ser())
       |> should.equal(
-        Ok(
-          transport.Snapshot(
-            sequence: 0,
-            state: test_fixtures.initial_model(),
-          ),
-        ),
+        Ok(transport.Snapshot(sequence: 0, state: test_fixtures.initial_model())),
       )
     }
     Error(_) -> should.fail()
@@ -310,9 +301,7 @@ pub fn server_on_message_hook_receives_updated_model_test() {
   server.incoming(srv, client_id: "c1", text: encode_client(Increment))
   let _ = recv(s1)
   process.receive(model_subj, within: 200)
-  |> should.equal(
-    Ok(test_fixtures.Model(count: 1, name: "", connected: False)),
-  )
+  |> should.equal(Ok(test_fixtures.Model(count: 1, name: "", connected: False)))
 }
 
 @target(erlang)
@@ -365,12 +354,7 @@ pub fn server_sequence_starts_at_zero_test() {
     Ok(msg) -> {
       transport.decode(msg, serialiser: ser())
       |> should.equal(
-        Ok(
-          transport.Snapshot(
-            sequence: 0,
-            state: test_fixtures.initial_model(),
-          ),
-        ),
+        Ok(transport.Snapshot(sequence: 0, state: test_fixtures.initial_model())),
       )
     }
     Error(_) -> should.fail()

@@ -4,9 +4,7 @@
 @target(erlang)
 import gleeunit/should
 @target(erlang)
-import lily/test_fixtures.{
-  Decrement, Increment, Noop, Reset, SetName,
-}
+import lily/test_fixtures.{Decrement, Increment, Noop, Reset, SetName}
 @target(erlang)
 import lily/transport.{
   Acknowledge, ClientMessage, Resync, ServerMessage, Snapshot,
@@ -22,14 +20,20 @@ fn ser() {
 }
 
 @target(erlang)
-fn roundtrip_msg(msg: test_fixtures.Message) -> Result(transport.Protocol(test_fixtures.Model, test_fixtures.Message), Nil) {
+fn roundtrip_msg(
+  msg: test_fixtures.Message,
+) -> Result(transport.Protocol(test_fixtures.Model, test_fixtures.Message), Nil) {
   let encoded = transport.encode(ClientMessage(payload: msg), serialiser: ser())
   transport.decode(encoded, serialiser: ser())
 }
 
 @target(erlang)
-fn roundtrip_snapshot(model: test_fixtures.Model, seq: Int) -> Result(transport.Protocol(test_fixtures.Model, test_fixtures.Message), Nil) {
-  let encoded = transport.encode(Snapshot(sequence: seq, state: model), serialiser: ser())
+fn roundtrip_snapshot(
+  model: test_fixtures.Model,
+  seq: Int,
+) -> Result(transport.Protocol(test_fixtures.Model, test_fixtures.Message), Nil) {
+  let encoded =
+    transport.encode(Snapshot(sequence: seq, state: model), serialiser: ser())
   transport.decode(encoded, serialiser: ser())
 }
 
@@ -143,9 +147,11 @@ pub fn auto_erl_roundtrip_nested_test() {
       decode_model: transport.automatic().decode_model,
     )
   let encoded =
-    transport.encode(Snapshot(sequence: 1, state: nested), serialiser: nested_ser)
-  let result =
-    transport.decode(encoded, serialiser: nested_ser)
+    transport.encode(
+      Snapshot(sequence: 1, state: nested),
+      serialiser: nested_ser,
+    )
+  let result = transport.decode(encoded, serialiser: nested_ser)
   result
   |> should.equal(Ok(Snapshot(sequence: 1, state: nested)))
 }
@@ -161,7 +167,10 @@ pub fn auto_erl_roundtrip_list_field_test() {
       decode_model: transport.automatic().decode_model,
     )
   let encoded =
-    transport.encode(Snapshot(sequence: 0, state: with_list), serialiser: list_ser)
+    transport.encode(
+      Snapshot(sequence: 0, state: with_list),
+      serialiser: list_ser,
+    )
   transport.decode(encoded, serialiser: list_ser)
   |> should.equal(Ok(Snapshot(sequence: 0, state: with_list)))
 }

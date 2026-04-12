@@ -3,10 +3,10 @@
 
 import gleeunit/should
 import lily/test_fixtures.{Decrement, Increment, SetName}
+import lily/test_ref
 import lily/transport.{
   Acknowledge, ClientMessage, Resync, ServerMessage, Snapshot,
 }
-import lily/test_ref
 
 // =============================================================================
 // HELPERS
@@ -21,7 +21,8 @@ fn ser() {
 // =============================================================================
 
 pub fn encode_client_message_test() {
-  let result = transport.encode(ClientMessage(payload: Increment), serialiser: ser())
+  let result =
+    transport.encode(ClientMessage(payload: Increment), serialiser: ser())
   result
   |> should.equal(
     "{\"type\":\"client_message\",\"payload\":{\"tag\":\"Increment\"}}",
@@ -115,7 +116,8 @@ pub fn decode_client_message_with_fields_test() {
 
 pub fn decode_snapshot_with_complex_model_test() {
   let model = test_fixtures.Model(count: 42, name: "Eve", connected: True)
-  let encoded = transport.encode(Snapshot(sequence: 10, state: model), serialiser: ser())
+  let encoded =
+    transport.encode(Snapshot(sequence: 10, state: model), serialiser: ser())
   let result = transport.decode(encoded, serialiser: ser())
   result
   |> should.equal(Ok(Snapshot(sequence: 10, state: model)))
@@ -192,7 +194,8 @@ pub fn transport_new_creates_transport_test() {
 
 pub fn transport_send_calls_send_function_test() {
   let ref = test_ref.new("")
-  let t = transport.new(send: fn(msg) { test_ref.set(ref, msg) }, close: fn() { Nil })
+  let t =
+    transport.new(send: fn(msg) { test_ref.set(ref, msg) }, close: fn() { Nil })
   transport.send(t, "hello")
   test_ref.get(ref)
   |> should.equal("hello")
@@ -200,7 +203,8 @@ pub fn transport_send_calls_send_function_test() {
 
 pub fn transport_close_calls_close_function_test() {
   let ref = test_ref.new(False)
-  let t = transport.new(send: fn(_) { Nil }, close: fn() { test_ref.set(ref, True) })
+  let t =
+    transport.new(send: fn(_) { Nil }, close: fn() { test_ref.set(ref, True) })
   transport.close(t)
   test_ref.get(ref)
   |> should.be_true

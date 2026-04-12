@@ -29,8 +29,8 @@ import lily/client.{type Runtime}
 // PUBLIC TYPES
 // =============================================================================
 
-/// Configuration for a single persisted field within the session.
 @target(javascript)
+/// Configuration for a single persisted field within the session.
 pub opaque type Field(session) {
   Field(
     key: String,
@@ -39,10 +39,10 @@ pub opaque type Field(session) {
   )
 }
 
+@target(javascript)
 /// Complete session persistence configuration. Build using
 /// [`session.persistence`](#persistence) and add fields with
 /// [`session.field`](#field).
-@target(javascript)
 pub opaque type Persistence(session) {
   Persistence(fields: List(Field(session)))
 }
@@ -51,6 +51,7 @@ pub opaque type Persistence(session) {
 // PUBLIC FUNCTIONS
 // =============================================================================
 
+@target(javascript)
 /// Attach session persistence to the runtime. Reads `localStorage` on start to
 /// hydrate the initial model, then writes changes to `localStorage` after each
 /// update. The `get` and `set` functions extract and inject the session slice
@@ -82,7 +83,6 @@ pub opaque type Persistence(session) {
 /// )
 /// |> client.start
 /// ```
-@target(javascript)
 pub fn attach(
   runtime: Runtime(model, message),
   persistence persistence: Persistence(session),
@@ -102,6 +102,7 @@ pub fn attach(
   runtime
 }
 
+@target(javascript)
 /// Clear all session data from `localStorage`. Removes all keys with the
 /// `lily_session_` prefix.
 ///
@@ -120,11 +121,11 @@ pub fn attach(
 ///   }
 /// }
 /// ```
-@target(javascript)
 pub fn clear() -> Nil {
   clear_session(storage_prefix())
 }
 
+@target(javascript)
 /// Add a field to the session persistence configuration. Each field represents
 /// a single value stored in `localStorage` under `lily_session_{key}`.
 ///
@@ -143,7 +144,6 @@ pub fn clear() -> Nil {
 ///   decoder: theme_decoder,
 /// )
 /// ```
-@target(javascript)
 pub fn field(
   persistence: Persistence(session),
   key key: String,
@@ -169,6 +169,7 @@ pub fn field(
   Persistence(fields: [field, ..fields])
 }
 
+@target(javascript)
 /// Create an empty session persistence configuration. Add fields using
 /// [`session.field`](#field).
 ///
@@ -177,7 +178,6 @@ pub fn field(
 /// ```gleam
 /// let persistence = session.persistence()
 /// ```
-@target(javascript)
 pub fn persistence() -> Persistence(session) {
   Persistence(fields: [])
 }
@@ -186,8 +186,8 @@ pub fn persistence() -> Persistence(session) {
 // PRIVATE FUNCTIONS
 // =============================================================================
 
-/// Hydrate session from localStorage
 @target(javascript)
+/// Hydrate session from localStorage
 fn hydrate_session(
   persistence: Persistence(session),
   initial: session,
@@ -208,8 +208,8 @@ fn hydrate_session(
   })
 }
 
-/// Get the storage key prefix
 @target(javascript)
+/// Get the storage key prefix
 fn storage_prefix() -> String {
   "lily_session_"
 }
@@ -218,22 +218,22 @@ fn storage_prefix() -> String {
 // PRIVATE FFI
 // =============================================================================
 
-/// Clear session from localStorage
 @target(javascript)
+/// Clear session from localStorage
 @external(javascript, "./session.ffi.mjs", "clearSession")
 fn clear_session(_prefix: String) -> Nil {
   Nil
 }
 
-/// Read a field from localStorage
 @target(javascript)
+/// Read a field from localStorage
 @external(javascript, "./session.ffi.mjs", "readField")
 fn read_field(_prefix: String, _key: String) -> Result(Json, Nil) {
   Error(Nil)
 }
 
-/// Store session config on runtime
 @target(javascript)
+/// Store session config on runtime
 @external(javascript, "./session.ffi.mjs", "setSessionConfig")
 fn set_session_config(
   _handle: client.RuntimeHandle,

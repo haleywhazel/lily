@@ -65,6 +65,7 @@ import lily/client.{type Runtime}
 // PUBLIC TYPES
 // =============================================================================
 
+@target(javascript)
 /// Comparison strategy for detecting slice changes. By default, the comparison
 /// strategy uses reference equality which is more efficient. However,
 /// reference equality can cause unnecessary re-renders for some data types if
@@ -73,7 +74,6 @@ import lily/client.{type Runtime}
 /// behaviour unless the slice listened to is a `List`, `Tuple`, or a record.
 /// See [`component.structural`](#structural) for specifying structural
 /// reference.
-@target(javascript)
 pub type CompareStrategy {
   /// Reference equality (JavaScript `===`, O(1)), default
   ReferenceEqual
@@ -81,11 +81,11 @@ pub type CompareStrategy {
   StructuralEqual
 }
 
+@target(javascript)
 /// Component is the core type representing renderable content in Lily. The
 /// constructors for Component is kept opaque – use the associated functions to
 /// create components instead. The `html` type parameter is user-provided and
 /// can be any type that represents HTML markup.
-@target(javascript)
 pub opaque type Component(model, message, html) {
   /// Static content that renders once with no subscription to model changes
   Static(content: html)
@@ -158,13 +158,13 @@ pub opaque type Component(model, message, html) {
   )
 }
 
+@target(javascript)
 /// Patches are DOM updates to apply to a component, avoiding a full
 /// re-render used for [`component.live`](#live) and
 /// [`component.each_live`](#each_live).The `target` field is a CSS selector
 /// relative to the component's root element, with an empty string provided
 /// if the component's root element is itself. Patches are scoped to their
 /// component, preventing cross-component interference.
-@target(javascript)
 pub type Patch {
   /// Remove an HTML attribute
   RemoveAttribute(target: String, name: String)
@@ -180,6 +180,7 @@ pub type Patch {
 // PUBLIC FUNCTIONS
 // =============================================================================
 
+@target(javascript)
 /// Manages a dynamic list of items with add/remove/reorder reconciliation.
 /// Each item is identified by a unique key. When the list changes, only
 /// the changed items are updated. [`component.each`](#each) differs from
@@ -208,7 +209,6 @@ pub type Patch {
 ///   }
 /// )
 /// ```
-@target(javascript)
 pub fn each(
   slice slice: fn(model) -> List(item),
   key key: fn(item) -> key,
@@ -224,6 +224,7 @@ pub fn each(
   )
 }
 
+@target(javascript)
 /// Manages a dynamic list of items with add/remove/reorder reconciliation.
 /// Each item is identified by a unique key. When the list changes, only
 /// the changed items are updated. [`component.each_live`](#each_live) differs
@@ -256,7 +257,6 @@ pub fn each(
 ///   }
 /// )
 /// ```
-@target(javascript)
 pub fn each_live(
   slice slice: fn(model) -> List(item),
   key key: fn(item) -> key,
@@ -281,6 +281,7 @@ pub fn each_live(
   )
 }
 
+@target(javascript)
 /// Fragments allow you to return multiple components from a single function.
 /// The children are rendered in order and concatenated into the parent's HTML.
 /// This is similar to Lustre's [`element.fragment`][https://hexdocs.pm/lustre/lustre/element.html#fragment].
@@ -296,13 +297,13 @@ pub fn each_live(
 ///   ])
 ///   }
 /// ```
-@target(javascript)
 pub fn fragment(
   children: List(Component(model, message, html)),
 ) -> Component(model, message, html) {
   Fragment(children)
 }
 
+@target(javascript)
 /// Live components render an initial HTML structure once, then apply DOM
 /// patches on subsequent updates. This is much faster than innerHTML,
 /// replacement for frequent updates (e.g., drag-and-drop, animations,
@@ -328,7 +329,6 @@ pub fn fragment(
 ///   }
 /// )
 /// ```
-@target(javascript)
 pub fn live(
   slice slice: fn(model) -> a,
   initial initial: html,
@@ -342,6 +342,7 @@ pub fn live(
   )
 }
 
+@target(javascript)
 /// This is the entry point for rendering, mounting a component tree to a
 /// specific DOM element.. It creates a subscription to the store and renders
 /// the entire component tree whenever the model changes.
@@ -360,7 +361,6 @@ pub fn live(
 /// runtime
 /// |> component.mount(selector: "#app", to_html: element.to_string, view: app)
 /// ```
-@target(javascript)
 pub fn mount(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -378,6 +378,7 @@ pub fn mount(
   runtime
 }
 
+@target(javascript)
 /// When you want to disable a component when the transport is disconnected,
 /// this allows you to do that. The `connected` function extracts the
 /// connection status from the model. When it returns `False`, Lily adds
@@ -399,7 +400,6 @@ pub fn mount(
 /// )
 /// |> component.require_connection(fn(model) { model.connected })
 /// ```
-@target(javascript)
 pub fn require_connection(
   component: Component(model, message, html),
   connected connected: fn(model) -> Bool,
@@ -407,6 +407,7 @@ pub fn require_connection(
   RequireConnection(inner: component, connected: connected)
 }
 
+@target(javascript)
 /// This is the most common component type. It subscribes to a slice of the
 /// model and re-renders the entire component when that slice changes.
 ///
@@ -423,7 +424,6 @@ pub fn require_connection(
 ///   }
 /// )
 /// ```
-@target(javascript)
 pub fn simple(
   slice slice: fn(model) -> a,
   render render: fn(a) -> html,
@@ -435,6 +435,7 @@ pub fn simple(
   )
 }
 
+@target(javascript)
 /// Static components render once and never update. Useful for headers, static
 /// text, or any content that doesn't depend on the model.
 ///
@@ -443,11 +444,11 @@ pub fn simple(
 /// ```gleam
 /// component.static(html.h1([], [html.text("My App")]))
 /// ```
-@target(javascript)
 pub fn static(content: html) -> Component(model, message, html) {
   Static(content)
 }
 
+@target(javascript)
 /// Switch a component's comparison strategy from reference to structural
 /// equality. By default, components use reference equality (`===`) to detect
 /// slice changes. This works well for primitives and unchanged references.
@@ -466,7 +467,6 @@ pub fn static(content: html) -> Component(model, message, html) {
 /// )
 /// |> component.structural  // Enable deep equality check
 /// ```
-@target(javascript)
 pub fn structural(
   component: Component(model, message, html),
 ) -> Component(model, message, html) {
@@ -499,17 +499,17 @@ pub fn structural(
 // PRIVATE FFI
 // =============================================================================
 
-/// Get the model from the runtime
 @target(javascript)
+/// Get the model from the runtime
 @external(javascript, "./component.ffi.mjs", "getModel")
 fn get_model(_runtime: Runtime(model, message)) -> model {
   // This will never run
   panic as "getModel is only available in JavaScript"
 }
 
+@target(javascript)
 /// Renders a component tree to HTML and creates subscriptions for dynamic
 /// components. This is called on initial render and on every model update.
-@target(javascript)
 @external(javascript, "./component.ffi.mjs", "renderTree")
 fn render_tree(
   _runtime: Runtime(model, message),
@@ -523,12 +523,12 @@ fn render_tree(
   Nil
 }
 
+@target(javascript)
 /// Wraps any value as Dynamic for use as a comparison key. On JavaScript this
 /// is an identity function as the runtime doesn't distinguish types. This
 /// replaces the old `dynamic.from` in gleam_stdlib. As much as I hate doing
 /// this, this is necessary as the slice type is not known at library
 /// compilation time.
-@target(javascript)
 @external(javascript, "./component.ffi.mjs", "identity")
 fn to_dynamic(value: a) -> Dynamic {
   // This will never run

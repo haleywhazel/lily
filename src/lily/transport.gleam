@@ -309,24 +309,24 @@ fn snapshot_decoder(
 // =============================================================================
 
 /// Auto-decode a dynamic value
-@external(javascript, "./transport.ffi.mjs", "autoDecode")
 @external(erlang, "lily_transport_ffi", "auto_decode")
+@external(javascript, "./transport.ffi.mjs", "autoDecode")
 fn ffi_auto_decode(_value: Dynamic) -> Result(a, a) {
   // Placeholder for type checking — actual implementation in FFI
   panic as "auto_decode is implemented in FFI"
 }
 
 /// Auto-encode a value to JSON
-@external(javascript, "./transport.ffi.mjs", "autoEncode")
 @external(erlang, "lily_transport_ffi", "auto_encode")
+@external(javascript, "./transport.ffi.mjs", "autoEncode")
 fn ffi_auto_encode(_value: a) -> Json {
   // Placeholder for type checking — actual implementation in FFI
   panic as "auto_encode is implemented in FFI"
 }
 
 /// Register constructors
-@external(javascript, "./transport.ffi.mjs", "register")
 @external(erlang, "lily_transport_ffi", "register")
+@external(javascript, "./transport.ffi.mjs", "register")
 fn ffi_register(_constructors: List(a)) -> Nil {
   Nil
 }

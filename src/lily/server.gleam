@@ -59,8 +59,8 @@
 import gleam/dict.{type Dict}
 import gleam/option.{type Option}
 import gleam/result
-import lily/transport.{type Serialiser}
 import lily/store.{type Store}
+import lily/transport.{type Serialiser}
 
 @target(erlang)
 import gleam/erlang/process.{type Subject}
@@ -181,16 +181,16 @@ pub fn start(
 // PRIVATE TYPES
 // =============================================================================
 
-/// Platform-specific server handle (Subject on Erlang, FFI handle on JavaScript)
 @target(erlang)
+/// Platform-specific server handle (Subject on Erlang, FFI handle on JavaScript)
 type ServerHandle(model, message) =
   Subject(InternalEvent(model, message))
 
 @target(javascript)
 type ServerHandle(model, message)
 
-/// Internal events for Erlang actor message passing
 @target(erlang)
+/// Internal events for Erlang actor message passing
 type InternalEvent(model, message) {
   ClientConnected(client_id: String, send: fn(String) -> Nil)
   ClientDisconnected(client_id: String)
@@ -257,8 +257,7 @@ fn handle_client_message_logic(
   let new_sequence = state.sequence + 1
 
   // Broadcast a new server message to connected clients (except sender)
-  let server_message =
-    transport.ServerMessage(sequence: new_sequence, payload:)
+  let server_message = transport.ServerMessage(sequence: new_sequence, payload:)
   let encoded = transport.encode(server_message, serialiser: state.serialiser)
   broadcast_except(state.clients, encoded, except: client_id)
 
@@ -319,8 +318,8 @@ fn handle_resync_logic(
 // PRIVATE FUNCTIONS — ERLANG
 // =============================================================================
 
-/// Handle a client connection event (Erlang actor wrapper)
 @target(erlang)
+/// Handle a client connection event (Erlang actor wrapper)
 fn handle_client_connected(
   state: ServerState(model, message),
   client_id: String,
@@ -330,8 +329,8 @@ fn handle_client_connected(
   |> actor.continue
 }
 
-/// Handle a client disconnection event (Erlang actor wrapper)
 @target(erlang)
+/// Handle a client disconnection event (Erlang actor wrapper)
 fn handle_client_disconnected(
   state: ServerState(model, message),
   client_id: String,
@@ -340,8 +339,8 @@ fn handle_client_disconnected(
   |> actor.continue
 }
 
-/// Handle an incoming message event (Erlang actor wrapper)
 @target(erlang)
+/// Handle an incoming message event (Erlang actor wrapper)
 fn handle_incoming(
   state: ServerState(model, message),
   client_id: String,
@@ -351,8 +350,8 @@ fn handle_incoming(
   |> actor.continue
 }
 
-/// Actor message handler (Erlang)
 @target(erlang)
+/// Actor message handler (Erlang)
 fn handle_message(
   state: ServerState(model, message),
   message: InternalEvent(model, message),
@@ -372,8 +371,8 @@ fn handle_message(
   }
 }
 
-/// Send a client connected event to the Erlang actor
 @target(erlang)
+/// Send a client connected event to the Erlang actor
 fn platform_connect(
   handle: ServerHandle(model, message),
   client_id: String,
@@ -382,8 +381,8 @@ fn platform_connect(
   actor.send(handle, ClientConnected(client_id:, send:))
 }
 
-/// Send a client disconnected event to the Erlang actor
 @target(erlang)
+/// Send a client disconnected event to the Erlang actor
 fn platform_disconnect(
   handle: ServerHandle(model, message),
   client_id: String,
@@ -391,8 +390,8 @@ fn platform_disconnect(
   actor.send(handle, ClientDisconnected(client_id:))
 }
 
-/// Send an incoming message event to the Erlang actor
 @target(erlang)
+/// Send an incoming message event to the Erlang actor
 fn platform_incoming(
   handle: ServerHandle(model, message),
   client_id: String,
@@ -401,8 +400,8 @@ fn platform_incoming(
   actor.send(handle, Incoming(client_id:, text:))
 }
 
-/// Send a set hook event to the Erlang actor
 @target(erlang)
+/// Send a set hook event to the Erlang actor
 fn platform_set_hook(
   handle: ServerHandle(model, message),
   hook: fn(message, model, String) -> Nil,
@@ -410,8 +409,8 @@ fn platform_set_hook(
   actor.send(handle, SetHook(hook:))
 }
 
-/// Start the Erlang OTP actor
 @target(erlang)
+/// Start the Erlang OTP actor
 fn platform_start(
   initial_state: ServerState(model, message),
 ) -> Result(ServerHandle(model, message), Nil) {
@@ -426,8 +425,8 @@ fn platform_start(
 // PRIVATE FUNCTIONS — JAVASCRIPT
 // =============================================================================
 
-/// Register a client connection (JavaScript)
 @target(javascript)
+/// Register a client connection (JavaScript)
 fn platform_connect(
   handle: ServerHandle(model, message),
   client_id: String,
@@ -436,8 +435,8 @@ fn platform_connect(
   ffi_connect(handle, client_id, send)
 }
 
-/// Unregister a client connection (JavaScript)
 @target(javascript)
+/// Unregister a client connection (JavaScript)
 fn platform_disconnect(
   handle: ServerHandle(model, message),
   client_id: String,
@@ -445,8 +444,8 @@ fn platform_disconnect(
   ffi_disconnect(handle, client_id)
 }
 
-/// Process an incoming message (JavaScript)
 @target(javascript)
+/// Process an incoming message (JavaScript)
 fn platform_incoming(
   handle: ServerHandle(model, message),
   client_id: String,
@@ -455,8 +454,8 @@ fn platform_incoming(
   ffi_incoming(handle, client_id, text)
 }
 
-/// Set the message hook (JavaScript)
 @target(javascript)
+/// Set the message hook (JavaScript)
 fn platform_set_hook(
   handle: ServerHandle(model, message),
   hook: fn(message, model, String) -> Nil,
@@ -464,8 +463,8 @@ fn platform_set_hook(
   ffi_set_hook(handle, hook)
 }
 
-/// Start the JavaScript server (creates closure with mutable state)
 @target(javascript)
+/// Start the JavaScript server (creates closure with mutable state)
 fn platform_start(
   initial_state: ServerState(model, message),
 ) -> Result(ServerHandle(model, message), Nil) {
@@ -481,8 +480,8 @@ fn platform_start(
 // PRIVATE FFI
 // =============================================================================
 
-/// Create server with closure-scoped mutable state
 @target(javascript)
+/// Create server with closure-scoped mutable state
 @external(javascript, "./server.ffi.mjs", "createServer")
 fn ffi_create_server(
   _initial_state: ServerState(model, message),
@@ -496,8 +495,8 @@ fn ffi_create_server(
   panic as "JavaScript only"
 }
 
-/// Call the connect method on the server handle
 @target(javascript)
+/// Call the connect method on the server handle
 @external(javascript, "./server.ffi.mjs", "connect")
 fn ffi_connect(
   _handle: ServerHandle(model, message),
@@ -507,8 +506,8 @@ fn ffi_connect(
   Nil
 }
 
-/// Call the disconnect method on the server handle
 @target(javascript)
+/// Call the disconnect method on the server handle
 @external(javascript, "./server.ffi.mjs", "disconnect")
 fn ffi_disconnect(
   _handle: ServerHandle(model, message),
@@ -517,8 +516,8 @@ fn ffi_disconnect(
   Nil
 }
 
-/// Call the incoming method on the server handle
 @target(javascript)
+/// Call the incoming method on the server handle
 @external(javascript, "./server.ffi.mjs", "incoming")
 fn ffi_incoming(
   _handle: ServerHandle(model, message),
@@ -528,8 +527,8 @@ fn ffi_incoming(
   Nil
 }
 
-/// Call the setHook method on the server handle
 @target(javascript)
+/// Call the setHook method on the server handle
 @external(javascript, "./server.ffi.mjs", "setHook")
 fn ffi_set_hook(
   _handle: ServerHandle(model, message),

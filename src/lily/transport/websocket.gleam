@@ -39,9 +39,9 @@ import lily/transport.{type Connector, type Handler}
 // PUBLIC TYPES
 // =============================================================================
 
+@target(javascript)
 /// Configuration for WebSocket connection. Use the builder functions to
 /// customise reconnection behaviour.
-@target(javascript)
 pub opaque type Config {
   Config(
     url: String,
@@ -54,10 +54,10 @@ pub opaque type Config {
 // PUBLIC FUNCTIONS
 // =============================================================================
 
+@target(javascript)
 /// Create a new WebSocket configuration with the given URL. Default reconnect
 /// settings are 1000ms base delay and 30000ms maximum delay (exponential
 /// backoff).
-@target(javascript)
 pub fn config(url url: String) -> Config {
   Config(
     url: url,
@@ -66,6 +66,7 @@ pub fn config(url url: String) -> Config {
   )
 }
 
+@target(javascript)
 /// Derive a WebSocket URL from the browser's current location.
 /// Automatically uses `wss:` for HTTPS pages and `ws:` for HTTP.
 /// The `path` argument specifies the WebSocket endpoint path.
@@ -77,11 +78,11 @@ pub fn config(url url: String) -> Config {
 /// websocket.url_from_current_location("/ws")
 /// // -> "wss://example.com:3000/ws"
 /// ```
-@target(javascript)
 pub fn url_from_current_location(path path: String) -> String {
   ffi_url_from_current_location(path)
 }
 
+@target(javascript)
 /// Returns a connector function that establishes a WebSocket connection. This
 /// connector can be passed to `client.connect`.
 ///
@@ -95,7 +96,6 @@ pub fn url_from_current_location(path path: String) -> String {
 ///   serialiser: my_serialiser,
 /// )
 /// ```
-@target(javascript)
 pub fn connect(config: Config) -> Connector {
   fn(handler: Handler) {
     let transport_handle =
@@ -112,18 +112,15 @@ pub fn connect(config: Config) -> Connector {
   }
 }
 
+@target(javascript)
 /// Set the base delay in milliseconds for reconnection attempts. The actual
 /// delay doubles on each failed attempt until reaching the maximum.
-@target(javascript)
-pub fn reconnect_base_milliseconds(
-  config: Config,
-  milliseconds: Int,
-) -> Config {
+pub fn reconnect_base_milliseconds(config: Config, milliseconds: Int) -> Config {
   Config(..config, reconnect_base_milliseconds: milliseconds)
 }
 
-/// Set the maximum delay in milliseconds between reconnection attempts.
 @target(javascript)
+/// Set the maximum delay in milliseconds between reconnection attempts.
 pub fn reconnect_max_milliseconds(config: Config, milliseconds: Int) -> Config {
   Config(..config, reconnect_max_milliseconds: milliseconds)
 }
@@ -162,6 +159,6 @@ fn ws_send(_handle: WsHandle, _text: String) -> Nil {
   Nil
 }
 
-/// Opaque handle to the WebSocket connection state returned by the FFI.
 @target(javascript)
+/// Opaque handle to the WebSocket connection state returned by the FFI.
 type WsHandle

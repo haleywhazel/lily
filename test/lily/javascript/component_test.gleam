@@ -16,7 +16,7 @@ import lily/store
 @target(javascript)
 import lily/test_dom
 @target(javascript)
-import lily/test_fixtures.{type Model, type Message, Increment}
+import lily/test_fixtures.{type Message, type Model, Increment}
 @target(javascript)
 import lily/test_setup
 
@@ -70,10 +70,9 @@ pub fn component_mount_renders_to_dom_test() {
       selector: "#app",
       to_html: to_html,
       view: fn(_model) {
-        component.simple(
-          slice: fn(m: Model) { m.count },
-          render: fn(count) { int.to_string(count) },
-        )
+        component.simple(slice: fn(m: Model) { m.count }, render: fn(count) {
+          int.to_string(count)
+        })
       },
     )
   // #app should have some content
@@ -125,10 +124,9 @@ pub fn component_simple_renders_initial_slice_test() {
       selector: "#app",
       to_html: to_html,
       view: fn(_model) {
-        component.simple(
-          slice: fn(m: Model) { m.count },
-          render: fn(count) { "count:" <> int.to_string(count) },
-        )
+        component.simple(slice: fn(m: Model) { m.count }, render: fn(count) {
+          "count:" <> int.to_string(count)
+        })
       },
     )
   test_dom.inner_html("#app")
@@ -146,10 +144,9 @@ pub fn component_simple_updates_on_model_change_test() {
       selector: "#app",
       to_html: to_html,
       view: fn(_model) {
-        component.simple(
-          slice: fn(m: Model) { m.count },
-          render: fn(count) { "count:" <> int.to_string(count) },
-        )
+        component.simple(slice: fn(m: Model) { m.count }, render: fn(count) {
+          "count:" <> int.to_string(count)
+        })
       },
     )
   client.dispatch(runtime)(Increment)
@@ -168,10 +165,9 @@ pub fn component_simple_name_renders_test() {
       selector: "#app",
       to_html: to_html,
       view: fn(_model) {
-        component.simple(
-          slice: fn(m: Model) { m.name },
-          render: fn(name) { "name:" <> name },
-        )
+        component.simple(slice: fn(m: Model) { m.name }, render: fn(name) {
+          "name:" <> name
+        })
       },
     )
   test_dom.inner_html("#app")
@@ -196,9 +192,7 @@ pub fn component_live_renders_initial_html_test() {
         component.live(
           slice: fn(m: Model) { m.count },
           initial: "<div><span class=\"val\">0</span></div>",
-          patch: fn(count) {
-            [component.SetText(".val", int.to_string(count))]
-          },
+          patch: fn(count) { [component.SetText(".val", int.to_string(count))] },
         )
       },
     )
@@ -220,9 +214,7 @@ pub fn component_live_applies_patches_test() {
         component.live(
           slice: fn(m: Model) { m.count },
           initial: "<div><span class=\"val\">0</span></div>",
-          patch: fn(count) {
-            [component.SetText(".val", int.to_string(count))]
-          },
+          patch: fn(count) { [component.SetText(".val", int.to_string(count))] },
         )
       },
     )
@@ -294,10 +286,9 @@ pub fn component_fragment_renders_children_test() {
 pub fn component_each_renders_keyed_list_test() {
   test_setup.reset_dom()
   let runtime =
-    store.new(
-      test_fixtures.WithList(items: [1, 2, 3]),
-      with: fn(model, _msg) { model },
-    )
+    store.new(test_fixtures.WithList(items: [1, 2, 3]), with: fn(model, _msg) {
+      model
+    })
     |> client.start
   let _r =
     component.mount(
@@ -336,10 +327,9 @@ pub fn component_require_connection_adds_disabled_when_disconnected_test() {
       selector: "#app",
       to_html: to_html,
       view: fn(_model) {
-        component.simple(
-          slice: fn(m: Model) { m.count },
-          render: fn(count) { int.to_string(count) },
-        )
+        component.simple(slice: fn(m: Model) { m.count }, render: fn(count) {
+          int.to_string(count)
+        })
         |> component.require_connection(fn(m: Model) { m.connected })
       },
     )
@@ -363,10 +353,9 @@ pub fn component_require_connection_removes_disabled_when_connected_test() {
       selector: "#app",
       to_html: to_html,
       view: fn(_model) {
-        component.simple(
-          slice: fn(m: Model) { m.count },
-          render: fn(count) { int.to_string(count) },
-        )
+        component.simple(slice: fn(m: Model) { m.count }, render: fn(count) {
+          int.to_string(count)
+        })
         |> component.require_connection(fn(m: Model) { m.connected })
       },
     )

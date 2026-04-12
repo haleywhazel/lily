@@ -73,7 +73,10 @@ pub fn encode_message(message: Message) -> Json {
     Increment -> json.object([#("tag", json.string("Increment"))])
     Decrement -> json.object([#("tag", json.string("Decrement"))])
     SetName(name) ->
-      json.object([#("tag", json.string("SetName")), #("name", json.string(name))])
+      json.object([
+        #("tag", json.string("SetName")),
+        #("name", json.string(name)),
+      ])
     Reset -> json.object([#("tag", json.string("Reset"))])
     Noop -> json.object([#("tag", json.string("Noop"))])
   }

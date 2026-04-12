@@ -10,7 +10,7 @@ import lily/client
 @target(javascript)
 import lily/store
 @target(javascript)
-import lily/test_fixtures.{type Model, type Message, Increment, Noop, SetName}
+import lily/test_fixtures.{type Message, type Model, Increment, Noop, SetName}
 @target(javascript)
 import lily/test_ref
 @target(javascript)
@@ -179,7 +179,11 @@ pub fn client_connection_status_tracks_connect_test() {
     transport.new(send: fn(_) { Nil }, close: fn() { Nil })
   }
   let _runtime2 =
-    client.connect(runtime, with: connector, serialiser: test_fixtures.custom_serialiser())
+    client.connect(
+      runtime,
+      with: connector,
+      serialiser: test_fixtures.custom_serialiser(),
+    )
 
   // Connection status should now be True in the model
   client.get_current_model(runtime).connected
@@ -207,7 +211,11 @@ pub fn client_connection_status_tracks_disconnect_test() {
     transport.new(send: fn(_) { Nil }, close: fn() { Nil })
   }
   let _runtime2 =
-    client.connect(runtime, with: connector, serialiser: test_fixtures.custom_serialiser())
+    client.connect(
+      runtime,
+      with: connector,
+      serialiser: test_fixtures.custom_serialiser(),
+    )
 
   // After disconnect, connected should be False
   client.get_current_model(runtime).connected
@@ -226,22 +234,30 @@ pub fn client_connect_sends_resync_on_reconnect_test() {
 
   let sent_ref = test_ref.new([])
   let handler_ref: test_ref.Ref(transport.Handler) =
-    test_ref.new(transport.Handler(
-      on_receive: fn(_) { Nil },
-      on_reconnect: fn() { Nil },
-      on_disconnect: fn() { Nil },
-    ))
+    test_ref.new(
+      transport.Handler(
+        on_receive: fn(_) { Nil },
+        on_reconnect: fn() { Nil },
+        on_disconnect: fn() { Nil },
+      ),
+    )
 
   let connector = fn(handler: transport.Handler) {
     test_ref.set(handler_ref, handler)
     transport.new(
-      send: fn(text) { test_ref.set(sent_ref, [text, ..test_ref.get(sent_ref)]) },
+      send: fn(text) {
+        test_ref.set(sent_ref, [text, ..test_ref.get(sent_ref)])
+      },
       close: fn() { Nil },
     )
   }
 
   let _r =
-    client.connect(runtime, with: connector, serialiser: test_fixtures.custom_serialiser())
+    client.connect(
+      runtime,
+      with: connector,
+      serialiser: test_fixtures.custom_serialiser(),
+    )
 
   // Trigger reconnect
   let handler = test_ref.get(handler_ref)
@@ -269,13 +285,19 @@ pub fn client_connect_sends_client_message_on_dispatch_test() {
   let sent_ref = test_ref.new([])
   let connector = fn(_handler: transport.Handler) {
     transport.new(
-      send: fn(text) { test_ref.set(sent_ref, [text, ..test_ref.get(sent_ref)]) },
+      send: fn(text) {
+        test_ref.set(sent_ref, [text, ..test_ref.get(sent_ref)])
+      },
       close: fn() { Nil },
     )
   }
 
   let _r =
-    client.connect(runtime, with: connector, serialiser: test_fixtures.custom_serialiser())
+    client.connect(
+      runtime,
+      with: connector,
+      serialiser: test_fixtures.custom_serialiser(),
+    )
 
   client.dispatch(runtime)(Increment)
 

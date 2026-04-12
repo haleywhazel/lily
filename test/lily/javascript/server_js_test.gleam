@@ -10,13 +10,11 @@ import lily/server
 @target(javascript)
 import lily/store
 @target(javascript)
-import lily/test_fixtures.{
-  type Model, type Message, Increment, SetName,
-}
-@target(javascript)
-import lily/transport
+import lily/test_fixtures.{type Message, type Model, Increment, SetName}
 @target(javascript)
 import lily/test_ref
+@target(javascript)
+import lily/transport
 
 // =============================================================================
 // HELPERS
@@ -35,9 +33,9 @@ fn new_server() -> server.Server(Model, Message) {
   srv
 }
 
+@target(javascript)
 /// Connect a mock client that appends received messages to a ref list.
 /// Returns a getter fn that returns the collected messages.
-@target(javascript)
 fn connect_client(
   srv: server.Server(Model, Message),
   client_id: String,
@@ -204,12 +202,7 @@ pub fn js_server_resync_sends_snapshot_test() {
     [msg, ..] -> {
       transport.decode(msg, serialiser: ser())
       |> should.equal(
-        Ok(
-          transport.Snapshot(
-            sequence: 0,
-            state: test_fixtures.initial_model(),
-          ),
-        ),
+        Ok(transport.Snapshot(sequence: 0, state: test_fixtures.initial_model())),
       )
     }
     [] -> should.fail()
@@ -313,12 +306,7 @@ pub fn js_server_sequence_starts_at_zero_test() {
     [msg, ..] -> {
       transport.decode(msg, serialiser: ser())
       |> should.equal(
-        Ok(
-          transport.Snapshot(
-            sequence: 0,
-            state: test_fixtures.initial_model(),
-          ),
-        ),
+        Ok(transport.Snapshot(sequence: 0, state: test_fixtures.initial_model())),
       )
     }
     [] -> should.fail()

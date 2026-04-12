@@ -39,8 +39,8 @@ import lily/client.{type Runtime}
 // PUBLIC FUNCTIONS
 // =============================================================================
 
-/// Fires when an element loses focus.
 @target(javascript)
+/// Fires when an element loses focus.
 pub fn on_blur(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -52,9 +52,9 @@ pub fn on_blur(
   runtime
 }
 
+@target(javascript)
 /// Fires when an input value changes (after focus is lost). For real-time
 /// updates, use `on_input` instead.
-@target(javascript)
 pub fn on_change(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -66,11 +66,11 @@ pub fn on_change(
   runtime
 }
 
+@target(javascript)
 /// Fires on click events using event delegation with `data-msg` attributes.
 /// The decoder receives the `data-msg` attribute value and should return the
 /// corresponding message. Elements must have a `data-msg` attribute to trigger
 /// this handler.
-@target(javascript)
 pub fn on_click(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -85,9 +85,9 @@ pub fn on_click(
   runtime
 }
 
+@target(javascript)
 /// Fires when the context menu is opened (usually right-click). Provides mouse
 /// coordinates (x, y) relative to the viewport.
-@target(javascript)
 pub fn on_context_menu(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -99,8 +99,8 @@ pub fn on_context_menu(
   runtime
 }
 
-/// Fires when text is copied to the clipboard.
 @target(javascript)
+/// Fires when text is copied to the clipboard.
 pub fn on_copy(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -112,8 +112,8 @@ pub fn on_copy(
   runtime
 }
 
-/// Fires when text is cut to the clipboard.
 @target(javascript)
+/// Fires when text is cut to the clipboard.
 pub fn on_cut(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -125,8 +125,8 @@ pub fn on_cut(
   runtime
 }
 
-/// Fires on double-click events.
 @target(javascript)
+/// Fires on double-click events.
 pub fn on_double_click(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -138,10 +138,10 @@ pub fn on_double_click(
   runtime
 }
 
+@target(javascript)
 /// Fires repeatedly while an element is being dragged. Provides current mouse
 /// coordinates (x, y). Note: This fires many times during a drag operation,
 /// consider throttling if performing expensive operations.
-@target(javascript)
 pub fn on_drag(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -153,8 +153,8 @@ pub fn on_drag(
   runtime
 }
 
-/// Fires once when a drag operation ends (mouse released).
 @target(javascript)
+/// Fires once when a drag operation ends (mouse released).
 pub fn on_drag_end(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -166,10 +166,10 @@ pub fn on_drag_end(
   runtime
 }
 
+@target(javascript)
 /// Fires repeatedly when a dragged element is over a valid drop target.
 /// Provides mouse coordinates (x, y). Note: You may need to call
 /// `event.preventDefault()` in the browser to enable dropping.
-@target(javascript)
 pub fn on_drag_over(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -181,9 +181,9 @@ pub fn on_drag_over(
   runtime
 }
 
+@target(javascript)
 /// Fires once when a drag operation starts. Provides initial mouse coordinates
 /// (x, y).
-@target(javascript)
 pub fn on_drag_start(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -195,9 +195,9 @@ pub fn on_drag_start(
   runtime
 }
 
+@target(javascript)
 /// Fires when a dragged element is dropped on a valid drop target. Provides
 /// drop coordinates (x, y).
-@target(javascript)
 pub fn on_drop(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -209,8 +209,8 @@ pub fn on_drop(
   runtime
 }
 
-/// Fires when an element receives focus.
 @target(javascript)
+/// Fires when an element receives focus.
 pub fn on_focus(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -222,9 +222,9 @@ pub fn on_focus(
   runtime
 }
 
+@target(javascript)
 /// Fires immediately when an input value changes. For delayed updates (after
 /// blur), use `on_change` instead.
-@target(javascript)
 pub fn on_input(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -236,9 +236,9 @@ pub fn on_input(
   runtime
 }
 
+@target(javascript)
 /// Fires when a key is pressed down. Receives the key name (e.g., "Enter",
 /// "ArrowUp", "a").
-@target(javascript)
 pub fn on_key_down(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -250,9 +250,9 @@ pub fn on_key_down(
   runtime
 }
 
+@target(javascript)
 /// Fires when a key is released. Receives the key name (e.g., "Enter",
 /// "ArrowUp", "a").
-@target(javascript)
 pub fn on_key_up(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -264,9 +264,9 @@ pub fn on_key_up(
   runtime
 }
 
+@target(javascript)
 /// Fires when a mouse button is pressed down. Provides mouse coordinates (x, y)
 /// relative to the viewport.
-@target(javascript)
 pub fn on_mouse_down(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -278,8 +278,8 @@ pub fn on_mouse_down(
   runtime
 }
 
-/// Fires when the mouse enters an element's boundary. Does not bubble.
 @target(javascript)
+/// Fires when the mouse enters an element's boundary. Does not bubble.
 pub fn on_mouse_enter(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -291,8 +291,8 @@ pub fn on_mouse_enter(
   runtime
 }
 
-/// Fires when the mouse leaves an element's boundary. Does not bubble.
 @target(javascript)
+/// Fires when the mouse leaves an element's boundary. Does not bubble.
 pub fn on_mouse_leave(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -304,10 +304,10 @@ pub fn on_mouse_leave(
   runtime
 }
 
+@target(javascript)
 /// Fires repeatedly while the mouse moves over an element. Provides current
 /// mouse coordinates (x, y). Note: This can fire very frequently, consider
 /// throttling for expensive operations.
-@target(javascript)
 pub fn on_mouse_move(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -319,9 +319,9 @@ pub fn on_mouse_move(
   runtime
 }
 
+@target(javascript)
 /// Fires when a mouse button is released. Provides mouse coordinates (x, y)
 /// relative to the viewport.
-@target(javascript)
 pub fn on_mouse_up(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -333,8 +333,8 @@ pub fn on_mouse_up(
   runtime
 }
 
-/// Fires when text is pasted from the clipboard.
 @target(javascript)
+/// Fires when text is pasted from the clipboard.
 pub fn on_paste(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -346,9 +346,9 @@ pub fn on_paste(
   runtime
 }
 
+@target(javascript)
 /// Fires when a pointer (mouse, pen, touch) is pressed down. Provides pointer
 /// coordinates (x, y). Pointer events unify mouse, touch, and pen input.
-@target(javascript)
 pub fn on_pointer_down(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -360,10 +360,10 @@ pub fn on_pointer_down(
   runtime
 }
 
+@target(javascript)
 /// Fires repeatedly while a pointer moves over an element. Provides current
 /// pointer coordinates (x, y). Pointer events unify mouse, touch, and pen
 /// input.
-@target(javascript)
 pub fn on_pointer_move(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -375,9 +375,9 @@ pub fn on_pointer_move(
   runtime
 }
 
+@target(javascript)
 /// Fires when a pointer (mouse, pen, touch) is released. Provides pointer
 /// coordinates (x, y). Pointer events unify mouse, touch, and pen input.
-@target(javascript)
 pub fn on_pointer_up(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -389,9 +389,9 @@ pub fn on_pointer_up(
   runtime
 }
 
+@target(javascript)
 /// Fires when an element is resized. Typically used on `window` with selector
 /// "window".
-@target(javascript)
 pub fn on_resize(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -403,8 +403,8 @@ pub fn on_resize(
   runtime
 }
 
-/// Fires when an element's scroll position changes.
 @target(javascript)
+/// Fires when an element's scroll position changes.
 pub fn on_scroll(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -416,9 +416,9 @@ pub fn on_scroll(
   runtime
 }
 
+@target(javascript)
 /// Fires when a form is submitted. Prevents the browser's default form
 /// submission behavior automatically.
-@target(javascript)
 pub fn on_submit(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -430,8 +430,8 @@ pub fn on_submit(
   runtime
 }
 
-/// Fires when all touches are removed from the screen.
 @target(javascript)
+/// Fires when all touches are removed from the screen.
 pub fn on_touch_end(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -443,9 +443,9 @@ pub fn on_touch_end(
   runtime
 }
 
+@target(javascript)
 /// Fires repeatedly while a touch point moves across the screen. Provides
 /// touch coordinates (x, y). Note: This can fire very frequently.
-@target(javascript)
 pub fn on_touch_move(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -457,9 +457,9 @@ pub fn on_touch_move(
   runtime
 }
 
+@target(javascript)
 /// Fires when a touch point is placed on the screen. Provides initial touch
 /// coordinates (x, y).
-@target(javascript)
 pub fn on_touch_start(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -471,9 +471,9 @@ pub fn on_touch_start(
   runtime
 }
 
+@target(javascript)
 /// Fires when the mouse wheel is scrolled. Provides scroll deltas (delta_x,
 /// delta_y) indicating scroll direction and amount.
-@target(javascript)
 pub fn on_wheel(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -493,10 +493,7 @@ pub fn on_wheel(
 
 @target(javascript)
 @external(javascript, "./event.ffi.mjs", "setupClickEvent")
-fn setup_click_event(
-  _selector: String,
-  _handler: fn(String) -> Nil,
-) -> Nil {
+fn setup_click_event(_selector: String, _handler: fn(String) -> Nil) -> Nil {
   Nil
 }
 
