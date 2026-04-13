@@ -26,6 +26,7 @@ export function connect(url, reconnectBaseMs, reconnectMaxMs, handler) {
   let reconnectDelay = null;
   let reconnectTimer = null;
   let pending = [];
+  let persistScheduled = false;
 
   // -------------------------------------------------------------------------
   // Connection management
@@ -45,7 +46,6 @@ export function connect(url, reconnectBaseMs, reconnectMaxMs, handler) {
       return;
     }
 
-    // WebSocket lifecycle handlers
     ws.onopen = function () {
       reconnectDelay = reconnectBaseMs;
       flushPending();
@@ -77,12 +77,15 @@ export function connect(url, reconnectBaseMs, reconnectMaxMs, handler) {
       reconnectDelay = reconnectBaseMs;
     }
 
+    // ±25% jitter spreads reconnects after a mass disconnect (thundering herd)
+    const jitteredDelay = reconnectDelay * (0.75 + Math.random() * 0.5);
     reconnectTimer = setTimeout(function () {
       reconnectTimer = null;
       openConnection();
-    }, reconnectDelay);
+    }, jitteredDelay);
 
-    // Double delay for next attempt, capped at maximum
+    // Advance the progression regardless of jitter so the ceiling is reached
+    // in a predictable number of attempts
     reconnectDelay = Math.min(reconnectDelay * 2, reconnectMaxMs);
   }
 
@@ -92,7 +95,10 @@ export function connect(url, reconnectBaseMs, reconnectMaxMs, handler) {
 
   /** Send all pending messages when connection is available */
   function flushPending() {
-    pending = getPending();
+    // Use in-memory queue; load from storage only on first flush after page load
+    if (pending.length === 0) {
+      pending = getPending();
+    }
     if (pending.length === 0) return;
 
     const sent = [];
@@ -105,13 +111,12 @@ export function connect(url, reconnectBaseMs, reconnectMaxMs, handler) {
       }
     }
 
-    // Remove sent messages from queue
     if (sent.length === pending.length) {
-      // All messages sent successfully
+      // Everything went out — wipe the queue
       localStorage.removeItem(STORAGE_KEY_PENDING);
       pending = [];
     } else if (sent.length > 0) {
-      // Some messages sent, keep the rest queued
+      // Partial flush — keep whatever didn't make it
       const remaining = pending.slice(sent.length);
       localStorage.setItem(STORAGE_KEY_PENDING, JSON.stringify(remaining));
       pending = remaining;
@@ -132,7 +137,19 @@ export function connect(url, reconnectBaseMs, reconnectMaxMs, handler) {
   /** Add message to pending queue and persist to localStorage */
   function queuePending(text) {
     pending.push(text);
-    localStorage.setItem(STORAGE_KEY_PENDING, JSON.stringify(pending));
+    // Coalesce rapid queuing into one localStorage write per microtask.
+    // Naive immediate writes are O(n²): each call stringifies a longer array.
+    if (!persistScheduled) {
+      persistScheduled = true;
+      queueMicrotask(function () {
+        persistScheduled = false;
+        try {
+          localStorage.setItem(STORAGE_KEY_PENDING, JSON.stringify(pending));
+        } catch (_error) {
+          // Quota exceeded — messages remain in-memory, sent on reconnect
+        }
+      });
+    }
   }
 
   // -------------------------------------------------------------------------

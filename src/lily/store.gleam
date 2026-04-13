@@ -46,7 +46,6 @@
 // =============================================================================
 
 import gleam/dict.{type Dict}
-import gleam/list
 
 // =============================================================================
 // PUBLIC TYPES
@@ -123,6 +122,5 @@ pub fn apply(
 /// Notify all subscribers of current state of the store.
 @internal
 pub fn notify(store: Store(model, message)) -> Nil {
-  dict.values(store.handlers)
-  |> list.each(fn(handler) { handler(store.model) })
+  dict.each(store.handlers, fn(_selector, handler) { handler(store.model) })
 }

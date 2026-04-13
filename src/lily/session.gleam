@@ -17,11 +17,15 @@
 // =============================================================================
 
 @target(javascript)
+import gleam/dynamic.{type Dynamic}
+@target(javascript)
 import gleam/dynamic/decode
 @target(javascript)
 import gleam/json.{type Json}
 @target(javascript)
 import gleam/list
+@target(javascript)
+import gleam/result
 @target(javascript)
 import lily/client.{type Runtime}
 
@@ -35,7 +39,7 @@ pub opaque type Field(session) {
   Field(
     key: String,
     get: fn(session) -> Json,
-    set: fn(session, Json) -> Result(session, Nil),
+    set: fn(session, Dynamic) -> Result(session, Nil),
   )
 }
 
@@ -89,7 +93,6 @@ pub fn attach(
   get get: fn(model) -> session,
   set set: fn(model, session) -> model,
 ) -> Runtime(model, message) {
-  // Hydrate session from localStorage
   let current_model = client.get_current_model(runtime)
   let hydrated_session = hydrate_session(persistence, get(current_model))
   let hydrated_model = set(current_model, hydrated_session)
@@ -158,11 +161,10 @@ pub fn field(
     Field(
       key: key,
       get: fn(session) { encode(get(session)) },
-      set: fn(session, json_value) {
-        case json.parse(from: json.to_string(json_value), using: decoder) {
-          Ok(value) -> Ok(set(session, value))
-          Error(_) -> Error(Nil)
-        }
+      set: fn(session, dynamic_value) {
+        decode.run(dynamic_value, decoder)
+        |> result.map(set(session, _))
+        |> result.replace_error(Nil)
       },
     )
 
@@ -194,12 +196,11 @@ fn hydrate_session(
 ) -> session {
   let Persistence(fields) = persistence
 
-  // Read each field from localStorage and apply to session
   list.fold(fields, initial, fn(session, field) {
     let Field(key, _get, set) = field
     case read_field(storage_prefix(), key) {
-      Ok(json_value) ->
-        case set(session, json_value) {
+      Ok(dynamic_value) ->
+        case set(session, dynamic_value) {
           Ok(updated) -> updated
           Error(_) -> session
         }
@@ -226,9 +227,9 @@ fn clear_session(_prefix: String) -> Nil {
 }
 
 @target(javascript)
-/// Read a field from localStorage
+/// Read a field from localStorage as a raw dynamic value for direct decoding
 @external(javascript, "./session.ffi.mjs", "readField")
-fn read_field(_prefix: String, _key: String) -> Result(Json, Nil) {
+fn read_field(_prefix: String, _key: String) -> Result(Dynamic, Nil) {
   Error(Nil)
 }
 

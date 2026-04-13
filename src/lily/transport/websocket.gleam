@@ -67,22 +67,6 @@ pub fn config(url url: String) -> Config {
 }
 
 @target(javascript)
-/// Derive a WebSocket URL from the browser's current location.
-/// Automatically uses `wss:` for HTTPS pages and `ws:` for HTTP.
-/// The `path` argument specifies the WebSocket endpoint path.
-///
-/// ## Example
-///
-/// ```gleam
-/// // On https://example.com:3000/app
-/// websocket.url_from_current_location("/ws")
-/// // -> "wss://example.com:3000/ws"
-/// ```
-pub fn url_from_current_location(path path: String) -> String {
-  ffi_url_from_current_location(path)
-}
-
-@target(javascript)
 /// Returns a connector function that establishes a WebSocket connection. This
 /// connector can be passed to `client.connect`.
 ///
@@ -123,6 +107,22 @@ pub fn reconnect_base_milliseconds(config: Config, milliseconds: Int) -> Config 
 /// Set the maximum delay in milliseconds between reconnection attempts.
 pub fn reconnect_max_milliseconds(config: Config, milliseconds: Int) -> Config {
   Config(..config, reconnect_max_milliseconds: milliseconds)
+}
+
+@target(javascript)
+/// Derive a WebSocket URL from the browser's current location.
+/// Automatically uses `wss:` for HTTPS pages and `ws:` for HTTP.
+/// The `path` argument specifies the WebSocket endpoint path.
+///
+/// ## Example
+///
+/// ```gleam
+/// // On https://example.com:3000/app
+/// websocket.url_from_current_location("/ws")
+/// // Returns "wss://example.com:3000/ws"
+/// ```
+pub fn url_from_current_location(path path: String) -> String {
+  ffi_url_from_current_location(path)
 }
 
 // =============================================================================

@@ -109,7 +109,6 @@ pub fn connect(
   let current_model = get_model(handle)
   ffi_register_model(current_model)
 
-  // Build handler with protocol-level callbacks
   let handler =
     transport.Handler(
       on_receive: fn(text) { handle_incoming(handle, text, serialiser) },
@@ -120,13 +119,10 @@ pub fn connect(
       on_disconnect: fn() { set_connection_status(handle, False) },
     )
 
-  // Get transport from connector
   let client_transport = connector(handler)
 
-  // Store transport for sending
   set_transport(handle, client_transport)
 
-  // Set hook to serialise and send messages via transport
   set_on_message_hook(handle, fn(message) {
     let text =
       transport.encode(transport.ClientMessage(payload: message), serialiser:)
@@ -172,34 +168,6 @@ pub fn connection_status(
   let Runtime(handle) = runtime
   set_connection_status_config(handle, get, set)
   runtime
-}
-
-@target(javascript)
-/// Extract the runtime handle from the runtime wrapper. Used internally by
-/// other lily modules (session, component) that need direct FFI access.
-@internal
-pub fn get_handle(runtime: Runtime(model, message)) -> RuntimeHandle {
-  let Runtime(handle) = runtime
-  handle
-}
-
-@target(javascript)
-/// Get the current model from the runtime. Used internally by the session
-/// module for hydrating persisted session data on startup.
-@internal
-pub fn get_current_model(runtime: Runtime(model, message)) -> model {
-  let Runtime(handle) = runtime
-  get_model(handle)
-}
-
-@target(javascript)
-/// Set a new model in the runtime. Used internally by the session module to
-/// apply hydrated session data. This bypasses the update function and does
-/// not trigger a re-render cycle.
-@internal
-pub fn set_current_model(runtime: Runtime(model, message), model: model) -> Nil {
-  let Runtime(handle) = runtime
-  set_model(handle, model)
 }
 
 @target(javascript)
@@ -265,8 +233,7 @@ pub fn on_message(
 /// |> event.on_click(selector: "#app", decoder: parse_msg)
 /// ```
 pub fn start(store: Store(model, message)) -> Runtime(model, message) {
-  let handle = create_runtime(store, store.apply, store.notify, store.subscribe)
-  store.notify(store)
+  let handle = create_runtime(store, store.apply, store.notify)
   set_store(handle, store)
   Runtime(handle)
 }
@@ -288,12 +255,40 @@ pub fn clear_component_cache(
 }
 
 @target(javascript)
+/// Get the current model from the runtime. Used internally by the session
+/// module for hydrating persisted session data on startup.
+@internal
+pub fn get_current_model(runtime: Runtime(model, message)) -> model {
+  let Runtime(handle) = runtime
+  get_model(handle)
+}
+
+@target(javascript)
+/// Extract the runtime handle from the runtime wrapper. Used internally by
+/// other Lily modules (session, component) that need direct FFI access.
+@internal
+pub fn get_handle(runtime: Runtime(model, message)) -> RuntimeHandle {
+  let Runtime(handle) = runtime
+  handle
+}
+
+@target(javascript)
 /// Internal wrapper for the send message FFI
 /// (used in event.gleam)
 @internal
 pub fn send_message(runtime: Runtime(model, message), message: message) -> Nil {
   let Runtime(runtime_handle) = runtime
   ffi_send_message(runtime_handle, message)
+}
+
+@target(javascript)
+/// Set a new model in the runtime. Used internally by the session module to
+/// apply hydrated session data. This bypasses the update function and does
+/// not trigger a re-render cycle.
+@internal
+pub fn set_current_model(runtime: Runtime(model, message), model: model) -> Nil {
+  let Runtime(handle) = runtime
+  set_model(handle, model)
 }
 
 // =============================================================================
@@ -308,7 +303,7 @@ pub fn send_message(runtime: Runtime(model, message), message: message) -> Nil {
 ///   parameterized for compile-time type safety
 /// - `RuntimeHandle`: Internal concrete type that matches the JavaScript
 ///   object returned by `createRuntime()`. Marked `@internal` for use by
-///   other lily modules (session, component) that need FFI access.
+///   other Lily modules (session, component) that need FFI access.
 @internal
 pub type RuntimeHandle
 
@@ -379,8 +374,6 @@ fn create_runtime(
   _store: Store(model, message),
   _apply: fn(Store(model, message), message) -> Store(model, message),
   _notify: fn(Store(model, message)) -> Nil,
-  _subscribe: fn(Store(model, message), String, fn(model) -> Nil) ->
-    Store(model, message),
 ) -> RuntimeHandle {
   // This will never run (RuntimeHandle is only a JavaScript type so we're
   // putting it here as a workaround)
@@ -394,15 +387,17 @@ fn dispatch_model(_handle: RuntimeHandle, _model: model) -> Nil {
   Nil
 }
 
-// The two FFI functions below are needed as our JavaScript code works with
-// RuntimeHandle and our `@internal` Gleam functions work with Runtime.
-// Conversion between the two is handled by the Gleam functions that wrap the
-// FFI functions.
-
 @target(javascript)
 /// Clear the component cache
 @external(javascript, "./client.ffi.mjs", "clearComponentCache")
 fn ffi_clear_component_cache(_handle: RuntimeHandle, _selector: String) -> Nil {
+  Nil
+}
+
+@target(javascript)
+/// Register model constructors for auto-serialiser
+@external(javascript, "./transport.ffi.mjs", "registerModel")
+fn ffi_register_model(_model: model) -> Nil {
   Nil
 }
 
@@ -425,13 +420,6 @@ fn get_last_sequence(_handle: RuntimeHandle) -> Int {
 @external(javascript, "./client.ffi.mjs", "getModel")
 fn get_model(_handle: RuntimeHandle) -> model {
   panic as "getModel is only available in JavaScript"
-}
-
-@target(javascript)
-/// Set the current model in the runtime
-@external(javascript, "./client.ffi.mjs", "setModel")
-fn set_model(_handle: RuntimeHandle, _model: model) -> Nil {
-  Nil
 }
 
 @target(javascript)
@@ -467,6 +455,13 @@ fn set_last_sequence(_handle: RuntimeHandle, _sequence: Int) -> Nil {
 }
 
 @target(javascript)
+/// Set the current model in the runtime
+@external(javascript, "./client.ffi.mjs", "setModel")
+fn set_model(_handle: RuntimeHandle, _model: model) -> Nil {
+  Nil
+}
+
+@target(javascript)
 /// Set the function that runs when a message happens (runs once)
 @external(javascript, "./client.ffi.mjs", "setOnMessageHook")
 fn set_on_message_hook(_handle: RuntimeHandle, _hook: fn(message) -> Nil) -> Nil {
@@ -494,12 +489,5 @@ fn set_user_message_hook(
   _handle: RuntimeHandle,
   _hook: fn(message, model) -> Nil,
 ) -> Nil {
-  Nil
-}
-
-@target(javascript)
-/// Register model constructors for auto-serialiser
-@external(javascript, "./transport.ffi.mjs", "registerModel")
-fn ffi_register_model(_model: model) -> Nil {
   Nil
 }

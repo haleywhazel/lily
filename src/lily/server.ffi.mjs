@@ -26,7 +26,6 @@ export function createServer(
   // Closure-scoped state (not module-level, allows multiple instances)
   let state = initialState;
 
-  // Return server handle with methods that close over the state
   return {
     /** Register a client connection */
     connect(clientId, send) {

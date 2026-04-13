@@ -38,25 +38,6 @@ export function identity(value) {
   return value;
 }
 
-/**
- * Subscribe to runtime updates by attaching a handler to the store's
- * notification system. Registers the selective handler on the store so that
- * it is called on every notify cycle (triggered by sendMessage, etc.).
- */
-export function subscribeToRuntime(runtime, selector, handler) {
-  const handle = runtime.handle;
-  handle.setCompareStrategy(selector, handle.referenceEqual);
-  const selective = handle.createSelective(
-    selector,
-    (model) => model,
-    handle.referenceEqual,
-    handler,
-  );
-  // Register on the store's handler dict so notify() calls it
-  handle.subscribeHandler(selector, selective);
-}
-
-// Renders the whole component tree.
 export function renderTree(
   runtime,
   rootSelector,
@@ -105,18 +86,22 @@ export function renderTree(
 function createEachHandler(selector, produce, toHtml, compare) {
   const children = new Map();
   let previousHtmlByKey = new Map();
+  let cachedContainer = null;
 
   return function (model) {
-    // Check to see if selector is valid
-    const container = document.querySelector(selector);
+    // Re-query only if detached — handles re-mounts, free in the normal case
+    if (!cachedContainer || !cachedContainer.isConnected) {
+      cachedContainer = document.querySelector(selector);
+    }
+    const container = cachedContainer;
     if (!container) return;
 
-    // The produce function (check Gleam code for reference) creates an array
-    // with each element being [key, render result before running toHtml].
+    // produce() gives back [key, rendered content] pairs — toHtml hasn't
+    // run yet at this point
     const pairs = produce(model).toArray();
     const currentKeySet = new Set(pairs.map((pair) => pair[0]));
 
-    // Remove children whose keys disappeared
+    // Drop children whose keys are no longer in the list
     for (const [keyStr, child] of children) {
       if (!currentKeySet.has(keyStr)) {
         container.removeChild(child);
@@ -125,12 +110,12 @@ function createEachHandler(selector, produce, toHtml, compare) {
       }
     }
 
-    // Create/update/reorder children in a single pass
+    // Sync children — create, update, and reorder in one pass
     for (let i = 0; i < pairs.length; i++) {
       const keyStr = pairs[i][0];
       const htmlValue = pairs[i][1];
 
-      // Get or create element
+      // Look up or create the element for this key
       let element = children.get(keyStr);
       if (!element) {
         element = document.createElement("div");
@@ -138,15 +123,14 @@ function createEachHandler(selector, produce, toHtml, compare) {
         children.set(keyStr, element);
       }
 
-      // Update innerHTML if changed, using the relevant compare function given
-      // (whether reference or structural)
+      // Only re-render if the content changed (respects compare strategy)
       const previousHtml = previousHtmlByKey.get(keyStr);
       if (previousHtml === undefined || !compare(previousHtml, htmlValue)) {
         previousHtmlByKey.set(keyStr, htmlValue);
         element.innerHTML = toHtml(htmlValue);
       }
 
-      // Insert/move element to correct position
+      // Slot into the right position if it's drifted
       const currentAtIndex = container.children[i];
       if (currentAtIndex !== element) {
         container.insertBefore(element, currentAtIndex || null);
@@ -156,26 +140,25 @@ function createEachHandler(selector, produce, toHtml, compare) {
 }
 
 /** Create handler for `component.each_live` (returns the handler function) */
-function createEachLiveHandler(
-  selector,
-  keys,
-  initial,
-  apply,
-  toHtml,
-  compare,
-) {
+function createEachLiveHandler(selector, initial, apply, toHtml, compare) {
   const children = new Map();
   let previousPatchesByKey = new Map();
+  let cachedContainer = null;
 
   return function (model) {
-    // Check to see if selector is valid
-    const container = document.querySelector(selector);
+    // Re-query only if detached — handles re-mounts, free in the normal case
+    if (!cachedContainer || !cachedContainer.isConnected) {
+      cachedContainer = document.querySelector(selector);
+    }
+    const container = cachedContainer;
     if (!container) return;
 
-    const keyList = keys(model).toArray();
+    // apply() gives all key/patch pairs — derive key list from it (one call)
+    const applyPairs = apply(model).toArray();
+    const keyList = applyPairs.map((pair) => pair[0]);
     const currentKeySet = new Set(keyList);
 
-    // Remove children whose keys disappeared
+    // Drop children whose keys are no longer in the list
     for (const [keyStr, element] of children) {
       if (!currentKeySet.has(keyStr)) {
         container.removeChild(element);
@@ -184,8 +167,8 @@ function createEachLiveHandler(
       }
     }
 
-    // Build maps from initial for new items
-    // For new items, initial will be used to generate pair[1]
+    // Build the initial HTML map — only needed when new keys have appeared,
+    // since existing elements already have their content
     const needsInitial = keyList.some((k) => !children.has(k));
     const initialMap = new Map();
     if (needsInitial) {
@@ -195,19 +178,11 @@ function createEachLiveHandler(
       }
     }
 
-    // Build maps from apply results for updated items
-    // For updated items, pair[1] will be a list of patches
-    const applyPairs = apply(model).toArray();
-    const applyMap = new Map();
-    for (const pair of applyPairs) {
-      applyMap.set(pair[0], pair[1]);
-    }
-
-    // Create/update/reorder children in a single pass
+    // Sync children — create, update, and reorder in one pass
     for (let i = 0; i < keyList.length; i++) {
       const keyStr = keyList[i];
 
-      // Get or create element
+      // Look up or create the element for this key
       let element = children.get(keyStr);
       if (!element) {
         element = document.createElement("div");
@@ -219,9 +194,8 @@ function createEachLiveHandler(
         children.set(keyStr, element);
       }
 
-      // Apply patches if changed (using the provided compare function, whether
-      // reference or structural)
-      const patchList = applyMap.get(keyStr);
+      // Only patch if the patch list has changed (respects compare strategy)
+      const patchList = applyPairs[i][1];
       const previousPatches = previousPatchesByKey.get(keyStr);
       if (
         patchList !== undefined &&
@@ -232,7 +206,7 @@ function createEachLiveHandler(
         applyPatchesToElement(element, patches);
       }
 
-      // Insert/move element to correct position
+      // Slot into the right position if it's drifted
       const currentAtIndex = container.children[i];
       if (currentAtIndex !== element) {
         container.insertBefore(element, currentAtIndex || null);
@@ -253,9 +227,8 @@ function renderComponent(
 ) {
   const typeName = component.constructor.name;
 
-  // Note that as we have chosen to make the constructors opaque within the
-  // Gleam public API, we cannot use `instanceof` and have to resort to string
-  // matching.
+  // Constructors are opaque in the public API, so instanceof doesn't work —
+  // string matching on the constructor name is the next best thing.
   switch (typeName) {
     case "Static":
       return renderStatic(component, toHtml);
@@ -365,15 +338,13 @@ function renderEachLive(
   const componentId = runtime.nextComponentId();
   const selector = `[data-lily-component="${componentId}"]`;
 
-  const { keys, initial, apply, compare } = component;
+  const { initial, apply, compare } = component;
 
   const compareStrategy =
     compare instanceof StructuralEqual ? isEqual : referenceEqual;
 
-  // Create each live handler
   const handler = createEachLiveHandler(
     selector,
-    keys,
     initial,
     apply,
     toHtml,
@@ -428,7 +399,6 @@ function renderRequireConnection(
 
   const { inner, connected } = component;
 
-  // Render the inner component
   const innerHtml = renderComponent(
     runtime,
     inner,
@@ -439,25 +409,27 @@ function renderRequireConnection(
     depth + 1,
   );
 
-  // Create selective handler to manage disabled state
+  let cachedElement = null;
+
   const handler = runtime.createSelective(
     selector,
     connected,
     runtime.referenceEqual,
     (isConnected) => {
-      const element = document.querySelector(selector);
-      if (!element) return;
+      // Re-query only if detached — handles re-mounts, free in the normal case
+      if (!cachedElement || !cachedElement.isConnected) {
+        cachedElement = document.querySelector(selector);
+      }
+      if (!cachedElement) return;
 
       if (isConnected) {
-        // Remove disabled attributes and class
-        element.removeAttribute("data-lily-disabled");
-        element.removeAttribute("aria-disabled");
-        element.classList.remove("lily-disconnected");
+        cachedElement.removeAttribute("data-lily-disabled");
+        cachedElement.removeAttribute("aria-disabled");
+        cachedElement.classList.remove("lily-disconnected");
       } else {
-        // Add disabled attributes and class
-        element.setAttribute("data-lily-disabled", "true");
-        element.setAttribute("aria-disabled", "true");
-        element.classList.add("lily-disconnected");
+        cachedElement.setAttribute("data-lily-disabled", "true");
+        cachedElement.setAttribute("aria-disabled", "true");
+        cachedElement.classList.add("lily-disconnected");
       }
     },
   );
@@ -465,7 +437,6 @@ function renderRequireConnection(
   // Register handler to be called on model updates
   runtime.registerComponent(componentId, handler);
 
-  // Return wrapped HTML with component ID
   return `<div data-lily-component="${componentId}">${innerHtml}</div>`;
 }
 
@@ -484,21 +455,24 @@ function renderLive(
 
   const { slice, initial, apply, compare } = component;
 
-  // Create selective handler
   const compareStrategy =
     compare instanceof StructuralEqual ? isEqual : referenceEqual;
+
+  let cachedElement = null;
 
   const handler = runtime.createSelective(
     selector,
     slice,
     compareStrategy,
-    (_data, model) => {
-      const patches = apply(model).toArray();
+    (data) => {
+      const patches = apply(data).toArray();
 
-      // Get the component root element
-      const rootElement = document.querySelector(selector);
-      if (rootElement) {
-        applyPatchesToElement(rootElement, patches);
+      // Re-query only if detached — handles re-mounts, free in the normal case
+      if (!cachedElement || !cachedElement.isConnected) {
+        cachedElement = document.querySelector(selector);
+      }
+      if (cachedElement) {
+        applyPatchesToElement(cachedElement, patches);
       }
     },
   );
@@ -506,7 +480,6 @@ function renderLive(
   // Register handler to be called on model updates
   runtime.registerComponent(componentId, handler);
 
-  // Render initial HTML
   const initialHtml = toHtml(initial);
 
   return `<div data-lily-component="${componentId}">${initialHtml}</div>`;
@@ -525,27 +498,33 @@ function renderSimple(
   const componentId = runtime.nextComponentId();
   const selector = `[data-lily-component="${componentId}"]`;
 
-  const { slice, view, compare } = component;
+  const { slice, render, compare } = component;
 
-  // Create selective handler
   const compareStrategy =
     compare instanceof StructuralEqual ? isEqual : referenceEqual;
+
+  let cachedElement = null;
 
   const handler = runtime.createSelective(
     selector,
     slice,
     compareStrategy,
-    (_data, model) => {
-      const html = toHtml(view(model));
-      runtime.setInnerHtml(selector, html);
+    (data) => {
+      const html = toHtml(render(data));
+      // Re-query only if detached — handles re-mounts, free in the normal case
+      if (!cachedElement || !cachedElement.isConnected) {
+        cachedElement = document.querySelector(selector);
+      }
+      if (cachedElement) {
+        cachedElement.innerHTML = html;
+      }
     },
   );
 
   // Register handler to be called on model updates
   runtime.registerComponent(componentId, handler);
 
-  // Render initial HTML
-  const initialHtml = toHtml(view(model));
+  const initialHtml = toHtml(render(slice(model)));
 
   return `<div data-lily-component="${componentId}">${initialHtml}</div>`;
 }

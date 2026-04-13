@@ -56,13 +56,3 @@ export function setSessionConfig(runtime, persistence, get, set) {
   });
 }
 
-/** Write a field to localStorage */
-export function writeField(prefix, key, jsonValue) {
-  try {
-    const fullKey = prefix + key;
-    const serialised = JSON.stringify(jsonValue);
-    localStorage.setItem(fullKey, serialised);
-  } catch (error) {
-    console.error(`Failed to persist session field "${key}":`, error);
-  }
-}

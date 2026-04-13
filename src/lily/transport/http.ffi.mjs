@@ -27,6 +27,8 @@ export function connect(postUrl, eventsUrl, handler) {
   let eventSource = null;
   let pending = [];
   let isConnected = false;
+  let persistScheduled = false;
+  let isFlushing = false;
 
   // -------------------------------------------------------------------------
   // Offline queue helpers
@@ -46,51 +48,63 @@ export function connect(postUrl, eventsUrl, handler) {
   /** Add message to pending queue and persist to localStorage */
   function queuePending(text) {
     pending.push(text);
-    try {
-      localStorage.setItem(STORAGE_KEY_PENDING, JSON.stringify(pending));
-    } catch (error) {
-      console.error("Failed to persist pending queue:", error);
-      // Message remains in-memory pending array, will be sent on next flush
+    // Coalesce rapid queuing into one localStorage write per microtask.
+    // Naive immediate writes are O(n²): each call stringifies a longer array.
+    if (!persistScheduled) {
+      persistScheduled = true;
+      queueMicrotask(function () {
+        persistScheduled = false;
+        try {
+          localStorage.setItem(STORAGE_KEY_PENDING, JSON.stringify(pending));
+        } catch (_error) {
+          // Quota exceeded — messages remain in-memory, sent on reconnect
+        }
+      });
     }
   }
 
   /** Send all pending messages via POST when connection is available */
-  function flushPending() {
-    pending = getPending();
+  async function flushPending() {
+    // Guard against a second concurrent flush if onopen fires again mid-flush
+    if (isFlushing) return;
+    // Use in-memory queue; load from storage only on first flush after page load
+    if (pending.length === 0) {
+      pending = getPending();
+    }
     if (pending.length === 0) return;
 
-    const promises = [];
-    for (const text of pending) {
-      if (!isConnected) break;
+    isFlushing = true;
+    const batchSize = 10;
+    let totalSent = 0;
 
-      promises.push(
-        fetch(postUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: text,
+    for (let i = 0; i < pending.length; i += batchSize) {
+      if (!isConnected) break;
+      const batch = pending.slice(i, i + batchSize);
+      const results = await Promise.allSettled(
+        batch.map(function (text) {
+          return fetch(postUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: text,
+          });
         }),
       );
+      const sent = results.filter(function (result) {
+        return result.status === "fulfilled";
+      }).length;
+      totalSent += sent;
+      if (sent < batch.length) break;
     }
 
-    // Remove successfully sent messages from queue
-    Promise.allSettled(promises).then(function (results) {
-      const successCount = results.filter(function (r) {
-        return r.status === "fulfilled";
-      }).length;
+    if (totalSent === pending.length) {
+      localStorage.removeItem(STORAGE_KEY_PENDING);
+      pending = [];
+    } else if (totalSent > 0) {
+      pending = pending.slice(totalSent);
+      localStorage.setItem(STORAGE_KEY_PENDING, JSON.stringify(pending));
+    }
 
-      if (successCount === pending.length) {
-        // All messages sent successfully
-        localStorage.removeItem(STORAGE_KEY_PENDING);
-        pending = [];
-      } else if (successCount > 0) {
-        // Some messages sent, keep the rest queued
-        const remaining = pending.slice(successCount);
-        localStorage.setItem(STORAGE_KEY_PENDING, JSON.stringify(remaining));
-        pending = remaining;
-      }
-    });
+    isFlushing = false;
   }
 
   // -------------------------------------------------------------------------
@@ -138,7 +152,6 @@ export function connect(postUrl, eventsUrl, handler) {
     /** Send message to server via POST (queues if offline) */
     send(text) {
       if (isConnected) {
-        // Connected: attempt immediate send, queue on failure
         fetch(postUrl, {
           method: "POST",
           headers: {
@@ -146,15 +159,12 @@ export function connect(postUrl, eventsUrl, handler) {
           },
           body: text,
         })
-          .then(function () {
-            // Success - nothing to do
-          })
+          .then(function () {})
           .catch(function (error) {
             console.error("Failed to POST message:", error);
             queuePending(text);
           });
       } else {
-        // Disconnected: queue immediately
         queuePending(text);
       }
     },

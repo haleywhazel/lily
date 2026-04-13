@@ -252,7 +252,6 @@ fn handle_client_message_logic(
   client_id: String,
   payload: message,
 ) -> ServerState(model, message) {
-  // Update store
   let updated_store = store.apply(state.store, message: payload)
   let new_sequence = state.sequence + 1
 
@@ -261,7 +260,6 @@ fn handle_client_message_logic(
   let encoded = transport.encode(server_message, serialiser: state.serialiser)
   broadcast_except(state.clients, encoded, except: client_id)
 
-  // Send an acknowledgement to the originating client
   let acknowledge = transport.Acknowledge(sequence: new_sequence)
   let acknowledge_encoded =
     transport.encode(acknowledge, serialiser: state.serialiser)
@@ -270,7 +268,6 @@ fn handle_client_message_logic(
     Error(Nil) -> Nil
   }
 
-  // Call user hook if registered
   case state.on_message_hook {
     option.Some(hook) -> hook(payload, updated_store.model, client_id)
     option.None -> Nil
@@ -481,6 +478,17 @@ fn platform_start(
 // =============================================================================
 
 @target(javascript)
+/// Call the connect method on the server handle
+@external(javascript, "./server.ffi.mjs", "connect")
+fn ffi_connect(
+  _handle: ServerHandle(model, message),
+  _client_id: String,
+  _send: fn(String) -> Nil,
+) -> Nil {
+  Nil
+}
+
+@target(javascript)
 /// Create server with closure-scoped mutable state
 @external(javascript, "./server.ffi.mjs", "createServer")
 fn ffi_create_server(
@@ -493,17 +501,6 @@ fn ffi_create_server(
     ServerState(model, message),
 ) -> ServerHandle(model, message) {
   panic as "JavaScript only"
-}
-
-@target(javascript)
-/// Call the connect method on the server handle
-@external(javascript, "./server.ffi.mjs", "connect")
-fn ffi_connect(
-  _handle: ServerHandle(model, message),
-  _client_id: String,
-  _send: fn(String) -> Nil,
-) -> Nil {
-  Nil
 }
 
 @target(javascript)

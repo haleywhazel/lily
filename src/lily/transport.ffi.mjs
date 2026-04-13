@@ -132,7 +132,6 @@ function autoDecodeInner(json) {
       fieldIndex++;
     }
 
-    // Instantiate using the constructor
     return new ctor(...fields);
   }
 
@@ -198,7 +197,6 @@ function walkAndRegister(value) {
     // Skip built-in types
     if (name === "Object" || name === "Array") return;
 
-    // Register constructor
     if (!constructorRegistry.has(name)) {
       constructorRegistry.set(name, ctor);
     }

@@ -43,11 +43,10 @@ export function applyPatchesToElement(rootElement, patches) {
 }
 
 /** Create a specific Runtime */
-export function createRuntime(store, apply, notify, subscribe) {
+export function createRuntime(store, apply, notify) {
   let currentStore = store;
   const applyMessage = apply;
   const notifyHandlers = notify;
-  const subscribeToStore = subscribe;
   let onMessageHook = null;
   let userMessageHook = null;
   let frameScheduled = false;
@@ -62,8 +61,6 @@ export function createRuntime(store, apply, notify, subscribe) {
 
   function flushNotify() {
     notifyHandlers(currentStore);
-    // Also notify component handlers (simple, each, live, etc.)
-    // Each handler is already selective — it only updates when its slice changes
     const model = currentStore.model;
     for (const handler of componentRegistry.values()) {
       handler(model);
@@ -102,7 +99,6 @@ export function createRuntime(store, apply, notify, subscribe) {
     }
   }
 
-  // Return runtime handle with all operations as methods
   return {
     sendMessage(message) {
       currentStore = applyMessage(currentStore, message);
@@ -158,7 +154,6 @@ export function createRuntime(store, apply, notify, subscribe) {
     clearComponentCache(selector) {
       compareStrategies.delete(selector);
     },
-    // Component state (moved from component.ffi.mjs)
     nextComponentId() {
       return `c${componentCounter++}`;
     },
@@ -187,7 +182,7 @@ export function createRuntime(store, apply, notify, subscribe) {
         if (hasPrevious && compare(previous, next)) return;
         previous = next;
         hasPrevious = true;
-        handler(next, model);
+        handler(next);
       };
     },
     referenceEqual(a, b) {
@@ -198,9 +193,6 @@ export function createRuntime(store, apply, notify, subscribe) {
       if (element) {
         element.innerHTML = html;
       }
-    },
-    subscribeHandler(selector, handler) {
-      currentStore = subscribeToStore(currentStore, selector, handler);
     },
     setConnectionStatus(connected) {
       if (!connectionStatusConfig) return;
@@ -238,9 +230,6 @@ export function referenceEqual(a, b) {
 // =============================================================================
 // WRAPPER EXPORTS (for Gleam FFI bindings)
 // =============================================================================
-
-// The following functions basically creates wrappers for everything defined
-// in the massive return block above. They should be fairly self-evident.
 
 export function applyRemoteMessage(runtime, message) {
   runtime.applyRemoteMessage(message);

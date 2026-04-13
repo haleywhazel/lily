@@ -93,7 +93,7 @@ pub opaque type Component(model, message, html) {
   /// Simple dynamic component that re-renders via innerHTML when slice changes
   Simple(
     slice: fn(model) -> Dynamic,
-    view: fn(model) -> html,
+    render: fn(Dynamic) -> html,
     compare: CompareStrategy,
   )
 
@@ -101,7 +101,7 @@ pub opaque type Component(model, message, html) {
   Live(
     slice: fn(model) -> Dynamic,
     initial: html,
-    apply: fn(model) -> List(Patch),
+    apply: fn(Dynamic) -> List(Patch),
     compare: CompareStrategy,
   )
 
@@ -125,21 +125,11 @@ pub opaque type Component(model, message, html) {
 
   /// Keyed list with patch-based rendering for each child
   ///
-  /// Just like the produce function within Each, the apply function combines
-  /// both the slicing and the patching into a single function that generates
-  /// a list of keys and patch strategies.
-  ///
-  /// ## Example
-  ///
-  /// ```gleam
-  /// fn(model) {
-  ///   list.map(slice(model), fn(item) {
-  ///     #(string.inspect(key(item)), patch(item))
-  ///   })
-  /// }
-  /// ```
+  /// `apply` returns key/patch pairs for all items in one pass. `initial`
+  /// returns key/html pairs for rendering new items when their key first
+  /// appears. Keys are derived from `apply`'s result, avoiding a separate
+  /// iteration.
   EachLive(
-    keys: fn(model) -> List(String),
     initial: fn(model) -> List(#(String, html)),
     apply: fn(model) -> List(#(String, List(Patch))),
     compare: CompareStrategy,
@@ -264,9 +254,6 @@ pub fn each_live(
   patch patch: fn(item) -> List(Patch),
 ) -> Component(model, message, html) {
   EachLive(
-    keys: fn(model) {
-      list.map(slice(model), fn(item) { string.inspect(key(item)) })
-    },
     initial: fn(model) {
       list.map(slice(model), fn(item) {
         #(string.inspect(key(item)), initial(item))
@@ -337,7 +324,7 @@ pub fn live(
   Live(
     slice: fn(model) { to_dynamic(slice(model)) },
     initial: initial,
-    apply: fn(model) { patch(slice(model)) },
+    apply: fn(data) { patch(from_dynamic(data)) },
     compare: ReferenceEqual,
   )
 }
@@ -430,7 +417,7 @@ pub fn simple(
 ) -> Component(model, message, html) {
   Simple(
     slice: fn(model) { to_dynamic(slice(model)) },
-    view: fn(model) { render(slice(model)) },
+    render: fn(data) { render(from_dynamic(data)) },
     compare: ReferenceEqual,
   )
 }
@@ -472,8 +459,8 @@ pub fn structural(
 ) -> Component(model, message, html) {
   case component {
     Static(content) -> Static(content)
-    Simple(slice, view, _) ->
-      Simple(slice: slice, view: view, compare: StructuralEqual)
+    Simple(slice, render, _) ->
+      Simple(slice: slice, render: render, compare: StructuralEqual)
     Live(slice, initial, apply, _) ->
       Live(
         slice: slice,
@@ -482,13 +469,8 @@ pub fn structural(
         compare: StructuralEqual,
       )
     Each(produce, _) -> Each(produce: produce, compare: StructuralEqual)
-    EachLive(keys, initial, apply, _) ->
-      EachLive(
-        keys: keys,
-        initial: initial,
-        apply: apply,
-        compare: StructuralEqual,
-      )
+    EachLive(initial, apply, _) ->
+      EachLive(initial: initial, apply: apply, compare: StructuralEqual)
     Fragment(children) -> Fragment(children)
     RequireConnection(inner, connected) ->
       RequireConnection(inner: structural(inner), connected: connected)
@@ -531,6 +513,18 @@ fn render_tree(
 /// compilation time.
 @external(javascript, "./component.ffi.mjs", "identity")
 fn to_dynamic(value: a) -> Dynamic {
+  // This will never run
+  let _ = value
+  panic as "This should never be called - JavaScript only"
+}
+
+@target(javascript)
+/// Casts a Dynamic value back to the slice type. On JavaScript this is an
+/// identity function — the value is already the correct type at runtime.
+/// Used to pass the already-extracted slice result to render/patch functions
+/// without calling the user's slice function a second time.
+@external(javascript, "./component.ffi.mjs", "identity")
+fn from_dynamic(value: Dynamic) -> a {
   // This will never run
   let _ = value
   panic as "This should never be called - JavaScript only"

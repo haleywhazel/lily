@@ -76,7 +76,8 @@ encode_value(Value) when is_tuple(Value) ->
     PascalName = snake_to_pascal(TagName),
     Size = tuple_size(Value),
 
-    %% Build list of {Key, JsonValue} pairs
+    %% Build [{Key, JsonValue}] in forward order by folding high-to-low index,
+    %% prepending each field — avoids the reverse/1 pass at the end
     Fields =
         lists:foldl(fun(Index, Acc) ->
                        FieldValue = element(Index + 1, Value),
@@ -85,9 +86,8 @@ encode_value(Value) when is_tuple(Value) ->
                        [{FieldKey, EncodedValue} | Acc]
                     end,
                     [{<<"_">>, 'gleam@json':string(PascalName)}],
-                    lists:seq(1, Size - 1)),
-    'gleam@json':object(
-        lists:reverse(Fields));
+                    lists:seq(Size - 1, 1, -1)),
+    'gleam@json':object(Fields);
 encode_value(_Value) ->
     %% Fallback for unknown types – just pass through as null
     'gleam@json':null().
@@ -168,40 +168,42 @@ extract_fields(Map, Index, Acc) ->
 
 %% Convert PascalCase binary to snake_case binary
 %% e.g., <<"RefreshStats">> -> <<"refresh_stats">>
+%%
+%% Accumulates into an iolist and converts once at the end.
+%% Binary-append per character is O(n²); iolist prepend + reverse is O(n).
 pascal_to_snake(<<>>) ->
     <<>>;
 pascal_to_snake(Bin) ->
-    pascal_to_snake(Bin, <<>>).
+    iolist_to_binary(pascal_to_snake(Bin, [])).
 
 pascal_to_snake(<<>>, Acc) ->
-    Acc;
+    lists:reverse(Acc);
 pascal_to_snake(<<C, Rest/binary>>, Acc) when C >= $A, C =< $Z ->
     Lower = C + 32,
     case Acc of
-        <<>> ->
-            %% First character, no underscore prefix
-            pascal_to_snake(Rest, <<Lower>>);
+        [] ->
+            %% First character — no underscore prefix
+            pascal_to_snake(Rest, [Lower]);
         _ ->
-            %% Uppercase after other chars, insert underscore
-            pascal_to_snake(Rest, <<Acc/binary, $_, Lower>>)
+            pascal_to_snake(Rest, [Lower, $_ | Acc])
     end;
 pascal_to_snake(<<C, Rest/binary>>, Acc) ->
-    pascal_to_snake(Rest, <<Acc/binary, C>>).
+    pascal_to_snake(Rest, [C | Acc]).
 
 %% Convert snake_case binary to PascalCase binary
 %% e.g., <<"refresh_stats">> -> <<"RefreshStats">>
 snake_to_pascal(<<>>) ->
     <<>>;
 snake_to_pascal(Bin) ->
-    snake_to_pascal(Bin, <<>>, true).
+    iolist_to_binary(snake_to_pascal(Bin, [], true)).
 
 snake_to_pascal(<<>>, Acc, _CapNext) ->
-    Acc;
+    lists:reverse(Acc);
 snake_to_pascal(<<$_, Rest/binary>>, Acc, _CapNext) ->
-    %% Underscore: skip it, capitalise next character
+    %% Underscore: skip it, capitalise the next character
     snake_to_pascal(Rest, Acc, true);
 snake_to_pascal(<<C, Rest/binary>>, Acc, true) when C >= $a, C =< $z ->
     Upper = C - 32,
-    snake_to_pascal(Rest, <<Acc/binary, Upper>>, false);
+    snake_to_pascal(Rest, [Upper | Acc], false);
 snake_to_pascal(<<C, Rest/binary>>, Acc, _CapNext) ->
-    snake_to_pascal(Rest, <<Acc/binary, C>>, false).
+    snake_to_pascal(Rest, [C | Acc], false).
