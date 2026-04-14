@@ -44,7 +44,7 @@ export function createServer(
 
     /** Set the message hook */
     setHook(hook) {
-      state = { ...state, on_message_hook: new Some(hook) };
+      state.on_message_hook = new Some(hook);
     },
   };
 }

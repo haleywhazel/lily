@@ -51,7 +51,6 @@ export function createRuntime(store, apply, notify) {
   let userMessageHook = null;
   let frameScheduled = false;
   let dirty = false;
-  const compareStrategies = new Map();
   let currentTransport = null;
   let componentCounter = 0;
   const componentRegistry = new Map();
@@ -124,7 +123,7 @@ export function createRuntime(store, apply, notify) {
       scheduleNotify();
     },
     dispatchModel(model) {
-      currentStore = { ...currentStore, model };
+      currentStore.model = model;
       scheduleNotify();
     },
     setStore(store) {
@@ -148,11 +147,9 @@ export function createRuntime(store, apply, notify) {
     setLastSequence(sequence) {
       localStorage.setItem(STORAGE_KEY_SEQUENCE, String(sequence));
     },
-    setCompareStrategy(selector, compare) {
-      compareStrategies.set(selector, compare);
-    },
-    clearComponentCache(selector) {
-      compareStrategies.delete(selector);
+    clearComponentCache(_selector) {
+      // No-op — component state is reset by renderTree (resetComponentCounter
+      // + clearRegistry). Kept for API compatibility with Gleam FFI binding.
     },
     nextComponentId() {
       return `c${componentCounter++}`;
@@ -173,11 +170,10 @@ export function createRuntime(store, apply, notify) {
       return currentStore.model;
     },
     // Rendering helpers (used by component.ffi.mjs)
-    createSelective(selector, select, defaultCompare, handler) {
+    createSelective(selector, select, compare, handler) {
       let previous = undefined;
       let hasPrevious = false;
       return function (model) {
-        const compare = compareStrategies.get(selector) || defaultCompare;
         const next = select(model);
         if (hasPrevious && compare(previous, next)) return;
         previous = next;
@@ -200,14 +196,14 @@ export function createRuntime(store, apply, notify) {
         currentStore.model,
         connected,
       );
-      currentStore = { ...currentStore, model: updatedModel };
+      currentStore.model = updatedModel;
       scheduleNotify();
     },
     setConnectionStatusConfig(get, set) {
       connectionStatusConfig = { get, set };
     },
     setModel(model) {
-      currentStore = { ...currentStore, model };
+      currentStore.model = model;
     },
     setSessionConfig(config) {
       sessionConfig = config;

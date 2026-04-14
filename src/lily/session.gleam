@@ -198,14 +198,9 @@ fn hydrate_session(
 
   list.fold(fields, initial, fn(session, field) {
     let Field(key, _get, set) = field
-    case read_field(storage_prefix(), key) {
-      Ok(dynamic_value) ->
-        case set(session, dynamic_value) {
-          Ok(updated) -> updated
-          Error(_) -> session
-        }
-      Error(_) -> session
-    }
+    read_field(storage_prefix(), key)
+    |> result.try(set(session, _))
+    |> result.unwrap(session)
   })
 }
 
