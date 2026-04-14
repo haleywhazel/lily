@@ -36,7 +36,6 @@ fn new_runtime() -> client.Runtime(Model, Message) {
 pub fn client_start_returns_runtime_test() {
   test_setup.reset_dom()
   test_setup.reset_mocks()
-  // Just check it doesn't crash and returns a value we can use
   let runtime =
     store.new(test_fixtures.initial_model(), with: test_fixtures.update)
     |> client.start
@@ -69,7 +68,6 @@ pub fn client_start_notifies_handlers_test() {
       test_ref.set(ref, test_ref.get(ref) + 1)
     })
     |> client.start
-  // client.start calls store.notify, so handler should have been called once
   test_ref.get(ref)
   |> should.equal(1)
 }
@@ -82,7 +80,6 @@ pub fn client_start_notifies_handlers_test() {
 pub fn client_dispatch_returns_function_test() {
   test_setup.reset_dom()
   let runtime = new_runtime()
-  // dispatch returns a fn — calling it should not crash
   let d = client.dispatch(runtime)
   d(Noop)
   True
@@ -163,7 +160,6 @@ pub fn client_connection_status_tracks_connect_test() {
   test_setup.reset_mocks()
   let runtime = new_runtime()
 
-  // Configure connection status tracking
   let _runtime =
     client.connection_status(
       runtime,
@@ -171,10 +167,8 @@ pub fn client_connection_status_tracks_connect_test() {
       set: fn(model, status) { test_fixtures.Model(..model, connected: status) },
     )
 
-  // Simulate a reconnect by connecting with a mock connector that fires on_reconnect
   let reconnect_ref = test_ref.new(False)
   let connector = fn(handler: transport.Handler) {
-    // Fire on_reconnect immediately (simulates instant connection)
     handler.on_reconnect()
     transport.new(send: fn(_) { Nil }, close: fn() { Nil })
   }
@@ -185,7 +179,6 @@ pub fn client_connection_status_tracks_connect_test() {
       serialiser: test_fixtures.custom_serialiser(),
     )
 
-  // Connection status should now be True in the model
   client.get_current_model(runtime).connected
   |> should.be_true
   let _ = reconnect_ref
@@ -204,7 +197,6 @@ pub fn client_connection_status_tracks_disconnect_test() {
       set: fn(model, status) { test_fixtures.Model(..model, connected: status) },
     )
 
-  // Connect then disconnect
   let connector = fn(handler: transport.Handler) {
     handler.on_reconnect()
     handler.on_disconnect()
@@ -217,7 +209,6 @@ pub fn client_connection_status_tracks_disconnect_test() {
       serialiser: test_fixtures.custom_serialiser(),
     )
 
-  // After disconnect, connected should be False
   client.get_current_model(runtime).connected
   |> should.be_false
 }
@@ -259,11 +250,9 @@ pub fn client_connect_sends_resync_on_reconnect_test() {
       serialiser: test_fixtures.custom_serialiser(),
     )
 
-  // Trigger reconnect
   let handler = test_ref.get(handler_ref)
   handler.on_reconnect()
 
-  // A Resync message should have been sent
   let sent = test_ref.get(sent_ref)
   sent
   |> should.not_equal([])
@@ -301,7 +290,6 @@ pub fn client_connect_sends_client_message_on_dispatch_test() {
 
   client.dispatch(runtime)(Increment)
 
-  // A ClientMessage should have been sent
   let sent = test_ref.get(sent_ref)
   sent
   |> should.not_equal([])

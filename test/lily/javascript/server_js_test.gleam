@@ -84,11 +84,9 @@ pub fn js_server_disconnect_stops_broadcast_test() {
   let get_c2 = connect_client(srv, "c2")
   server.disconnect(srv, client_id: "c2")
   server.incoming(srv, client_id: "c1", text: encode_client(Increment))
-  // c2 received nothing (disconnected before incoming)
   get_c2()
   |> list.length
   |> should.equal(0)
-  // c1 received Acknowledge
   get_c1()
   |> list.length
   |> should.equal(1)
@@ -97,7 +95,6 @@ pub fn js_server_disconnect_stops_broadcast_test() {
 @target(javascript)
 pub fn js_server_disconnect_nonexistent_test() {
   let srv = new_server()
-  // Should not crash
   server.disconnect(srv, client_id: "ghost")
   True
   |> should.be_true
@@ -152,7 +149,6 @@ pub fn js_server_incoming_does_not_broadcast_to_sender_test() {
   let get_c1 = connect_client(srv, "c1")
   let _get_c2 = connect_client(srv, "c2")
   server.incoming(srv, client_id: "c1", text: encode_client(Increment))
-  // c1 should receive exactly one message (Acknowledge only)
   let messages = get_c1()
   messages
   |> list.length
@@ -291,7 +287,6 @@ pub fn js_server_incoming_invalid_json_test() {
   let srv = new_server()
   let get_c1 = connect_client(srv, "c1")
   server.incoming(srv, client_id: "c1", text: "not json at all")
-  // Server ignores invalid — no message sent
   get_c1()
   |> list.length
   |> should.equal(0)

@@ -235,6 +235,7 @@ pub fn on_message(
 pub fn start(store: Store(model, message)) -> Runtime(model, message) {
   let handle = create_runtime(store, store.apply, store.notify)
   set_store(handle, store)
+  initial_notify(handle)
   Runtime(handle)
 }
 
@@ -472,6 +473,14 @@ fn set_on_message_hook(_handle: RuntimeHandle, _hook: fn(message) -> Nil) -> Nil
 /// Set the current store
 @external(javascript, "./client.ffi.mjs", "setStore")
 fn set_store(_handle: RuntimeHandle, _store: Store(model, message)) -> Nil {
+  Nil
+}
+
+@target(javascript)
+/// Notify all subscribers with the current state — called once during start to
+/// trigger the initial render
+@external(javascript, "./client.ffi.mjs", "initialNotify")
+fn initial_notify(_handle: RuntimeHandle) -> Nil {
   Nil
 }
 

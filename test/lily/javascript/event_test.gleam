@@ -59,7 +59,6 @@ pub fn event_on_click_without_data_msg_ignored_test() {
       Ok(Increment)
     })
   test_dom.click("#no-msg")
-  // No data-msg attribute — click ignored, count stays 0
   client.get_current_model(runtime).count
   |> should.equal(0)
 }
@@ -77,7 +76,6 @@ pub fn event_on_click_disabled_ignored_test() {
       Ok(Increment)
     })
   test_dom.click("[data-msg=\"increment\"]")
-  // Inside data-lily-disabled — click ignored
   client.get_current_model(runtime).count
   |> should.equal(0)
 }

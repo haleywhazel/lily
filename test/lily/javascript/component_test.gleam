@@ -24,7 +24,6 @@ import lily/test_setup
 // HELPERS
 // =============================================================================
 
-// Raw-string html — no conversion needed
 @target(javascript)
 fn to_html(html: String) -> String {
   html
@@ -75,7 +74,6 @@ pub fn component_mount_renders_to_dom_test() {
         })
       },
     )
-  // #app should have some content
   test_dom.inner_html("#app")
   |> should.not_equal("")
 }
@@ -84,7 +82,6 @@ pub fn component_mount_renders_to_dom_test() {
 pub fn component_mount_clears_previous_test() {
   test_setup.reset_dom()
   let runtime = new_runtime()
-  // Mount once with "first"
   let _r =
     component.mount(
       runtime,
@@ -96,7 +93,6 @@ pub fn component_mount_clears_previous_test() {
   first_html
   |> string.contains("first")
   |> should.be_true
-  // Mount again with "second" — should replace
   let _r2 =
     component.mount(
       runtime,
@@ -243,8 +239,6 @@ pub fn component_live_applies_set_attribute_patch_test() {
       },
     )
   client.dispatch(runtime)(Increment)
-  // The live component's root has data-lily-component attr; patch targets "" (root)
-  // We check the component div has the data-count attribute set to 1
   test_dom.get_attribute("[data-lily-component]", "data-count")
   |> should.equal("1")
 }
@@ -320,7 +314,6 @@ pub fn component_each_renders_keyed_list_test() {
 pub fn component_require_connection_adds_disabled_when_disconnected_test() {
   test_setup.reset_dom()
   let runtime = new_runtime()
-  // initial model has connected: False
   let _r =
     component.mount(
       runtime,
@@ -333,7 +326,6 @@ pub fn component_require_connection_adds_disabled_when_disconnected_test() {
         |> component.require_connection(fn(m: Model) { m.connected })
       },
     )
-  // data-lily-disabled should be present (connected is False)
   test_dom.has_attribute("[data-lily-component]", "data-lily-disabled")
   |> should.be_true
 }
@@ -359,7 +351,6 @@ pub fn component_require_connection_removes_disabled_when_connected_test() {
         |> component.require_connection(fn(m: Model) { m.connected })
       },
     )
-  // connected is True — no disabled attributes
   test_dom.has_attribute("[data-lily-component]", "data-lily-disabled")
   |> should.be_false
 }
@@ -370,10 +361,8 @@ pub fn component_require_connection_removes_disabled_when_connected_test() {
 
 @target(javascript)
 pub fn component_structural_on_static_is_noop_test() {
-  // structural() on a Static returns the same Static
   let static_component = component.static("hello")
   let structural_component = component.structural(static_component)
-  // Both should render the same content — test indirectly via mount
   test_setup.reset_dom()
   let runtime = new_runtime()
   let _r =
@@ -389,8 +378,6 @@ pub fn component_structural_on_static_is_noop_test() {
 
 @target(javascript)
 pub fn component_structural_on_simple_test() {
-  // structural() on a Simple switches compare strategy
-  // Test that it still renders correctly
   test_setup.reset_dom()
   let runtime = new_runtime()
   let _r =

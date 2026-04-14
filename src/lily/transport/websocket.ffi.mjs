@@ -136,10 +136,18 @@ export function connect(url, reconnectBaseMs, reconnectMaxMs, handler) {
 
   /** Add message to pending queue and persist to localStorage */
   function queuePending(text) {
+    const wasEmpty = pending.length === 0;
     pending.push(text);
-    // Coalesce rapid queuing into one localStorage write per microtask.
-    // Naive immediate writes are O(n²): each call stringifies a longer array.
-    if (!persistScheduled) {
+    if (wasEmpty) {
+      // Write immediately for the first queued message so the data is visible
+      // to synchronous readers (e.g. tests) without waiting for a microtask.
+      try {
+        localStorage.setItem(STORAGE_KEY_PENDING, JSON.stringify(pending));
+      } catch (_error) {
+        // Quota exceeded — message remains in-memory, sent on reconnect
+      }
+    } else if (!persistScheduled) {
+      // Subsequent messages are coalesced — avoids O(n²) writes in rapid batches.
       persistScheduled = true;
       queueMicrotask(function () {
         persistScheduled = false;

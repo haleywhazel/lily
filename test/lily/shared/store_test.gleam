@@ -29,7 +29,6 @@ pub fn new_store_has_empty_handlers_test() {
 pub fn new_store_retains_update_function_test() {
   let test_store =
     store.new(test_fixtures.initial_model(), with: test_fixtures.update)
-  // Apply via the update fn directly and verify it produces expected model
   let updated = test_store.update(test_store.model, Increment)
   updated.count
   |> should.equal(1)
@@ -184,7 +183,6 @@ pub fn notify_calls_all_handlers_test() {
 pub fn notify_with_no_handlers_does_not_crash_test() {
   store.new(test_fixtures.initial_model(), with: test_fixtures.update)
   |> store.notify
-  // No crash — test passes
   True
   |> should.be_true
 }

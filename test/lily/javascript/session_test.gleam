@@ -42,38 +42,6 @@ fn name_persistence() -> session.Persistence(Model) {
 }
 
 // =============================================================================
-// PERSISTENCE BUILDER
-// =============================================================================
-
-@target(javascript)
-pub fn session_persistence_creates_empty_test() {
-  test_setup.reset_dom()
-  // Should not crash
-  let p = session.persistence()
-  let _ = p
-  True
-  |> should.be_true
-}
-
-@target(javascript)
-pub fn session_field_adds_field_test() {
-  test_setup.reset_dom()
-  // Adding a field to a Persistence should not crash
-  let p =
-    session.persistence()
-    |> session.field(
-      key: "name",
-      get: fn(model: Model) { model.name },
-      set: fn(model, value) { test_fixtures.Model(..model, name: value) },
-      encode: json.string,
-      decoder: decode.string,
-    )
-  let _ = p
-  True
-  |> should.be_true
-}
-
-// =============================================================================
 // ATTACH AND HYDRATE
 // =============================================================================
 

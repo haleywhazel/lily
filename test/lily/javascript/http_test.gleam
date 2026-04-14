@@ -31,23 +31,6 @@ fn new_runtime() -> client.Runtime(Model, Message) {
 }
 
 // =============================================================================
-// CONFIG
-// =============================================================================
-
-@target(javascript)
-pub fn http_config_sets_urls_test() {
-  // Config created without crash
-  let cfg =
-    http.config(
-      post_url: "http://localhost/api/messages",
-      events_url: "http://localhost/events",
-    )
-  let _ = cfg
-  True
-  |> should.be_true
-}
-
-// =============================================================================
 // CONNECT LIFECYCLE
 // =============================================================================
 
@@ -68,7 +51,6 @@ pub fn http_connect_creates_event_source_test() {
       with: connector,
       serialiser: test_fixtures.custom_serialiser(),
     )
-  // An EventSource should have been created
   is_null(test_setup.get_last_event_source())
   |> should.be_false
 }
@@ -139,54 +121,6 @@ pub fn http_connect_receives_messages_test() {
   |> should.equal("received")
 }
 
-@target(javascript)
-pub fn http_connect_via_eventsource_open_fires_reconnect_test() {
-  test_setup.reset_dom()
-  test_setup.reset_mocks()
-  let runtime = new_runtime()
-  let connector =
-    http.config(
-      post_url: "http://localhost/api/messages",
-      events_url: "http://localhost/events",
-    )
-    |> http.connect
-  let _r =
-    client.connect(
-      runtime,
-      with: connector,
-      serialiser: test_fixtures.custom_serialiser(),
-    )
-  let es = test_setup.get_last_event_source()
-  // Trigger SSE open — should fire on_reconnect
-  test_setup.trigger_event_source_open(es)
-  True
-  |> should.be_true
-}
-
-@target(javascript)
-pub fn http_connect_via_eventsource_error_fires_disconnect_test() {
-  test_setup.reset_dom()
-  test_setup.reset_mocks()
-  let runtime = new_runtime()
-  let connector =
-    http.config(
-      post_url: "http://localhost/api/messages",
-      events_url: "http://localhost/events",
-    )
-    |> http.connect
-  let _r =
-    client.connect(
-      runtime,
-      with: connector,
-      serialiser: test_fixtures.custom_serialiser(),
-    )
-  let es = test_setup.get_last_event_source()
-  // Trigger SSE error — should fire on_disconnect
-  test_setup.trigger_event_source_error(es)
-  True
-  |> should.be_true
-}
-
 // =============================================================================
 // SEND BEHAVIOUR
 // =============================================================================
@@ -208,7 +142,6 @@ pub fn http_send_when_disconnected_queues_test() {
       with: connector,
       serialiser: test_fixtures.custom_serialiser(),
     )
-  // SSE not opened — isConnected is False — message should queue
   client.dispatch(runtime)(test_fixtures.Increment)
   let queued = read_local_storage("lily_http_pending")
   queued

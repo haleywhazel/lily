@@ -215,6 +215,9 @@ export function createRuntime(store, apply, notify) {
     setUserMessageHook(hook) {
       userMessageHook = hook;
     },
+    initialNotify() {
+      flushNotify();
+    },
   };
 }
 
@@ -285,6 +288,10 @@ export function setTransport(runtime, transport) {
 
 export function setUserMessageHook(runtime, hook) {
   runtime.setUserMessageHook(hook);
+}
+
+export function initialNotify(runtime) {
+  runtime.initialNotify();
 }
 
 // =============================================================================
