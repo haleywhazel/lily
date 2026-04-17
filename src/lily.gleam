@@ -16,10 +16,12 @@
 //// 2. [`lily/component`](./lily/component.html): components for frontend
 ////    interactivity (JS target only)
 //// 3. [`lily/event`](./lily/event.html): event handlers (JS target only)
-//// 4. [`lily/server`](./lily/server.html): server runtime (Erlang target only)
+//// 4. [`lily/server`](./lily/server.html): server runtime (different
+////    implementation for JS and Erlang targets)
 //// 5. [`lily/store`](./lily/store.html): central store, with updates
 ////    dispatched to components
-//// 6. [`lily/transport`](./lily/transport.html): transport abstraction and wire protocol
+//// 6. [`lily/transport`](./lily/transport.html): transport abstraction and
+////    wire protocol
 ////
 //// Framework philosophy:
 ////
@@ -37,4 +39,3 @@
 
 /// The current version of Lily.
 pub const version: String = "0.2.0"
-
