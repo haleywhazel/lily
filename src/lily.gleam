@@ -35,3 +35,6 @@
 //// Note that Lily is **experimental**, with breaking changes expected at this
 //// stage.
 
+/// The current version of Lily.
+pub const version: String = "0.2.0"
+
