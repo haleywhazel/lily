@@ -1,193 +1,535 @@
-// IMPORTS
+//// The [`Server`](#Server) holds authoritative state and broadcasts updates
+//// to connected clients. It works on both Erlang and JavaScript targets,
+//// though we recommend Erlang for production use.
+////
+//// On Erlang, the server uses an OTP actor with sequential message
+//// processing. On JavaScript, it uses closure-scoped mutable state (JS is
+//// single-threaded). Both expose identical APIs - the same
+//// [`Server`](#Server) opaque type and public functions work on both
+//// targets.
+////
+//// The server owns the canonical [`Store`](./store.html#Store), applies
+//// client messages sequentially while assigning sequence numbers, broadcasts
+//// updates to all clients except the originator, and sends full state
+//// snapshots to clients that reconnect
+////
+//// ```gleam
+//// import lily/server
+//// import lily/store
+//// import lily/transport
+////
+//// pub fn main() {
+////   // Create your store
+////   let app_store = store.new(initial_model, with: update)
+////
+////   // Start the server
+////   let assert Ok(srv) = server.start(
+////     store: app_store,
+////     serialiser: transport.automatic(),
+////   )
+////
+////   // Register side-effect hook (optional)
+////   server.on_message(srv, fn(msg, model, client_id) {
+////     case msg {
+////       SaveDocument(doc) -> db.write(doc)
+////       _ -> Nil
+////     }
+////   })
+////
+////   // Wire into your transport (mist/wisp WebSocket handler)
+////   // See server/handler.gleam for examples
+//// }
+//// ```
+////
+//// The server is transport-agnostic. It doesn't depend on mist or wisp -
+//// those are your backend dependencies. Use [`server.connect`](#connect),
+//// [`server.disconnect`](#disconnect), and [`server.incoming`](#incoming)
+//// to wire the server into your WebSocket or HTTP handlers. See
+//// `lily/src/lily/server/handler.gleam` for a complete example with mist
+//// and wisp.
+////
+//// Note: within this module, "message" often refers to internal events, not
+//// your user-defined message type for model updates.
+////
 
-@target(erlang)
+// =============================================================================
+// IMPORTS
+// =============================================================================
+
 import gleam/dict.{type Dict}
+import gleam/option.{type Option}
+import gleam/result
+import lily/store.{type Store}
+import lily/transport.{type Serialiser}
+
 @target(erlang)
 import gleam/erlang/process.{type Subject}
 @target(erlang)
 import gleam/otp/actor
-@target(erlang)
-import gleam/result
-@target(erlang)
-import lily/protocol.{type Serialiser}
-@target(erlang)
-import lily/store.{type Store}
 
+// =============================================================================
 // PUBLIC TYPES
+// =============================================================================
 
-@target(erlang)
-pub opaque type ServerEvent(msg) {
-  ClientConnected(client_id: String, subject: Subject(String))
-  ClientDisconnected(client_id: String)
-  Incoming(client_id: String, text: String)
+/// This is a handle to a running Lily server instance. Wraps platform-specific
+/// internals (OTP actor on Erlang, closure-scoped state on JavaScript).
+pub opaque type Server(model, message) {
+  Server(handle: ServerHandle(model, message))
 }
 
+// =============================================================================
 // PUBLIC FUNCTIONS
+// =============================================================================
 
-@target(erlang)
+/// Register a client connection with the server. The `send` callback is how
+/// the server pushes messages back to this specific client.
+///
+/// On Erlang, if you have a `Subject(String)` from mist's WebSocket handler,
+/// wrap it: `send: process.send(outgoing_subject, _)`.
+///
+/// ## Example
+///
+/// ```gleam
+/// // Erlang with mist WebSocket
+/// let outgoing_subject = process.new_subject()
+/// server.connect(srv, client_id: "abc123", send: process.send(outgoing_subject, _))
+///
+/// // JavaScript with Node.js WebSocket
+/// server.connect(srv, client_id: "abc123", send: fn(text) { ws.send(text) })
+/// ```
 pub fn connect(
-  server: Subject(ServerEvent(msg)),
+  server: Server(model, message),
   client_id client_id: String,
-  subject subject: Subject(String),
+  send send: fn(String) -> Nil,
 ) -> Nil {
-  actor.send(server, ClientConnected(client_id:, subject:))
+  platform_connect(server.handle, client_id, send)
 }
 
-@target(erlang)
+/// Unregister a client connection from the server. Called when a client
+/// disconnects.
 pub fn disconnect(
-  server: Subject(ServerEvent(msg)),
+  server: Server(model, message),
   client_id client_id: String,
 ) -> Nil {
-  actor.send(server, ClientDisconnected(client_id:))
+  platform_disconnect(server.handle, client_id)
 }
 
-@target(erlang)
+/// Process an incoming message from a client. The text should be a serialised
+/// [`transport.Protocol`](./transport.html#Protocol) message (JSON string).
 pub fn incoming(
-  server: Subject(ServerEvent(msg)),
+  server: Server(model, message),
   client_id client_id: String,
   text text: String,
 ) -> Nil {
-  actor.send(server, Incoming(client_id:, text:))
+  platform_incoming(server.handle, client_id, text)
 }
 
-@target(erlang)
+/// Register a hook that runs after each client message is processed on the
+/// server. Receives the decoded message, updated model, and client id.
+///
+/// ## Example
+///
+/// ```gleam
+/// server.on_message(server, fn(message, model, client_id) {
+///   case message {
+///     SaveDocument(doc) -> db.write(doc)
+///     SendEmail(to, body) -> email.send(to, body)
+///     _ -> Nil
+///   }
+/// })
+/// ```
+pub fn on_message(
+  server: Server(model, message),
+  hook: fn(message, model, String) -> Nil,
+) -> Nil {
+  platform_set_hook(server.handle, hook)
+}
+
+/// Start a new server instance with the given store and serialiser. Returns
+/// `Ok(server)` on success, or `Error(Nil)` if the server fails to start
+/// (Erlang actor init failure, though this is rare with simple init logic).
+///
+/// On JavaScript, this always returns `Ok`.
+///
+/// ## Example
+///
+/// ```gleam
+/// import lily/server
+/// import lily/store
+///
+/// let app_store = store.new(initial_model, with: update)
+/// let assert Ok(srv) = server.start(store: app_store, serialiser: my_serialiser)
+/// ```
 pub fn start(
-  store store: Store(model, msg),
-  serialiser serialiser: Serialiser(model, msg),
-) -> Result(Subject(ServerEvent(msg)), actor.StartError) {
+  store store: Store(model, message),
+  serialiser serialiser: Serialiser(model, message),
+) -> Result(Server(model, message), Nil) {
   let initial_state =
-    ServerState(store:, clients: dict.new(), sequence: 0, serialiser:)
+    ServerState(
+      store:,
+      clients: dict.new(),
+      sequence: 0,
+      serialiser:,
+      on_message_hook: option.None,
+    )
 
-  actor.new(initial_state)
-  |> actor.on_message(handle_message)
-  |> actor.start
-  |> result.map(fn(started) { started.data })
+  platform_start(initial_state)
+  |> result.map(Server)
 }
 
+// =============================================================================
 // PRIVATE TYPES
+// =============================================================================
 
 @target(erlang)
-type ServerState(model, msg) {
+/// Platform-specific server handle (Subject on Erlang, FFI handle on JavaScript)
+type ServerHandle(model, message) =
+  Subject(InternalEvent(model, message))
+
+@target(javascript)
+type ServerHandle(model, message)
+
+@target(erlang)
+/// Internal events for Erlang actor message passing
+type InternalEvent(model, message) {
+  ClientConnected(client_id: String, send: fn(String) -> Nil)
+  ClientDisconnected(client_id: String)
+  Incoming(client_id: String, text: String)
+  SetHook(hook: fn(message, model, String) -> Nil)
+}
+
+/// Stores the current server state: model, clients, sequence, and serialiser
+type ServerState(model, message) {
   ServerState(
-    store: Store(model, msg),
-    clients: Dict(String, Subject(String)),
+    store: Store(model, message),
+    clients: Dict(String, fn(String) -> Nil),
     sequence: Int,
-    serialiser: Serialiser(model, msg),
+    serialiser: Serialiser(model, message),
+    on_message_hook: Option(fn(message, model, String) -> Nil),
   )
 }
 
-// PRIVATE FUNCTIONS
+// =============================================================================
+// PRIVATE FUNCTIONS — SHARED LOGIC
+// =============================================================================
 
-@target(erlang)
+/// Broadcast to all clients except the excluded one
 fn broadcast_except(
-  clients: Dict(String, Subject(String)),
+  clients: Dict(String, fn(String) -> Nil),
   message: String,
   except excluded_id: String,
 ) -> Nil {
-  dict.each(clients, fn(id, subject) {
+  dict.each(clients, fn(id, send) {
     case id == excluded_id {
       True -> Nil
-      False -> process.send(subject, message)
+      False -> send(message)
     }
   })
 }
 
-@target(erlang)
-fn handle_client_connected(
-  state: ServerState(model, msg),
+/// Handle a client connection by inserting into clients dict
+fn handle_client_connected_logic(
+  state: ServerState(model, message),
   client_id: String,
-  subject: Subject(String),
-) -> actor.Next(ServerState(model, msg), ServerEvent(msg)) {
-  let clients = dict.insert(state.clients, client_id, subject)
-  actor.continue(ServerState(..state, clients:))
+  send: fn(String) -> Nil,
+) -> ServerState(model, message) {
+  let clients = dict.insert(state.clients, client_id, send)
+  ServerState(..state, clients:)
 }
 
-@target(erlang)
-fn handle_client_disconnected(
-  state: ServerState(model, msg),
+/// Handle a client disconnection by removing from clients dict
+fn handle_client_disconnected_logic(
+  state: ServerState(model, message),
   client_id: String,
-) -> actor.Next(ServerState(model, msg), ServerEvent(msg)) {
+) -> ServerState(model, message) {
   let clients = dict.delete(state.clients, client_id)
-  actor.continue(ServerState(..state, clients:))
+  ServerState(..state, clients:)
 }
 
-@target(erlang)
-fn handle_client_message(
-  state: ServerState(model, msg),
+/// Handle an incoming ClientMessage
+fn handle_client_message_logic(
+  state: ServerState(model, message),
   client_id: String,
-  payload: msg,
-) -> actor.Next(ServerState(model, msg), ServerEvent(msg)) {
-  let updated_store = store.apply(state.store, msg: payload)
+  payload: message,
+) -> ServerState(model, message) {
+  let updated_store = store.apply(state.store, message: payload)
   let new_sequence = state.sequence + 1
 
-  let server_message =
-    protocol.ServerMessage(sequence: new_sequence, payload:)
-  let encoded = protocol.encode(server_message, serialiser: state.serialiser)
+  // Broadcast a new server message to connected clients (except sender)
+  let server_message = transport.ServerMessage(sequence: new_sequence, payload:)
+  let encoded = transport.encode(server_message, serialiser: state.serialiser)
   broadcast_except(state.clients, encoded, except: client_id)
 
-  let acknowledge = protocol.Acknowledge(sequence: new_sequence)
+  let acknowledge = transport.Acknowledge(sequence: new_sequence)
   let acknowledge_encoded =
-    protocol.encode(acknowledge, serialiser: state.serialiser)
+    transport.encode(acknowledge, serialiser: state.serialiser)
   case dict.get(state.clients, client_id) {
-    Ok(subject) -> process.send(subject, acknowledge_encoded)
+    Ok(send) -> send(acknowledge_encoded)
     Error(Nil) -> Nil
   }
 
-  actor.continue(
-    ServerState(..state, store: updated_store, sequence: new_sequence),
-  )
+  case state.on_message_hook {
+    option.Some(hook) -> hook(payload, updated_store.model, client_id)
+    option.None -> Nil
+  }
+
+  ServerState(..state, store: updated_store, sequence: new_sequence)
 }
 
-@target(erlang)
-fn handle_incoming(
-  state: ServerState(model, msg),
+/// For an incoming payload, handle if it's a Resync or a ClientMessage
+fn handle_incoming_logic(
+  state: ServerState(model, message),
   client_id: String,
   text: String,
-) -> actor.Next(ServerState(model, msg), ServerEvent(msg)) {
-  case protocol.decode(text, serialiser: state.serialiser) {
-    Ok(protocol.ClientMessage(payload:)) ->
-      handle_client_message(state, client_id, payload)
+) -> ServerState(model, message) {
+  case transport.decode(text, serialiser: state.serialiser) {
+    Ok(transport.ClientMessage(payload:)) ->
+      handle_client_message_logic(state, client_id, payload)
 
-    Ok(protocol.Resync(after_sequence:)) ->
-      handle_resync(state, client_id, after_sequence)
+    Ok(transport.Resync(after_sequence:)) ->
+      handle_resync_logic(state, client_id, after_sequence)
 
-    _ -> actor.continue(state)
+    _ -> state
   }
 }
 
-@target(erlang)
-fn handle_message(
-  state: ServerState(model, msg),
-  message: ServerEvent(msg),
-) -> actor.Next(ServerState(model, msg), ServerEvent(msg)) {
-  case message {
-    ClientConnected(client_id:, subject:) ->
-      handle_client_connected(state, client_id, subject)
-
-    ClientDisconnected(client_id:) -> handle_client_disconnected(state, client_id)
-
-    Incoming(client_id:, text:) -> handle_incoming(state, client_id, text)
-  }
-}
-
-@target(erlang)
-fn handle_resync(
-  state: ServerState(model, msg),
+/// Handle a resync request by sending a snapshot of the current model
+fn handle_resync_logic(
+  state: ServerState(model, message),
   client_id: String,
   _after_sequence: Int,
-) -> actor.Next(ServerState(model, msg), ServerEvent(msg)) {
+) -> ServerState(model, message) {
   case dict.get(state.clients, client_id) {
-    Error(Nil) -> actor.continue(state)
-    Ok(subject) -> {
+    Error(Nil) -> state
+    Ok(send) -> {
       let snapshot =
-        protocol.Snapshot(
-          sequence: state.sequence,
-          state: store.get_model(state.store),
-        )
-      let encoded = protocol.encode(snapshot, serialiser: state.serialiser)
-      process.send(subject, encoded)
-
-      actor.continue(state)
+        transport.Snapshot(sequence: state.sequence, state: state.store.model)
+      let encoded = transport.encode(snapshot, serialiser: state.serialiser)
+      send(encoded)
+      state
     }
   }
+}
+
+// =============================================================================
+// PRIVATE FUNCTIONS — ERLANG
+// =============================================================================
+
+@target(erlang)
+/// Handle a client connection event (Erlang actor wrapper)
+fn handle_client_connected(
+  state: ServerState(model, message),
+  client_id: String,
+  send: fn(String) -> Nil,
+) -> actor.Next(ServerState(model, message), InternalEvent(model, message)) {
+  handle_client_connected_logic(state, client_id, send)
+  |> actor.continue
+}
+
+@target(erlang)
+/// Handle a client disconnection event (Erlang actor wrapper)
+fn handle_client_disconnected(
+  state: ServerState(model, message),
+  client_id: String,
+) -> actor.Next(ServerState(model, message), InternalEvent(model, message)) {
+  handle_client_disconnected_logic(state, client_id)
+  |> actor.continue
+}
+
+@target(erlang)
+/// Handle an incoming message event (Erlang actor wrapper)
+fn handle_incoming(
+  state: ServerState(model, message),
+  client_id: String,
+  text: String,
+) -> actor.Next(ServerState(model, message), InternalEvent(model, message)) {
+  handle_incoming_logic(state, client_id, text)
+  |> actor.continue
+}
+
+@target(erlang)
+/// Actor message handler (Erlang)
+fn handle_message(
+  state: ServerState(model, message),
+  message: InternalEvent(model, message),
+) -> actor.Next(ServerState(model, message), InternalEvent(model, message)) {
+  case message {
+    ClientConnected(client_id:, send:) ->
+      handle_client_connected(state, client_id, send)
+
+    ClientDisconnected(client_id:) ->
+      handle_client_disconnected(state, client_id)
+
+    Incoming(client_id:, text:) -> handle_incoming(state, client_id, text)
+
+    SetHook(hook:) ->
+      ServerState(..state, on_message_hook: option.Some(hook))
+      |> actor.continue
+  }
+}
+
+@target(erlang)
+/// Send a client connected event to the Erlang actor
+fn platform_connect(
+  handle: ServerHandle(model, message),
+  client_id: String,
+  send: fn(String) -> Nil,
+) -> Nil {
+  actor.send(handle, ClientConnected(client_id:, send:))
+}
+
+@target(erlang)
+/// Send a client disconnected event to the Erlang actor
+fn platform_disconnect(
+  handle: ServerHandle(model, message),
+  client_id: String,
+) -> Nil {
+  actor.send(handle, ClientDisconnected(client_id:))
+}
+
+@target(erlang)
+/// Send an incoming message event to the Erlang actor
+fn platform_incoming(
+  handle: ServerHandle(model, message),
+  client_id: String,
+  text: String,
+) -> Nil {
+  actor.send(handle, Incoming(client_id:, text:))
+}
+
+@target(erlang)
+/// Send a set hook event to the Erlang actor
+fn platform_set_hook(
+  handle: ServerHandle(model, message),
+  hook: fn(message, model, String) -> Nil,
+) -> Nil {
+  actor.send(handle, SetHook(hook:))
+}
+
+@target(erlang)
+/// Start the Erlang OTP actor
+fn platform_start(
+  initial_state: ServerState(model, message),
+) -> Result(ServerHandle(model, message), Nil) {
+  actor.new(initial_state)
+  |> actor.on_message(handle_message)
+  |> actor.start
+  |> result.map(fn(started) { started.data })
+  |> result.replace_error(Nil)
+}
+
+// =============================================================================
+// PRIVATE FUNCTIONS — JAVASCRIPT
+// =============================================================================
+
+@target(javascript)
+/// Register a client connection (JavaScript)
+fn platform_connect(
+  handle: ServerHandle(model, message),
+  client_id: String,
+  send: fn(String) -> Nil,
+) -> Nil {
+  ffi_connect(handle, client_id, send)
+}
+
+@target(javascript)
+/// Unregister a client connection (JavaScript)
+fn platform_disconnect(
+  handle: ServerHandle(model, message),
+  client_id: String,
+) -> Nil {
+  ffi_disconnect(handle, client_id)
+}
+
+@target(javascript)
+/// Process an incoming message (JavaScript)
+fn platform_incoming(
+  handle: ServerHandle(model, message),
+  client_id: String,
+  text: String,
+) -> Nil {
+  ffi_incoming(handle, client_id, text)
+}
+
+@target(javascript)
+/// Set the message hook (JavaScript)
+fn platform_set_hook(
+  handle: ServerHandle(model, message),
+  hook: fn(message, model, String) -> Nil,
+) -> Nil {
+  ffi_set_hook(handle, hook)
+}
+
+@target(javascript)
+/// Start the JavaScript server (creates closure with mutable state)
+fn platform_start(
+  initial_state: ServerState(model, message),
+) -> Result(ServerHandle(model, message), Nil) {
+  Ok(ffi_create_server(
+    initial_state,
+    handle_client_connected_logic,
+    handle_client_disconnected_logic,
+    handle_incoming_logic,
+  ))
+}
+
+// =============================================================================
+// PRIVATE FFI
+// =============================================================================
+
+@target(javascript)
+/// Call the connect method on the server handle
+@external(javascript, "./server.ffi.mjs", "connect")
+fn ffi_connect(
+  _handle: ServerHandle(model, message),
+  _client_id: String,
+  _send: fn(String) -> Nil,
+) -> Nil {
+  Nil
+}
+
+@target(javascript)
+/// Create server with closure-scoped mutable state
+@external(javascript, "./server.ffi.mjs", "createServer")
+fn ffi_create_server(
+  _initial_state: ServerState(model, message),
+  _handle_connect: fn(ServerState(model, message), String, fn(String) -> Nil) ->
+    ServerState(model, message),
+  _handle_disconnect: fn(ServerState(model, message), String) ->
+    ServerState(model, message),
+  _handle_incoming: fn(ServerState(model, message), String, String) ->
+    ServerState(model, message),
+) -> ServerHandle(model, message) {
+  panic as "JavaScript only"
+}
+
+@target(javascript)
+/// Call the disconnect method on the server handle
+@external(javascript, "./server.ffi.mjs", "disconnect")
+fn ffi_disconnect(
+  _handle: ServerHandle(model, message),
+  _client_id: String,
+) -> Nil {
+  Nil
+}
+
+@target(javascript)
+/// Call the incoming method on the server handle
+@external(javascript, "./server.ffi.mjs", "incoming")
+fn ffi_incoming(
+  _handle: ServerHandle(model, message),
+  _client_id: String,
+  _text: String,
+) -> Nil {
+  Nil
+}
+
+@target(javascript)
+/// Call the setHook method on the server handle
+@external(javascript, "./server.ffi.mjs", "setHook")
+fn ffi_set_hook(
+  _handle: ServerHandle(model, message),
+  _hook: fn(message, model, String) -> Nil,
+) -> Nil {
+  Nil
 }
