@@ -136,36 +136,24 @@ pub fn auto_erl_roundtrip_acknowledge_test() {
 pub fn auto_erl_roundtrip_nested_test() {
   let inner = test_fixtures.Model(count: 3, name: "Eve", connected: False)
   let nested = test_fixtures.Nested(inner:)
-  // Encode Nested directly as a client message payload.
-  // We use a custom wrapper approach: encode the outer Snapshot with the nested
-  // model as the "state". We need a Serialiser(Nested, Message) which we build inline.
-  let nested_ser =
-    transport.custom(
-      encode_message: fn(msg) { transport.automatic().encode_message(msg) },
-      decode_message: transport.automatic().decode_message,
-      encode_model: fn(model) { transport.automatic().encode_model(model) },
-      decode_model: transport.automatic().decode_model,
-    )
+  let nested_ser: transport.Serialiser(test_fixtures.Nested, test_fixtures.Message) =
+    transport.automatic()
   let encoded =
     transport.encode(
       Snapshot(sequence: 1, state: nested),
       serialiser: nested_ser,
     )
-  let result = transport.decode(encoded, serialiser: nested_ser)
-  result
+  transport.decode(encoded, serialiser: nested_ser)
   |> should.equal(Ok(Snapshot(sequence: 1, state: nested)))
 }
 
 @target(erlang)
 pub fn auto_erl_roundtrip_list_field_test() {
   let with_list = test_fixtures.WithList(items: [1, 2, 3])
-  let list_ser =
-    transport.custom(
-      encode_message: fn(msg) { transport.automatic().encode_message(msg) },
-      decode_message: transport.automatic().decode_message,
-      encode_model: fn(model) { transport.automatic().encode_model(model) },
-      decode_model: transport.automatic().decode_model,
-    )
+  let list_ser: transport.Serialiser(
+    test_fixtures.WithList,
+    test_fixtures.Message,
+  ) = transport.automatic()
   let encoded =
     transport.encode(
       Snapshot(sequence: 0, state: with_list),

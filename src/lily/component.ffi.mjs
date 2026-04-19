@@ -384,6 +384,51 @@ function renderFragment(
     .join("");
 }
 
+/** Renders a Live component */
+function renderLive(
+  runtime,
+  component,
+  model,
+  toHtml,
+  store,
+  parentSelector,
+  depth,
+) {
+  const componentId = runtime.nextComponentId();
+  const selector = `[data-lily-component="${componentId}"]`;
+
+  const { slice, initial, apply, compare } = component;
+
+  const compareStrategy =
+    compare instanceof StructuralEqual ? isEqual : referenceEqual;
+
+  let cachedElement = null;
+
+  const handler = runtime.createSelective(
+    selector,
+    slice,
+    compareStrategy,
+    (data) => {
+      const patches = apply(data).toArray();
+
+      // Re-query only if detached — handles re-mounts, free in the normal case
+      if (!cachedElement || !cachedElement.isConnected) {
+        cachedElement = document.querySelector(selector);
+      }
+      if (cachedElement) {
+        applyPatchesToElement(cachedElement, patches);
+      }
+    },
+  );
+
+  // Register handler to be called on model updates
+  runtime.registerComponent(componentId, handler);
+
+  const initialHtml = toHtml(initial);
+
+  return `<div data-lily-component="${componentId}">${initialHtml}</div>`;
+}
+
 /** Renders a component wrapped in RequireConnection */
 function renderRequireConnection(
   runtime,
@@ -438,51 +483,6 @@ function renderRequireConnection(
   runtime.registerComponent(componentId, handler);
 
   return `<div data-lily-component="${componentId}">${innerHtml}</div>`;
-}
-
-/** Renders a Live component */
-function renderLive(
-  runtime,
-  component,
-  model,
-  toHtml,
-  store,
-  parentSelector,
-  depth,
-) {
-  const componentId = runtime.nextComponentId();
-  const selector = `[data-lily-component="${componentId}"]`;
-
-  const { slice, initial, apply, compare } = component;
-
-  const compareStrategy =
-    compare instanceof StructuralEqual ? isEqual : referenceEqual;
-
-  let cachedElement = null;
-
-  const handler = runtime.createSelective(
-    selector,
-    slice,
-    compareStrategy,
-    (data) => {
-      const patches = apply(data).toArray();
-
-      // Re-query only if detached — handles re-mounts, free in the normal case
-      if (!cachedElement || !cachedElement.isConnected) {
-        cachedElement = document.querySelector(selector);
-      }
-      if (cachedElement) {
-        applyPatchesToElement(cachedElement, patches);
-      }
-    },
-  );
-
-  // Register handler to be called on model updates
-  runtime.registerComponent(componentId, handler);
-
-  const initialHtml = toHtml(initial);
-
-  return `<div data-lily-component="${componentId}">${initialHtml}</div>`;
 }
 
 /** Renders a Simple component */

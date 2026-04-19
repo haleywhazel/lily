@@ -33,6 +33,23 @@ fn new_runtime() -> client.Runtime(Model, Message) {
 // =============================================================================
 
 @target(javascript)
+pub fn event_on_click_disabled_ignored_test() {
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  test_dom.set_inner_html(
+    "#app",
+    "<div data-lily-disabled=\"true\"><button data-msg=\"increment\">+</button></div>",
+  )
+  let _r =
+    event.on_click(runtime, selector: "#app", decoder: fn(_name) {
+      Ok(Increment)
+    })
+  test_dom.click("[data-msg=\"increment\"]")
+  client.get_current_model(runtime).count
+  |> should.equal(0)
+}
+
+@target(javascript)
 pub fn event_on_click_with_data_msg_test() {
   test_setup.reset_dom()
   let runtime = new_runtime()
@@ -63,40 +80,9 @@ pub fn event_on_click_without_data_msg_ignored_test() {
   |> should.equal(0)
 }
 
-@target(javascript)
-pub fn event_on_click_disabled_ignored_test() {
-  test_setup.reset_dom()
-  let runtime = new_runtime()
-  test_dom.set_inner_html(
-    "#app",
-    "<div data-lily-disabled=\"true\"><button data-msg=\"increment\">+</button></div>",
-  )
-  let _r =
-    event.on_click(runtime, selector: "#app", decoder: fn(_name) {
-      Ok(Increment)
-    })
-  test_dom.click("[data-msg=\"increment\"]")
-  client.get_current_model(runtime).count
-  |> should.equal(0)
-}
-
 // =============================================================================
 // VALUE EVENTS
 // =============================================================================
-
-@target(javascript)
-pub fn event_on_input_extracts_value_test() {
-  test_setup.reset_dom()
-  let runtime = new_runtime()
-  test_dom.set_inner_html("#app", "<input id=\"name-in\" />")
-  let _r =
-    event.on_input(runtime, selector: "#name-in", handler: fn(value) {
-      SetName(value)
-    })
-  test_dom.input_event("#name-in", "Alice")
-  client.get_current_model(runtime).name
-  |> should.equal("Alice")
-}
 
 @target(javascript)
 pub fn event_on_change_extracts_value_test() {
@@ -110,6 +96,20 @@ pub fn event_on_change_extracts_value_test() {
   test_dom.input_event("#name-ch", "Bob")
   client.get_current_model(runtime).name
   |> should.equal("Bob")
+}
+
+@target(javascript)
+pub fn event_on_input_extracts_value_test() {
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  test_dom.set_inner_html("#app", "<input id=\"name-in\" />")
+  let _r =
+    event.on_input(runtime, selector: "#name-in", handler: fn(value) {
+      SetName(value)
+    })
+  test_dom.input_event("#name-in", "Alice")
+  client.get_current_model(runtime).name
+  |> should.equal("Alice")
 }
 
 // =============================================================================

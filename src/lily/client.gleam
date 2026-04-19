@@ -111,7 +111,7 @@ pub fn connect(
 
   let handler =
     transport.Handler(
-      on_receive: fn(text) { handle_incoming(handle, text, serialiser) },
+      on_receive: fn(bytes) { handle_incoming(handle, bytes, serialiser) },
       on_reconnect: fn() {
         set_connection_status(handle, True)
         send_resync(handle, serialiser)
@@ -124,9 +124,9 @@ pub fn connect(
   set_transport(handle, client_transport)
 
   set_on_message_hook(handle, fn(message) {
-    let text =
+    let bytes =
       transport.encode(transport.ClientMessage(payload: message), serialiser:)
-    send_via_transport(handle, text)
+    send_via_transport(handle, bytes)
   })
 
   runtime
@@ -317,10 +317,10 @@ pub type RuntimeHandle
 /// (if any), and takes any appropriate actions.
 fn handle_incoming(
   handle: RuntimeHandle,
-  text: String,
+  bytes: BitArray,
   serialiser: transport.Serialiser(model, message),
 ) -> Nil {
-  case transport.decode(text, serialiser:) {
+  case transport.decode(bytes, serialiser:) {
     Ok(transport.ServerMessage(sequence:, payload:)) -> {
       set_last_sequence(handle, sequence)
       apply_remote_message(handle, payload)
@@ -349,12 +349,12 @@ fn send_resync(
   serialiser: transport.Serialiser(model, message),
 ) -> Nil {
   let last_sequence = get_last_sequence(handle)
-  let text =
+  let bytes =
     transport.encode(
       transport.Resync(after_sequence: last_sequence),
       serialiser:,
     )
-  send_via_transport(handle, text)
+  send_via_transport(handle, bytes)
 }
 
 // =============================================================================
@@ -424,9 +424,17 @@ fn get_model(_handle: RuntimeHandle) -> model {
 }
 
 @target(javascript)
+/// Notify all subscribers with the current state — called once during start to
+/// trigger the initial render
+@external(javascript, "./client.ffi.mjs", "initialNotify")
+fn initial_notify(_handle: RuntimeHandle) -> Nil {
+  Nil
+}
+
+@target(javascript)
 /// Send via transport (WebSockets/HTTP)
 @external(javascript, "./client.ffi.mjs", "sendViaTransport")
-fn send_via_transport(_handle: RuntimeHandle, _text: String) -> Nil {
+fn send_via_transport(_handle: RuntimeHandle, _bytes: BitArray) -> Nil {
   Nil
 }
 
@@ -473,14 +481,6 @@ fn set_on_message_hook(_handle: RuntimeHandle, _hook: fn(message) -> Nil) -> Nil
 /// Set the current store
 @external(javascript, "./client.ffi.mjs", "setStore")
 fn set_store(_handle: RuntimeHandle, _store: Store(model, message)) -> Nil {
-  Nil
-}
-
-@target(javascript)
-/// Notify all subscribers with the current state — called once during start to
-/// trigger the initial render
-@external(javascript, "./client.ffi.mjs", "initialNotify")
-fn initial_notify(_handle: RuntimeHandle) -> Nil {
   Nil
 }
 

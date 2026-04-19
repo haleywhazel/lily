@@ -60,7 +60,7 @@ pub fn update(model: Model, message: Message) -> Model {
 // =============================================================================
 
 pub fn custom_serialiser() -> Serialiser(Model, Message) {
-  transport.custom(
+  transport.custom_json(
     encode_message: encode_message,
     decode_message: message_decoder(),
     encode_model: encode_model,

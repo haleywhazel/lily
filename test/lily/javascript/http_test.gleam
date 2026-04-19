@@ -2,6 +2,8 @@
 // All functions are @target(javascript) — skipped on Erlang.
 
 @target(javascript)
+import gleam/bit_array
+@target(javascript)
 import gleam/dynamic
 @target(javascript)
 import gleeunit/should
@@ -106,7 +108,7 @@ pub fn http_connect_receives_messages_test() {
   let connector = fn(handler: transport.Handler) {
     transport.new(send: fn(_) { Nil }, close: fn() { Nil })
     |> fn(t) {
-      handler.on_receive("test-message")
+      handler.on_receive(bit_array.from_string("test-message"))
       test_ref.set(received_ref, "received")
       t
     }

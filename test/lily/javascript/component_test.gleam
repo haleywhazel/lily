@@ -60,25 +60,6 @@ pub fn component_static_renders_content_test() {
 // =============================================================================
 
 @target(javascript)
-pub fn component_mount_renders_to_dom_test() {
-  test_setup.reset_dom()
-  let runtime = new_runtime()
-  let _r =
-    component.mount(
-      runtime,
-      selector: "#app",
-      to_html: to_html,
-      view: fn(_model) {
-        component.simple(slice: fn(m: Model) { m.count }, render: fn(count) {
-          int.to_string(count)
-        })
-      },
-    )
-  test_dom.inner_html("#app")
-  |> should.not_equal("")
-}
-
-@target(javascript)
 pub fn component_mount_clears_previous_test() {
   test_setup.reset_dom()
   let runtime = new_runtime()
@@ -106,9 +87,48 @@ pub fn component_mount_clears_previous_test() {
   |> should.be_true
 }
 
+@target(javascript)
+pub fn component_mount_renders_to_dom_test() {
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  let _r =
+    component.mount(
+      runtime,
+      selector: "#app",
+      to_html: to_html,
+      view: fn(_model) {
+        component.simple(slice: fn(m: Model) { m.count }, render: fn(count) {
+          int.to_string(count)
+        })
+      },
+    )
+  test_dom.inner_html("#app")
+  |> should.not_equal("")
+}
+
 // =============================================================================
 // SIMPLE
 // =============================================================================
+
+@target(javascript)
+pub fn component_simple_name_renders_test() {
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  let _r =
+    component.mount(
+      runtime,
+      selector: "#app",
+      to_html: to_html,
+      view: fn(_model) {
+        component.simple(slice: fn(m: Model) { m.name }, render: fn(name) {
+          "name:" <> name
+        })
+      },
+    )
+  test_dom.inner_html("#app")
+  |> string.contains("name:")
+  |> should.be_true
+}
 
 @target(javascript)
 pub fn component_simple_renders_initial_slice_test() {
@@ -151,51 +171,9 @@ pub fn component_simple_updates_on_model_change_test() {
   |> should.be_true
 }
 
-@target(javascript)
-pub fn component_simple_name_renders_test() {
-  test_setup.reset_dom()
-  let runtime = new_runtime()
-  let _r =
-    component.mount(
-      runtime,
-      selector: "#app",
-      to_html: to_html,
-      view: fn(_model) {
-        component.simple(slice: fn(m: Model) { m.name }, render: fn(name) {
-          "name:" <> name
-        })
-      },
-    )
-  test_dom.inner_html("#app")
-  |> string.contains("name:")
-  |> should.be_true
-}
-
 // =============================================================================
 // LIVE
 // =============================================================================
-
-@target(javascript)
-pub fn component_live_renders_initial_html_test() {
-  test_setup.reset_dom()
-  let runtime = new_runtime()
-  let _r =
-    component.mount(
-      runtime,
-      selector: "#app",
-      to_html: to_html,
-      view: fn(_model) {
-        component.live(
-          slice: fn(m: Model) { m.count },
-          initial: "<div><span class=\"val\">0</span></div>",
-          patch: fn(count) { [component.SetText(".val", int.to_string(count))] },
-        )
-      },
-    )
-  test_dom.inner_html("#app")
-  |> string.contains("val")
-  |> should.be_true
-}
 
 @target(javascript)
 pub fn component_live_applies_patches_test() {
@@ -241,6 +219,28 @@ pub fn component_live_applies_set_attribute_patch_test() {
   client.dispatch(runtime)(Increment)
   test_dom.get_attribute("[data-lily-component]", "data-count")
   |> should.equal("1")
+}
+
+@target(javascript)
+pub fn component_live_renders_initial_html_test() {
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  let _r =
+    component.mount(
+      runtime,
+      selector: "#app",
+      to_html: to_html,
+      view: fn(_model) {
+        component.live(
+          slice: fn(m: Model) { m.count },
+          initial: "<div><span class=\"val\">0</span></div>",
+          patch: fn(count) { [component.SetText(".val", int.to_string(count))] },
+        )
+      },
+    )
+  test_dom.inner_html("#app")
+  |> string.contains("val")
+  |> should.be_true
 }
 
 // =============================================================================
@@ -360,23 +360,6 @@ pub fn component_require_connection_removes_disabled_when_connected_test() {
 // =============================================================================
 
 @target(javascript)
-pub fn component_structural_on_static_is_noop_test() {
-  let static_component = component.static("hello")
-  let structural_component = component.structural(static_component)
-  test_setup.reset_dom()
-  let runtime = new_runtime()
-  let _r =
-    component.mount(
-      runtime,
-      selector: "#app",
-      to_html: to_html,
-      view: fn(_model) { structural_component },
-    )
-  test_dom.inner_html("#app")
-  |> should.equal("hello")
-}
-
-@target(javascript)
 pub fn component_structural_on_simple_test() {
   test_setup.reset_dom()
   let runtime = new_runtime()
@@ -399,4 +382,21 @@ pub fn component_structural_on_simple_test() {
   test_dom.inner_html("#app")
   |> string.contains("0:")
   |> should.be_true
+}
+
+@target(javascript)
+pub fn component_structural_on_static_is_noop_test() {
+  let static_component = component.static("hello")
+  let structural_component = component.structural(static_component)
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  let _r =
+    component.mount(
+      runtime,
+      selector: "#app",
+      to_html: to_html,
+      view: fn(_model) { structural_component },
+    )
+  test_dom.inner_html("#app")
+  |> should.equal("hello")
 }

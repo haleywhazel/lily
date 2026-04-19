@@ -6,24 +6,28 @@
 //// types for client-server messages), serialisation
 //// ([`Serialiser`](#Serialiser) encode/decode functions), automatic
 //// serialisation ([`automatic`](#automatic) zero-config codec,
-//// recommended), custom serialisation ([`custom`](#custom) explicit
-//// encode/decode for special cases), and transport abstraction
-//// ([`Connector`](#Connector) and [`Transport`](#Transport) for swapping
-//// between WebSocket, HTTP, or custom transports).
+//// recommended), custom serialisation ([`custom_json`](#custom_json) and
+//// [`custom_binary`](#custom_binary) for explicit encode/decode), and
+//// transport abstraction ([`Connector`](#Connector) and
+//// [`Transport`](#Transport) for swapping between WebSocket, HTTP, or custom
+//// transports).
 ////
 //// For most apps, use [`transport.automatic`](#automatic) for
-//// zero-configuration serialisation of any Gleam custom type:
+//// zero-configuration serialisation of any Gleam custom type. The default
+//// wire format is MessagePack (compact binary). Use
+//// [`transport.use_json`](#use_json) for human-readable frames during
+//// development:
 ////
 //// ```gleam
 //// import lily/transport
 ////
-//// client.connect(
-////   runtime,
-////   with: connector,
-////   serialiser: transport.automatic(),
-//// )
-////
+//// // Production: MessagePack (default)
+//// client.connect(runtime, with: connector, serialiser: transport.automatic())
 //// server.start(store: app_store, serialiser: transport.automatic())
+////
+//// // Development: JSON, readable in DevTools
+//// client.connect(runtime, with: connector,
+////   serialiser: transport.automatic() |> transport.use_json())
 //// ```
 ////
 //// The automatic serialiser uses positional encoding with the wire format
@@ -34,16 +38,20 @@
 ////
 //// For cases where automatic serialisation isn't suitable (third-party APIs,
 //// human-readable JSON, backwards compatibility), use
-//// [`transport.custom`](#custom) with explicit encode/decode functions.
+//// [`transport.custom_json`](#custom_json) with explicit encode/decode
+//// functions, or [`transport.custom_binary`](#custom_binary) for a custom
+//// binary codec.
 ////
 
 // =============================================================================
 // IMPORTS
 // =============================================================================
 
+import gleam/bit_array
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
 import gleam/json.{type Json}
+import gleam/option.{type Option}
 import gleam/result
 
 // =============================================================================
@@ -63,7 +71,7 @@ pub type Connector =
 /// connection is lost.
 pub type Handler {
   Handler(
-    on_receive: fn(String) -> Nil,
+    on_receive: fn(BitArray) -> Nil,
     on_reconnect: fn() -> Nil,
     on_disconnect: fn() -> Nil,
   )
@@ -94,29 +102,61 @@ pub type Protocol(model, message) {
   Snapshot(sequence: Int, state: model)
 }
 
-/// The protocol currently uses JSON serialisation for debugging clarity. Both
-/// message and model encoders/decoders should be provided.
-pub type Serialiser(model, message) {
+/// Serialises and deserialises `Protocol` values to and from bytes. Carries
+/// both a JSON path (always present, used in development or when no binary
+/// codec is set) and an optional binary path (MessagePack or any custom binary
+/// codec).
+///
+/// Construct via [`automatic`](#automatic), [`custom_json`](#custom_json), or
+/// [`custom_binary`](#custom_binary). Toggle between formats using
+/// [`use_json`](#use_json) and [`use_message_pack`](#use_message_pack).
+pub opaque type Serialiser(model, message) {
   Serialiser(
     encode_message: fn(message) -> Json,
     decode_message: decode.Decoder(message),
     encode_model: fn(model) -> Json,
     decode_model: decode.Decoder(model),
+    binary: Option(BinaryCodec(model, message)),
+    auto_binary: Option(BinaryCodec(model, message)),
   )
 }
 
 /// This is transport handle returned by a connector. Provides `send` to
 /// transmit messages and `close` to terminate the connection.
 pub opaque type Transport {
-  Transport(send: fn(String) -> Nil, close: fn() -> Nil)
+  Transport(send: fn(BitArray) -> Nil, close: fn() -> Nil)
+}
+
+// =============================================================================
+// PRIVATE TYPES
+// =============================================================================
+
+type BinaryCodec(model, message) {
+  BinaryCodec(
+    encode_message: fn(message) -> BitArray,
+    decode_message: fn(BitArray) -> Result(message, Nil),
+    encode_model: fn(model) -> BitArray,
+    decode_model: fn(BitArray) -> Result(model, Nil),
+  )
 }
 
 // =============================================================================
 // PUBLIC FUNCTIONS
 // =============================================================================
 
-/// Create an automatic serialiser. Encodes and decodes any Gleam custom type
-/// using positional fields. Works across both targets.
+/// Create an automatic serialiser. Uses MessagePack by default (compact
+/// binary). Positional encoding works for any Gleam custom type on both
+/// targets without configuration.
+///
+/// Switch to JSON for development with [`transport.use_json`](#use_json):
+///
+/// ```gleam
+/// // Production: MessagePack
+/// transport.automatic()
+///
+/// // Development: JSON, readable in DevTools
+/// transport.automatic() |> transport.use_json()
+/// ```
 ///
 /// On JavaScript, constructors are discovered automatically:
 /// - Model types: walked recursively from the initial model at start time
@@ -124,20 +164,31 @@ pub opaque type Transport {
 ///
 /// For message types that only arrive from the server (never sent by this
 /// client), call [`transport.register`](#register) before connecting.
-///
-/// ## Example
-///
-/// ```gleam
-/// // Zero configuration for most apps:
-/// client.connect(runtime, with: connector, serialiser: transport.automatic())
-/// server.start(store: app_store, serialiser: transport.automatic())
-/// ```
 pub fn automatic() -> Serialiser(model, message) {
+  let auto_binary =
+    option.Some(BinaryCodec(
+      encode_message: ffi_auto_encode_message_pack,
+      decode_message: fn(bytes) {
+        case ffi_auto_decode_message_pack(bytes) {
+          Ok(value) -> Ok(value)
+          Error(_) -> Error(Nil)
+        }
+      },
+      encode_model: ffi_auto_encode_message_pack,
+      decode_model: fn(bytes) {
+        case ffi_auto_decode_message_pack(bytes) {
+          Ok(value) -> Ok(value)
+          Error(_) -> Error(Nil)
+        }
+      },
+    ))
   Serialiser(
     encode_message: ffi_auto_encode,
     decode_message: decode.new_primitive_decoder("Auto", ffi_auto_decode),
     encode_model: ffi_auto_encode,
     decode_model: decode.new_primitive_decoder("Auto", ffi_auto_decode),
+    binary: auto_binary,
+    auto_binary: auto_binary,
   )
 }
 
@@ -147,10 +198,37 @@ pub fn close(transport: Transport) -> Nil {
   transport.close()
 }
 
-/// Create a serialiser from explicit encode/decode functions for cases where
-/// the auto format is not suitable (third-party APIs, human-readable JSON,
-/// backwards compatibility).
-pub fn custom(
+/// Create a serialiser from explicit binary encode/decode functions. Use this
+/// to provide a custom binary codec (MessagePack, CBOR, or any binary
+/// format). The format is fixed to binary; the [`use_json`](#use_json) and
+/// [`use_message_pack`](#use_message_pack) toggles are no-ops on this serialiser.
+pub fn custom_binary(
+  encode_message encode_message: fn(message) -> BitArray,
+  decode_message decode_message: fn(BitArray) -> Result(message, Nil),
+  encode_model encode_model: fn(model) -> BitArray,
+  decode_model decode_model: fn(BitArray) -> Result(model, Nil),
+) -> Serialiser(model, message) {
+  Serialiser(
+    encode_message: ffi_auto_encode,
+    decode_message: decode.new_primitive_decoder("Auto", ffi_auto_decode),
+    encode_model: ffi_auto_encode,
+    decode_model: decode.new_primitive_decoder("Auto", ffi_auto_decode),
+    binary: option.Some(BinaryCodec(
+      encode_message: encode_message,
+      decode_message: decode_message,
+      encode_model: encode_model,
+      decode_model: decode_model,
+    )),
+    auto_binary: option.None,
+  )
+}
+
+/// Create a serialiser from explicit JSON encode/decode functions. Useful
+/// when the auto format is not suitable (third-party APIs, human-readable
+/// JSON, backwards compatibility). The format is fixed to JSON; the
+/// [`use_json`](#use_json) and [`use_message_pack`](#use_message_pack) toggles are
+/// no-ops on this serialiser.
+pub fn custom_json(
   encode_message encode_message: fn(message) -> Json,
   decode_message decode_message: decode.Decoder(message),
   encode_model encode_model: fn(model) -> Json,
@@ -161,25 +239,136 @@ pub fn custom(
     decode_message: decode_message,
     encode_model: encode_model,
     decode_model: decode_model,
+    binary: option.None,
+    auto_binary: option.None,
   )
 }
 
-/// Decode a `String` into a [`Protocol`](#Protocol) result. Expects the
-/// `String` to be in a JSON format.
+/// Decode `BitArray` bytes into a [`Protocol`](#Protocol) result.
 pub fn decode(
-  text: String,
+  bytes: BitArray,
   serialiser serialiser: Serialiser(model, message),
 ) -> Result(Protocol(model, message), Nil) {
-  let decoder = protocol_decoder(serialiser)
-  json.parse(from: text, using: decoder)
-  |> result.replace_error(Nil)
+  case serialiser.binary {
+    option.None -> decode_json(bytes, serialiser)
+    option.Some(codec) -> decode_message_pack(bytes, codec)
+  }
 }
 
-/// Encodes a `Protocol` into a JSON `String`.
+/// Encodes a `Protocol` into bytes. Uses MessagePack when a binary codec is
+/// set (the default for [`automatic`](#automatic)), or JSON otherwise.
 pub fn encode(
   protocol: Protocol(model, message),
   serialiser serialiser: Serialiser(model, message),
-) -> String {
+) -> BitArray {
+  case serialiser.binary {
+    option.None -> encode_json(protocol, serialiser)
+    option.Some(codec) -> encode_message_pack(protocol, codec)
+  }
+}
+
+/// Create a new [`Transport`](#Transport) with the given send and close
+/// functions. This is used by transport implementations (WebSocket, HTTP) to
+/// construct the Transport handle they return from their connector.
+pub fn new(send send: fn(BitArray) -> Nil, close close: fn() -> Nil) -> Transport {
+  Transport(send: send, close: close)
+}
+
+/// Register constructors for the auto-serialiser's decoder. Only needed on
+/// JavaScript for types that arrive from the server but are never sent by the
+/// client and don't appear in the initial model.
+///
+/// Call before `client.connect`. Field values are placeholders — only the
+/// constructor shape is extracted.
+///
+/// No-op on Erlang (constructors are self-describing).
+///
+/// ## Example
+///
+/// ```gleam
+/// transport.register([AdminKick(""), ServerAnnouncement("")])
+/// ```
+pub fn register(constructors: List(anything)) -> Nil {
+  ffi_register(constructors)
+}
+
+/// Send bytes through the transport. The bytes should be a serialised
+/// [`Protocol`](#Protocol) message.
+pub fn send(transport: Transport, bytes: BitArray) -> Nil {
+  transport.send(bytes)
+}
+
+/// Switch the serialiser to JSON encoding. Useful for development when you
+/// want human-readable frames in DevTools. Only meaningful on
+/// [`automatic`](#automatic) serialisers; no-op on `custom_json` or
+/// `custom_binary`.
+///
+/// ## Example
+///
+/// ```gleam
+/// // Dev: readable JSON in DevTools
+/// transport.automatic() |> transport.use_json()
+/// ```
+pub fn use_json(
+  serialiser: Serialiser(model, message),
+) -> Serialiser(model, message) {
+  case serialiser.auto_binary {
+    option.None -> serialiser
+    option.Some(_) -> Serialiser(..serialiser, binary: option.None)
+  }
+}
+
+/// Switch the serialiser back to MessagePack encoding after
+/// [`use_json`](#use_json) was called. Only meaningful on
+/// [`automatic`](#automatic) serialisers; no-op on `custom_json` or
+/// `custom_binary`.
+pub fn use_message_pack(
+  serialiser: Serialiser(model, message),
+) -> Serialiser(model, message) {
+  Serialiser(..serialiser, binary: serialiser.auto_binary)
+}
+
+// =============================================================================
+// PRIVATE FUNCTIONS
+// =============================================================================
+
+/// Decoder for `Acknowledge`
+fn acknowledge_decoder() -> decode.Decoder(Protocol(model, message)) {
+  use sequence <- decode.field("sequence", decode.int)
+  decode.success(Acknowledge(sequence:))
+}
+
+/// Decoder for `ClientMessage`
+fn client_message_decoder(
+  serialiser: Serialiser(model, message),
+) -> decode.Decoder(Protocol(model, message)) {
+  use payload <- decode.field("payload", serialiser.decode_message)
+  decode.success(ClientMessage(payload:))
+}
+
+fn decode_json(
+  bytes: BitArray,
+  serialiser: Serialiser(model, message),
+) -> Result(Protocol(model, message), Nil) {
+  let decoder = protocol_decoder(serialiser)
+  bit_array.to_string(bytes)
+  |> result.try(fn(text) {
+    json.parse(from: text, using: decoder)
+    |> result.replace_error(Nil)
+  })
+}
+
+fn decode_message_pack(
+  bytes: BitArray,
+  codec: BinaryCodec(model, message),
+) -> Result(Protocol(model, message), Nil) {
+  ffi_decode_message_pack_protocol(bytes, codec)
+}
+
+fn encode_json(
+  protocol: Protocol(model, message),
+  serialiser: Serialiser(model, message),
+) -> BitArray {
   case protocol {
     ClientMessage(payload:) ->
       json.object([
@@ -214,55 +403,14 @@ pub fn encode(
       ])
   }
   |> json.to_string
+  |> bit_array.from_string
 }
 
-/// Create a new [`Transport`](#Transport) with the given send and close
-/// functions. This is used by transport implementations (WebSocket, HTTP) to
-/// construct the Transport handle they return from their connector.
-pub fn new(send send: fn(String) -> Nil, close close: fn() -> Nil) -> Transport {
-  Transport(send: send, close: close)
-}
-
-/// Register constructors for the auto-serialiser's decoder. Only needed on
-/// JavaScript for types that arrive from the server but are never sent by the
-/// client and don't appear in the initial model.
-///
-/// Call before `client.connect`. Field values are placeholders — only the
-/// constructor shape is extracted.
-///
-/// No-op on Erlang (constructors are self-describing).
-///
-/// ## Example
-///
-/// ```gleam
-/// transport.register([AdminKick(""), ServerAnnouncement("")])
-/// ```
-pub fn register(constructors: List(anything)) -> Nil {
-  ffi_register(constructors)
-}
-
-/// Send a message through the transport. The text should be a serialised
-/// [`Protocol`](#Protocol) message (JSON string).
-pub fn send(transport: Transport, text: String) -> Nil {
-  transport.send(text)
-}
-
-// =============================================================================
-// PRIVATE FUNCTIONS
-// =============================================================================
-
-/// Decoder for `Acknowledge`
-fn acknowledge_decoder() -> decode.Decoder(Protocol(model, message)) {
-  use sequence <- decode.field("sequence", decode.int)
-  decode.success(Acknowledge(sequence:))
-}
-
-/// Decoder for `ClientMessage`
-fn client_message_decoder(
-  serialiser: Serialiser(model, message),
-) -> decode.Decoder(Protocol(model, message)) {
-  use payload <- decode.field("payload", serialiser.decode_message)
-  decode.success(ClientMessage(payload:))
+fn encode_message_pack(
+  protocol: Protocol(model, message),
+  codec: BinaryCodec(model, message),
+) -> BitArray {
+  ffi_encode_message_pack_protocol(protocol, codec)
 }
 
 /// Decoder for `Protocol`
@@ -308,20 +456,52 @@ fn snapshot_decoder(
 // PRIVATE FFI
 // =============================================================================
 
-/// Auto-decode a dynamic value
+/// Auto-decode a dynamic value (JSON path)
 @external(erlang, "lily_transport_ffi", "auto_decode")
 @external(javascript, "./transport.ffi.mjs", "autoDecode")
 fn ffi_auto_decode(_value: Dynamic) -> Result(a, a) {
-  // Placeholder for type checking — actual implementation in FFI
   panic as "auto_decode is implemented in FFI"
 }
 
-/// Auto-encode a value to JSON
+/// Auto-decode MessagePack bytes to a Gleam value
+@external(erlang, "lily_transport_ffi", "auto_decode_message_pack")
+@external(javascript, "./transport.ffi.mjs", "autoDecodeMessagePack")
+fn ffi_auto_decode_message_pack(_bytes: BitArray) -> Result(a, Nil) {
+  panic as "auto_decode_message_pack is implemented in FFI"
+}
+
+/// Auto-encode a value to JSON (JSON path)
 @external(erlang, "lily_transport_ffi", "auto_encode")
 @external(javascript, "./transport.ffi.mjs", "autoEncode")
 fn ffi_auto_encode(_value: a) -> Json {
-  // Placeholder for type checking — actual implementation in FFI
   panic as "auto_encode is implemented in FFI"
+}
+
+/// Auto-encode a value to MessagePack bytes
+@external(erlang, "lily_transport_ffi", "auto_encode_message_pack")
+@external(javascript, "./transport.ffi.mjs", "autoEncodeMessagePack")
+fn ffi_auto_encode_message_pack(_value: a) -> BitArray {
+  panic as "auto_encode_message_pack is implemented in FFI"
+}
+
+/// Decode MessagePack bytes to a Protocol using the provided codec
+@external(erlang, "lily_transport_ffi", "decode_message_pack_protocol")
+@external(javascript, "./transport.ffi.mjs", "decodeMessagePackProtocol")
+fn ffi_decode_message_pack_protocol(
+  _bytes: BitArray,
+  _codec: BinaryCodec(model, message),
+) -> Result(Protocol(model, message), Nil) {
+  panic as "decode_message_pack_protocol is implemented in FFI"
+}
+
+/// Encode a Protocol to MessagePack bytes using the provided codec
+@external(erlang, "lily_transport_ffi", "encode_message_pack_protocol")
+@external(javascript, "./transport.ffi.mjs", "encodeMessagePackProtocol")
+fn ffi_encode_message_pack_protocol(
+  _protocol: Protocol(model, message),
+  _codec: BinaryCodec(model, message),
+) -> BitArray {
+  panic as "encode_message_pack_protocol is implemented in FFI"
 }
 
 /// Register constructors

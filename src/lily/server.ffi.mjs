@@ -38,8 +38,8 @@ export function createServer(
     },
 
     /** Process an incoming message */
-    incoming(clientId, text) {
-      state = handleIncoming(state, clientId, text);
+    incoming(clientId, bytes) {
+      state = handleIncoming(state, clientId, bytes);
     },
 
     /** Set the message hook */
@@ -64,8 +64,8 @@ export function disconnect(handle, clientId) {
 }
 
 /** Call the incoming method on the server handle */
-export function incoming(handle, clientId, text) {
-  handle.incoming(clientId, text);
+export function incoming(handle, clientId, bytes) {
+  handle.incoming(clientId, bytes);
 }
 
 /** Call the setHook method on the server handle */

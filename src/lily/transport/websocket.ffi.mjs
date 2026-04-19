@@ -7,7 +7,12 @@
  * Connection status is tracked via WebSocket.onopen and WebSocket.onclose
  * events. The reconnect strategy doubles the delay after each failed attempt
  * up to a configured maximum.
+ *
+ * Binary frames (ArrayBuffer) are used exclusively. The offline queue
+ * base64-encodes frames for localStorage persistence.
  */
+
+import { BitArray } from "../../gleam.mjs";
 
 // =============================================================================
 // PRIVATE CONSTANTS
@@ -41,6 +46,7 @@ export function connect(url, reconnectBaseMs, reconnectMaxMs, handler) {
 
     try {
       ws = new WebSocket(url);
+      ws.binaryType = "arraybuffer";
     } catch (_error) {
       scheduleReconnect();
       return;
@@ -53,8 +59,8 @@ export function connect(url, reconnectBaseMs, reconnectMaxMs, handler) {
     };
 
     ws.onmessage = function (event) {
-      if (typeof event.data === "string") {
-        handler.on_receive(event.data);
+      if (event.data instanceof ArrayBuffer) {
+        handler.on_receive(new BitArray(new Uint8Array(event.data)));
       }
     };
 
@@ -102,10 +108,10 @@ export function connect(url, reconnectBaseMs, reconnectMaxMs, handler) {
     if (pending.length === 0) return;
 
     const sent = [];
-    for (const text of pending) {
+    for (const frame of pending) {
       if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(text);
-        sent.push(text);
+        ws.send(frame);
+        sent.push(frame);
       } else {
         break;
       }
@@ -118,43 +124,42 @@ export function connect(url, reconnectBaseMs, reconnectMaxMs, handler) {
     } else if (sent.length > 0) {
       // Partial flush — keep whatever didn't make it
       const remaining = pending.slice(sent.length);
-      localStorage.setItem(STORAGE_KEY_PENDING, JSON.stringify(remaining));
+      localStorage.setItem(STORAGE_KEY_PENDING, JSON.stringify(remaining.map(frameToBase64)));
       pending = remaining;
     }
   }
 
-  /** Retrieve pending messages from localStorage */
+  /** Retrieve pending frames from localStorage (base64 → Uint8Array) */
   function getPending() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY_PENDING);
-      if (raw) return JSON.parse(raw);
+      if (raw) return JSON.parse(raw).map(base64ToFrame);
     } catch (_error) {
       // Corrupted data, reset to empty queue
     }
     return [];
   }
 
-  /** Add message to pending queue and persist to localStorage */
-  function queuePending(text) {
+  /** Add frame to pending queue and persist to localStorage */
+  function queuePending(frame) {
     const wasEmpty = pending.length === 0;
-    pending.push(text);
+    pending.push(frame);
     if (wasEmpty) {
-      // Write immediately for the first queued message so the data is visible
-      // to synchronous readers (e.g. tests) without waiting for a microtask.
+      // Write immediately for the first queued frame
       try {
-        localStorage.setItem(STORAGE_KEY_PENDING, JSON.stringify(pending));
+        localStorage.setItem(STORAGE_KEY_PENDING, JSON.stringify(pending.map(frameToBase64)));
       } catch (_error) {
-        // Quota exceeded — message remains in-memory, sent on reconnect
+        // Quota exceeded — frame remains in-memory, sent on reconnect
       }
     } else if (!persistScheduled) {
-      // Subsequent messages are coalesced — avoids O(n²) writes in rapid batches.
+      // Subsequent frames are coalesced — avoids O(n²) writes in rapid batches.
       persistScheduled = true;
       queueMicrotask(function () {
         persistScheduled = false;
         try {
-          localStorage.setItem(STORAGE_KEY_PENDING, JSON.stringify(pending));
+          localStorage.setItem(STORAGE_KEY_PENDING, JSON.stringify(pending.map(frameToBase64)));
         } catch (_error) {
-          // Quota exceeded — messages remain in-memory, sent on reconnect
+          // Quota exceeded — frames remain in-memory, sent on reconnect
         }
       });
     }
@@ -171,12 +176,13 @@ export function connect(url, reconnectBaseMs, reconnectMaxMs, handler) {
   // -------------------------------------------------------------------------
 
   return {
-    /** Send message via WebSocket (queues if offline) */
-    send(text) {
+    /** Send bytes via WebSocket (queues if offline) */
+    send(bytes) {
+      const frame = bytes.rawBuffer;
       if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(text);
+        ws.send(frame);
       } else {
-        queuePending(text);
+        queuePending(frame);
       }
     },
 
@@ -198,18 +204,41 @@ export function connect(url, reconnectBaseMs, reconnectMaxMs, handler) {
 // WRAPPER EXPORTS
 // =============================================================================
 
-/** Send text via transport handle */
-export function send(handle, text) {
-  handle.send(text);
-}
-
 /** Close transport connection */
 export function close(handle) {
   handle.close();
+}
+
+/** Send bytes via transport handle */
+export function send(handle, bytes) {
+  handle.send(bytes);
 }
 
 /** Derive WebSocket URL from current browser location */
 export function urlFromCurrentLocation(path) {
   const protocol = globalThis.location.protocol === "https:" ? "wss:" : "ws:";
   return protocol + "//" + globalThis.location.host + path;
+}
+
+// =============================================================================
+// PRIVATE HELPERS
+// =============================================================================
+
+/** Decode a base64 string back to a Uint8Array */
+function base64ToFrame(b64) {
+  const binary = globalThis.atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+/** Encode a Uint8Array to a base64 string for localStorage persistence */
+function frameToBase64(frame) {
+  let binary = "";
+  for (let i = 0; i < frame.byteLength; i++) {
+    binary += String.fromCharCode(frame[i]);
+  }
+  return globalThis.btoa(binary);
 }

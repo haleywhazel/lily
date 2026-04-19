@@ -11,19 +11,19 @@ import lily/test_ref
 // CONSTRUCTION
 // =============================================================================
 
-pub fn new_store_has_initial_model_test() {
-  let test_store =
-    store.new(test_fixtures.initial_model(), with: test_fixtures.update)
-  test_store.model
-  |> should.equal(test_fixtures.initial_model())
-}
-
 pub fn new_store_has_empty_handlers_test() {
   let test_store =
     store.new(test_fixtures.initial_model(), with: test_fixtures.update)
   test_store.handlers
   |> dict.size
   |> should.equal(0)
+}
+
+pub fn new_store_has_initial_model_test() {
+  let test_store =
+    store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+  test_store.model
+  |> should.equal(test_fixtures.initial_model())
 }
 
 pub fn new_store_retains_update_function_test() {
@@ -55,15 +55,6 @@ pub fn subscribe_multiple_selectors_test() {
   |> should.equal(2)
 }
 
-pub fn subscribe_same_selector_replaces_handler_test() {
-  store.new(test_fixtures.initial_model(), with: test_fixtures.update)
-  |> store.subscribe(selector: "#app", with: fn(_model) { Nil })
-  |> store.subscribe(selector: "#app", with: fn(_model) { Nil })
-  |> fn(subscribed) { subscribed.handlers }
-  |> dict.size
-  |> should.equal(1)
-}
-
 pub fn subscribe_preserves_model_test() {
   store.new(test_fixtures.initial_model(), with: test_fixtures.update)
   |> store.subscribe(selector: "#app", with: fn(_model) { Nil })
@@ -82,18 +73,18 @@ pub fn subscribe_preserves_other_handlers_test() {
   |> should.equal(2)
 }
 
+pub fn subscribe_same_selector_replaces_handler_test() {
+  store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+  |> store.subscribe(selector: "#app", with: fn(_model) { Nil })
+  |> store.subscribe(selector: "#app", with: fn(_model) { Nil })
+  |> fn(subscribed) { subscribed.handlers }
+  |> dict.size
+  |> should.equal(1)
+}
+
 // =============================================================================
 // UNSUBSCRIBE
 // =============================================================================
-
-pub fn unsubscribe_removes_handler_test() {
-  store.new(test_fixtures.initial_model(), with: test_fixtures.update)
-  |> store.subscribe(selector: "#app", with: fn(_model) { Nil })
-  |> store.unsubscribe("#app")
-  |> fn(unsubscribed) { unsubscribed.handlers }
-  |> dict.size
-  |> should.equal(0)
-}
 
 pub fn unsubscribe_nonexistent_selector_is_noop_test() {
   store.new(test_fixtures.initial_model(), with: test_fixtures.update)
@@ -101,6 +92,14 @@ pub fn unsubscribe_nonexistent_selector_is_noop_test() {
   |> fn(unsubscribed) { unsubscribed.handlers }
   |> dict.size
   |> should.equal(0)
+}
+
+pub fn unsubscribe_preserves_model_test() {
+  store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+  |> store.subscribe(selector: "#app", with: fn(_model) { Nil })
+  |> store.unsubscribe("#app")
+  |> fn(unsubscribed) { unsubscribed.model }
+  |> should.equal(test_fixtures.initial_model())
 }
 
 pub fn unsubscribe_preserves_other_handlers_test() {
@@ -113,24 +112,18 @@ pub fn unsubscribe_preserves_other_handlers_test() {
   |> should.equal(1)
 }
 
-pub fn unsubscribe_preserves_model_test() {
+pub fn unsubscribe_removes_handler_test() {
   store.new(test_fixtures.initial_model(), with: test_fixtures.update)
   |> store.subscribe(selector: "#app", with: fn(_model) { Nil })
   |> store.unsubscribe("#app")
-  |> fn(unsubscribed) { unsubscribed.model }
-  |> should.equal(test_fixtures.initial_model())
+  |> fn(unsubscribed) { unsubscribed.handlers }
+  |> dict.size
+  |> should.equal(0)
 }
 
 // =============================================================================
 // APPLY (internal)
 // =============================================================================
-
-pub fn apply_updates_model_test() {
-  store.new(test_fixtures.initial_model(), with: test_fixtures.update)
-  |> store.apply(message: Increment)
-  |> fn(applied) { applied.model.count }
-  |> should.equal(1)
-}
 
 pub fn apply_multiple_messages_test() {
   store.new(test_fixtures.initial_model(), with: test_fixtures.update)
@@ -139,6 +132,22 @@ pub fn apply_multiple_messages_test() {
   |> store.apply(message: Increment)
   |> fn(applied) { applied.model.count }
   |> should.equal(3)
+}
+
+pub fn apply_preserves_handlers_test() {
+  store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+  |> store.subscribe(selector: "#app", with: fn(_model) { Nil })
+  |> store.apply(message: Increment)
+  |> fn(applied) { applied.handlers }
+  |> dict.size
+  |> should.equal(1)
+}
+
+pub fn apply_updates_model_test() {
+  store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+  |> store.apply(message: Increment)
+  |> fn(applied) { applied.model.count }
+  |> should.equal(1)
 }
 
 pub fn apply_with_different_messages_test() {
@@ -151,15 +160,6 @@ pub fn apply_with_different_messages_test() {
   |> should.equal(0)
   applied.model.name
   |> should.equal("Alice")
-}
-
-pub fn apply_preserves_handlers_test() {
-  store.new(test_fixtures.initial_model(), with: test_fixtures.update)
-  |> store.subscribe(selector: "#app", with: fn(_model) { Nil })
-  |> store.apply(message: Increment)
-  |> fn(applied) { applied.handlers }
-  |> dict.size
-  |> should.equal(1)
 }
 
 // =============================================================================

@@ -482,6 +482,18 @@ pub fn structural(
 // =============================================================================
 
 @target(javascript)
+/// Casts a Dynamic value back to the slice type. On JavaScript this is an
+/// identity function — the value is already the correct type at runtime.
+/// Used to pass the already-extracted slice result to render/patch functions
+/// without calling the user's slice function a second time.
+@external(javascript, "./component.ffi.mjs", "identity")
+fn from_dynamic(value: Dynamic) -> a {
+  // This will never run
+  let _ = value
+  panic as "This should never be called - JavaScript only"
+}
+
+@target(javascript)
 /// Get the model from the runtime
 @external(javascript, "./component.ffi.mjs", "getModel")
 fn get_model(_runtime: Runtime(model, message)) -> model {
@@ -513,18 +525,6 @@ fn render_tree(
 /// compilation time.
 @external(javascript, "./component.ffi.mjs", "identity")
 fn to_dynamic(value: a) -> Dynamic {
-  // This will never run
-  let _ = value
-  panic as "This should never be called - JavaScript only"
-}
-
-@target(javascript)
-/// Casts a Dynamic value back to the slice type. On JavaScript this is an
-/// identity function — the value is already the correct type at runtime.
-/// Used to pass the already-extracted slice result to render/patch functions
-/// without calling the user's slice function a second time.
-@external(javascript, "./component.ffi.mjs", "identity")
-fn from_dynamic(value: Dynamic) -> a {
   // This will never run
   let _ = value
   panic as "This should never be called - JavaScript only"

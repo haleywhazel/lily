@@ -9,7 +9,14 @@
  * Connection status is tracked via the SSE connection state (EventSource.onopen
  * and EventSource.onerror). Failed POST requests do NOT trigger disconnection;
  * they are queued and retried when the SSE connection reopens.
+ *
+ * Client→server: binary POST with Content-Type application/octet-stream.
+ * Server→client: SSE text frames encoded as UTF-8 bytes (JSON mode) or
+ * base64-encoded MessagePack (binary mode, server must base64-encode).
+ * Offline queue persists frames as base64 in localStorage.
  */
+
+import { BitArray } from "../../gleam.mjs";
 
 // =============================================================================
 // PRIVATE CONSTANTS
@@ -34,44 +41,43 @@ export function connect(postUrl, eventsUrl, handler) {
   // Offline queue helpers
   // -------------------------------------------------------------------------
 
-  /** Retrieve pending messages from localStorage */
+  /** Retrieve pending frames from localStorage (base64 → Uint8Array) */
   function getPending() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY_PENDING);
-      if (raw) return JSON.parse(raw);
+      if (raw) return JSON.parse(raw).map(base64ToFrame);
     } catch (_error) {
       // Corrupted data, reset to empty queue
     }
     return [];
   }
 
-  /** Add message to pending queue and persist to localStorage */
-  function queuePending(text) {
+  /** Add frame to pending queue and persist to localStorage */
+  function queuePending(frame) {
     const wasEmpty = pending.length === 0;
-    pending.push(text);
+    pending.push(frame);
     if (wasEmpty) {
-      // Write immediately for the first queued message so the data is visible
-      // to synchronous readers (e.g. tests) without waiting for a microtask.
+      // Write immediately for the first queued frame
       try {
-        localStorage.setItem(STORAGE_KEY_PENDING, JSON.stringify(pending));
+        localStorage.setItem(STORAGE_KEY_PENDING, JSON.stringify(pending.map(frameToBase64)));
       } catch (_error) {
-        // Quota exceeded — message remains in-memory, sent on reconnect
+        // Quota exceeded — frame remains in-memory, sent on reconnect
       }
     } else if (!persistScheduled) {
-      // Subsequent messages are coalesced — avoids O(n²) writes in rapid batches.
+      // Subsequent frames are coalesced — avoids O(n²) writes in rapid batches.
       persistScheduled = true;
       queueMicrotask(function () {
         persistScheduled = false;
         try {
-          localStorage.setItem(STORAGE_KEY_PENDING, JSON.stringify(pending));
+          localStorage.setItem(STORAGE_KEY_PENDING, JSON.stringify(pending.map(frameToBase64)));
         } catch (_error) {
-          // Quota exceeded — messages remain in-memory, sent on reconnect
+          // Quota exceeded — frames remain in-memory, sent on reconnect
         }
       });
     }
   }
 
-  /** Send all pending messages via POST when connection is available */
+  /** Send all pending frames via POST when connection is available */
   async function flushPending() {
     // Guard against a second concurrent flush if onopen fires again mid-flush
     if (isFlushing) return;
@@ -89,11 +95,11 @@ export function connect(postUrl, eventsUrl, handler) {
       if (!isConnected) break;
       const batch = pending.slice(i, i + batchSize);
       const results = await Promise.allSettled(
-        batch.map(function (text) {
+        batch.map(function (frame) {
           return fetch(postUrl, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: text,
+            headers: { "Content-Type": "application/octet-stream" },
+            body: frame,
           });
         }),
       );
@@ -109,7 +115,7 @@ export function connect(postUrl, eventsUrl, handler) {
       pending = [];
     } else if (totalSent > 0) {
       pending = pending.slice(totalSent);
-      localStorage.setItem(STORAGE_KEY_PENDING, JSON.stringify(pending));
+      localStorage.setItem(STORAGE_KEY_PENDING, JSON.stringify(pending.map(frameToBase64)));
     }
 
     isFlushing = false;
@@ -142,7 +148,8 @@ export function connect(postUrl, eventsUrl, handler) {
 
   eventSource.onmessage = function (event) {
     if (typeof event.data === "string") {
-      handler.on_receive(event.data);
+      // SSE is text-only; convert to bytes so the handler always gets BitArray
+      handler.on_receive(new BitArray(new TextEncoder().encode(event.data)));
     }
   };
 
@@ -157,23 +164,22 @@ export function connect(postUrl, eventsUrl, handler) {
   // -------------------------------------------------------------------------
 
   return {
-    /** Send message to server via POST (queues if offline) */
-    send(text) {
+    /** Send bytes to server via POST (queues if offline) */
+    send(bytes) {
+      const frame = bytes.rawBuffer;
       if (isConnected) {
         fetch(postUrl, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: text,
+          headers: { "Content-Type": "application/octet-stream" },
+          body: frame,
         })
           .then(function () {})
           .catch(function (error) {
             console.error("Failed to POST message:", error);
-            queuePending(text);
+            queuePending(frame);
           });
       } else {
-        queuePending(text);
+        queuePending(frame);
       }
     },
 
@@ -192,12 +198,35 @@ export function connect(postUrl, eventsUrl, handler) {
 // WRAPPER EXPORTS
 // =============================================================================
 
-/** Send text via transport handle */
-export function send(handle, text) {
-  handle.send(text);
-}
-
 /** Close transport connection */
 export function close(handle) {
   handle.close();
+}
+
+/** Send bytes via transport handle */
+export function send(handle, bytes) {
+  handle.send(bytes);
+}
+
+// =============================================================================
+// PRIVATE HELPERS
+// =============================================================================
+
+/** Decode a base64 string back to a Uint8Array */
+function base64ToFrame(b64) {
+  const binary = globalThis.atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+/** Encode a Uint8Array to a base64 string for localStorage persistence */
+function frameToBase64(frame) {
+  let binary = "";
+  for (let i = 0; i < frame.byteLength; i++) {
+    binary += String.fromCharCode(frame[i]);
+  }
+  return globalThis.btoa(binary);
 }

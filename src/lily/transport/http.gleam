@@ -98,7 +98,7 @@ pub fn connect(config: Config) -> Connector {
     let transport_handle =
       http_connect(config.post_url, config.events_url, handler)
     transport.new(
-      send: fn(text) { http_send(transport_handle, text) },
+      send: fn(bytes) { http_send(transport_handle, bytes) },
       close: fn() { http_close(transport_handle) },
     )
   }
@@ -130,7 +130,7 @@ fn http_connect(
 
 @target(javascript)
 @external(javascript, "./http.ffi.mjs", "send")
-fn http_send(_handle: HttpHandle, _text: String) -> Nil {
+fn http_send(_handle: HttpHandle, _bytes: BitArray) -> Nil {
   Nil
 }
 

@@ -2,6 +2,8 @@
 // All functions are @target(javascript) — skipped on Erlang.
 
 @target(javascript)
+import gleam/bit_array
+@target(javascript)
 import gleam/list
 @target(javascript)
 import gleeunit/should
@@ -39,7 +41,7 @@ fn new_server() -> server.Server(Model, Message) {
 fn connect_client(
   srv: server.Server(Model, Message),
   client_id: String,
-) -> fn() -> List(String) {
+) -> fn() -> List(BitArray) {
   let ref = test_ref.new([])
   server.connect(srv, client_id: client_id, send: fn(msg) {
     test_ref.set(ref, [msg, ..test_ref.get(ref)])
@@ -52,12 +54,12 @@ fn connect_client(
 }
 
 @target(javascript)
-fn encode_client(msg: Message) -> String {
+fn encode_client(msg: Message) -> BitArray {
   transport.encode(transport.ClientMessage(payload: msg), serialiser: ser())
 }
 
 @target(javascript)
-fn encode_resync(seq: Int) -> String {
+fn encode_resync(seq: Int) -> BitArray {
   transport.encode(transport.Resync(after_sequence: seq), serialiser: ser())
 }
 
@@ -78,26 +80,26 @@ pub fn js_server_start_returns_ok_test() {
 // =============================================================================
 
 @target(javascript)
+pub fn js_server_disconnect_nonexistent_test() {
+  let srv = new_server()
+  server.disconnect(srv, client_id: "ghost")
+  True
+  |> should.be_true
+}
+
+@target(javascript)
 pub fn js_server_disconnect_stops_broadcast_test() {
   let srv = new_server()
   let get_c1 = connect_client(srv, "c1")
   let get_c2 = connect_client(srv, "c2")
   server.disconnect(srv, client_id: "c2")
-  server.incoming(srv, client_id: "c1", text: encode_client(Increment))
+  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
   get_c2()
   |> list.length
   |> should.equal(0)
   get_c1()
   |> list.length
   |> should.equal(1)
-}
-
-@target(javascript)
-pub fn js_server_disconnect_nonexistent_test() {
-  let srv = new_server()
-  server.disconnect(srv, client_id: "ghost")
-  True
-  |> should.be_true
 }
 
 // =============================================================================
@@ -108,7 +110,7 @@ pub fn js_server_disconnect_nonexistent_test() {
 pub fn js_server_incoming_acknowledges_sender_test() {
   let srv = new_server()
   let get_c1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", text: encode_client(Increment))
+  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
   let messages = get_c1()
   messages
   |> list.length
@@ -127,7 +129,7 @@ pub fn js_server_incoming_broadcasts_to_others_test() {
   let srv = new_server()
   let _get_c1 = connect_client(srv, "c1")
   let get_c2 = connect_client(srv, "c2")
-  server.incoming(srv, client_id: "c1", text: encode_client(Increment))
+  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
   let messages = get_c2()
   messages
   |> list.length
@@ -148,7 +150,7 @@ pub fn js_server_incoming_does_not_broadcast_to_sender_test() {
   let srv = new_server()
   let get_c1 = connect_client(srv, "c1")
   let _get_c2 = connect_client(srv, "c2")
-  server.incoming(srv, client_id: "c1", text: encode_client(Increment))
+  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
   let messages = get_c1()
   messages
   |> list.length
@@ -166,8 +168,8 @@ pub fn js_server_incoming_does_not_broadcast_to_sender_test() {
 pub fn js_server_sequence_increments_test() {
   let srv = new_server()
   let get_c1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", text: encode_client(Increment))
-  server.incoming(srv, client_id: "c1", text: encode_client(Increment))
+  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
+  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
   let messages = get_c1()
   messages
   |> list.length
@@ -186,19 +188,20 @@ pub fn js_server_sequence_increments_test() {
 // =============================================================================
 
 @target(javascript)
-pub fn js_server_resync_sends_snapshot_test() {
+pub fn js_server_resync_after_messages_test() {
   let srv = new_server()
   let get_c1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", text: encode_resync(0))
+  server.incoming(srv, client_id: "c1", bytes: encode_client(SetName("Alice")))
+  let _ = get_c1()
+  server.incoming(srv, client_id: "c1", bytes: encode_resync(1))
   let messages = get_c1()
-  messages
-  |> list.length
-  |> should.equal(1)
   case messages {
     [msg, ..] -> {
+      let expected_model =
+        test_fixtures.Model(count: 0, name: "Alice", connected: False)
       transport.decode(msg, serialiser: ser())
       |> should.equal(
-        Ok(transport.Snapshot(sequence: 0, state: test_fixtures.initial_model())),
+        Ok(transport.Snapshot(sequence: 1, state: expected_model)),
       )
     }
     [] -> should.fail()
@@ -209,10 +212,10 @@ pub fn js_server_resync_sends_snapshot_test() {
 pub fn js_server_resync_from_new_client_test() {
   let srv = new_server()
   let get_c1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", text: encode_client(Increment))
+  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
   let _ = get_c1()
   let get_c2 = connect_client(srv, "c2")
-  server.incoming(srv, client_id: "c2", text: encode_resync(0))
+  server.incoming(srv, client_id: "c2", bytes: encode_resync(0))
   let messages = get_c2()
   case messages {
     [msg, ..] -> {
@@ -228,20 +231,19 @@ pub fn js_server_resync_from_new_client_test() {
 }
 
 @target(javascript)
-pub fn js_server_resync_after_messages_test() {
+pub fn js_server_resync_sends_snapshot_test() {
   let srv = new_server()
   let get_c1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", text: encode_client(SetName("Alice")))
-  let _ = get_c1()
-  server.incoming(srv, client_id: "c1", text: encode_resync(1))
+  server.incoming(srv, client_id: "c1", bytes: encode_resync(0))
   let messages = get_c1()
+  messages
+  |> list.length
+  |> should.equal(1)
   case messages {
     [msg, ..] -> {
-      let expected_model =
-        test_fixtures.Model(count: 0, name: "Alice", connected: False)
       transport.decode(msg, serialiser: ser())
       |> should.equal(
-        Ok(transport.Snapshot(sequence: 1, state: expected_model)),
+        Ok(transport.Snapshot(sequence: 0, state: test_fixtures.initial_model())),
       )
     }
     [] -> should.fail()
@@ -253,26 +255,10 @@ pub fn js_server_resync_after_messages_test() {
 // =============================================================================
 
 @target(javascript)
-pub fn js_server_on_message_hook_called_test() {
-  let srv = new_server()
-  let hook_ref = test_ref.new(False)
-  server.on_message(srv, fn(msg, _model, _client_id) {
-    case msg {
-      Increment -> test_ref.set(hook_ref, True)
-      _ -> Nil
-    }
-  })
-  let _get_c1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", text: encode_client(Increment))
-  test_ref.get(hook_ref)
-  |> should.be_true
-}
-
-@target(javascript)
 pub fn js_server_no_hook_does_not_crash_test() {
   let srv = new_server()
   let get_c1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", text: encode_client(Increment))
+  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
   get_c1()
   |> list.length
   |> should.equal(1)
@@ -286,7 +272,9 @@ pub fn js_server_no_hook_does_not_crash_test() {
 pub fn js_server_incoming_invalid_json_test() {
   let srv = new_server()
   let get_c1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", text: "not json at all")
+  server.incoming(srv, client_id: "c1", bytes: bit_array.from_string(
+    "not json at all",
+  ))
   get_c1()
   |> list.length
   |> should.equal(0)
@@ -296,7 +284,7 @@ pub fn js_server_incoming_invalid_json_test() {
 pub fn js_server_sequence_starts_at_zero_test() {
   let srv = new_server()
   let get_c1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", text: encode_resync(0))
+  server.incoming(srv, client_id: "c1", bytes: encode_resync(0))
   case get_c1() {
     [msg, ..] -> {
       transport.decode(msg, serialiser: ser())

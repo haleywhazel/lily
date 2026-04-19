@@ -90,7 +90,7 @@ pub fn connect(config: Config) -> Connector {
         handler,
       )
     transport.new(
-      send: fn(text) { ws_send(transport_handle, text) },
+      send: fn(bytes) { ws_send(transport_handle, bytes) },
       close: fn() { ws_close(transport_handle) },
     )
   }
@@ -155,7 +155,7 @@ fn ws_connect(
 
 @target(javascript)
 @external(javascript, "./websocket.ffi.mjs", "send")
-fn ws_send(_handle: WsHandle, _text: String) -> Nil {
+fn ws_send(_handle: WsHandle, _bytes: BitArray) -> Nil {
   Nil
 }
 

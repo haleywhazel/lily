@@ -84,7 +84,7 @@ pub opaque type Server(model, message) {
 /// Register a client connection with the server. The `send` callback is how
 /// the server pushes messages back to this specific client.
 ///
-/// On Erlang, if you have a `Subject(String)` from mist's WebSocket handler,
+/// On Erlang, if you have a `Subject(BitArray)` from mist's WebSocket handler,
 /// wrap it: `send: process.send(outgoing_subject, _)`.
 ///
 /// ## Example
@@ -95,12 +95,12 @@ pub opaque type Server(model, message) {
 /// server.connect(srv, client_id: "abc123", send: process.send(outgoing_subject, _))
 ///
 /// // JavaScript with Node.js WebSocket
-/// server.connect(srv, client_id: "abc123", send: fn(text) { ws.send(text) })
+/// server.connect(srv, client_id: "abc123", send: fn(bytes) { ws.send(bytes) })
 /// ```
 pub fn connect(
   server: Server(model, message),
   client_id client_id: String,
-  send send: fn(String) -> Nil,
+  send send: fn(BitArray) -> Nil,
 ) -> Nil {
   platform_connect(server.handle, client_id, send)
 }
@@ -114,14 +114,14 @@ pub fn disconnect(
   platform_disconnect(server.handle, client_id)
 }
 
-/// Process an incoming message from a client. The text should be a serialised
-/// [`transport.Protocol`](./transport.html#Protocol) message (JSON string).
+/// Process an incoming message from a client. The bytes should be a
+/// serialised [`transport.Protocol`](./transport.html#Protocol) message.
 pub fn incoming(
   server: Server(model, message),
   client_id client_id: String,
-  text text: String,
+  bytes bytes: BitArray,
 ) -> Nil {
-  platform_incoming(server.handle, client_id, text)
+  platform_incoming(server.handle, client_id, bytes)
 }
 
 /// Register a hook that runs after each client message is processed on the
@@ -192,9 +192,9 @@ type ServerHandle(model, message)
 @target(erlang)
 /// Internal events for Erlang actor message passing
 type InternalEvent(model, message) {
-  ClientConnected(client_id: String, send: fn(String) -> Nil)
+  ClientConnected(client_id: String, send: fn(BitArray) -> Nil)
   ClientDisconnected(client_id: String)
-  Incoming(client_id: String, text: String)
+  Incoming(client_id: String, bytes: BitArray)
   SetHook(hook: fn(message, model, String) -> Nil)
 }
 
@@ -202,7 +202,7 @@ type InternalEvent(model, message) {
 type ServerState(model, message) {
   ServerState(
     store: Store(model, message),
-    clients: Dict(String, fn(String) -> Nil),
+    clients: Dict(String, fn(BitArray) -> Nil),
     sequence: Int,
     serialiser: Serialiser(model, message),
     on_message_hook: Option(fn(message, model, String) -> Nil),
@@ -215,14 +215,14 @@ type ServerState(model, message) {
 
 /// Broadcast to all clients except the excluded one
 fn broadcast_except(
-  clients: Dict(String, fn(String) -> Nil),
-  message: String,
+  clients: Dict(String, fn(BitArray) -> Nil),
+  bytes: BitArray,
   except excluded_id: String,
 ) -> Nil {
   dict.each(clients, fn(id, send) {
     case id == excluded_id {
       True -> Nil
-      False -> send(message)
+      False -> send(bytes)
     }
   })
 }
@@ -231,7 +231,7 @@ fn broadcast_except(
 fn handle_client_connected_logic(
   state: ServerState(model, message),
   client_id: String,
-  send: fn(String) -> Nil,
+  send: fn(BitArray) -> Nil,
 ) -> ServerState(model, message) {
   let clients = dict.insert(state.clients, client_id, send)
   ServerState(..state, clients:)
@@ -255,7 +255,6 @@ fn handle_client_message_logic(
   let updated_store = store.apply(state.store, message: payload)
   let new_sequence = state.sequence + 1
 
-  // Broadcast a new server message to connected clients (except sender)
   let server_message = transport.ServerMessage(sequence: new_sequence, payload:)
   let encoded = transport.encode(server_message, serialiser: state.serialiser)
   broadcast_except(state.clients, encoded, except: client_id)
@@ -280,9 +279,9 @@ fn handle_client_message_logic(
 fn handle_incoming_logic(
   state: ServerState(model, message),
   client_id: String,
-  text: String,
+  bytes: BitArray,
 ) -> ServerState(model, message) {
-  case transport.decode(text, serialiser: state.serialiser) {
+  case transport.decode(bytes, serialiser: state.serialiser) {
     Ok(transport.ClientMessage(payload:)) ->
       handle_client_message_logic(state, client_id, payload)
 
@@ -304,8 +303,8 @@ fn handle_resync_logic(
     Ok(send) -> {
       let snapshot =
         transport.Snapshot(sequence: state.sequence, state: state.store.model)
-      let encoded = transport.encode(snapshot, serialiser: state.serialiser)
-      send(encoded)
+      let bytes = transport.encode(snapshot, serialiser: state.serialiser)
+      send(bytes)
       state
     }
   }
@@ -320,7 +319,7 @@ fn handle_resync_logic(
 fn handle_client_connected(
   state: ServerState(model, message),
   client_id: String,
-  send: fn(String) -> Nil,
+  send: fn(BitArray) -> Nil,
 ) -> actor.Next(ServerState(model, message), InternalEvent(model, message)) {
   handle_client_connected_logic(state, client_id, send)
   |> actor.continue
@@ -341,9 +340,9 @@ fn handle_client_disconnected(
 fn handle_incoming(
   state: ServerState(model, message),
   client_id: String,
-  text: String,
+  bytes: BitArray,
 ) -> actor.Next(ServerState(model, message), InternalEvent(model, message)) {
-  handle_incoming_logic(state, client_id, text)
+  handle_incoming_logic(state, client_id, bytes)
   |> actor.continue
 }
 
@@ -360,7 +359,7 @@ fn handle_message(
     ClientDisconnected(client_id:) ->
       handle_client_disconnected(state, client_id)
 
-    Incoming(client_id:, text:) -> handle_incoming(state, client_id, text)
+    Incoming(client_id:, bytes:) -> handle_incoming(state, client_id, bytes)
 
     SetHook(hook:) ->
       ServerState(..state, on_message_hook: option.Some(hook))
@@ -373,7 +372,7 @@ fn handle_message(
 fn platform_connect(
   handle: ServerHandle(model, message),
   client_id: String,
-  send: fn(String) -> Nil,
+  send: fn(BitArray) -> Nil,
 ) -> Nil {
   actor.send(handle, ClientConnected(client_id:, send:))
 }
@@ -392,9 +391,9 @@ fn platform_disconnect(
 fn platform_incoming(
   handle: ServerHandle(model, message),
   client_id: String,
-  text: String,
+  bytes: BitArray,
 ) -> Nil {
-  actor.send(handle, Incoming(client_id:, text:))
+  actor.send(handle, Incoming(client_id:, bytes:))
 }
 
 @target(erlang)
@@ -427,7 +426,7 @@ fn platform_start(
 fn platform_connect(
   handle: ServerHandle(model, message),
   client_id: String,
-  send: fn(String) -> Nil,
+  send: fn(BitArray) -> Nil,
 ) -> Nil {
   ffi_connect(handle, client_id, send)
 }
@@ -446,9 +445,9 @@ fn platform_disconnect(
 fn platform_incoming(
   handle: ServerHandle(model, message),
   client_id: String,
-  text: String,
+  bytes: BitArray,
 ) -> Nil {
-  ffi_incoming(handle, client_id, text)
+  ffi_incoming(handle, client_id, bytes)
 }
 
 @target(javascript)
@@ -483,7 +482,7 @@ fn platform_start(
 fn ffi_connect(
   _handle: ServerHandle(model, message),
   _client_id: String,
-  _send: fn(String) -> Nil,
+  _send: fn(BitArray) -> Nil,
 ) -> Nil {
   Nil
 }
@@ -493,11 +492,14 @@ fn ffi_connect(
 @external(javascript, "./server.ffi.mjs", "createServer")
 fn ffi_create_server(
   _initial_state: ServerState(model, message),
-  _handle_connect: fn(ServerState(model, message), String, fn(String) -> Nil) ->
+  _handle_connect: fn(
     ServerState(model, message),
+    String,
+    fn(BitArray) -> Nil,
+  ) -> ServerState(model, message),
   _handle_disconnect: fn(ServerState(model, message), String) ->
     ServerState(model, message),
-  _handle_incoming: fn(ServerState(model, message), String, String) ->
+  _handle_incoming: fn(ServerState(model, message), String, BitArray) ->
     ServerState(model, message),
 ) -> ServerHandle(model, message) {
   panic as "JavaScript only"
@@ -519,7 +521,7 @@ fn ffi_disconnect(
 fn ffi_incoming(
   _handle: ServerHandle(model, message),
   _client_id: String,
-  _text: String,
+  _bytes: BitArray,
 ) -> Nil {
   Nil
 }

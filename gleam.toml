@@ -5,7 +5,7 @@ target = "javascript"
 # Fill out these fields if you intend to generate HTML documentation or publish
 # your project to the Hex package manager.
 #
-description = "A reactive web framework for Gleam with server-client state synchronisation."
+description = "Lily is designed to be a web framework for Gleam that allows for real-time updates while preserving offline functionality."
 licences = ["Apache-2.0"]
 repository = { type = "github", user = "haleywhazel", repo = "lily" }
 # links = [{ title = "Website", href = "" }]

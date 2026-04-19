@@ -135,9 +135,9 @@ export function createRuntime(store, apply, notify) {
     setTransport(transport) {
       currentTransport = transport;
     },
-    sendViaTransport(text) {
+    sendViaTransport(bytes) {
       if (currentTransport) {
-        currentTransport.send(text);
+        currentTransport.send(bytes);
       }
     },
     getLastSequence() {
@@ -250,12 +250,16 @@ export function getModel(runtime) {
   return runtime.getModel();
 }
 
+export function initialNotify(runtime) {
+  runtime.initialNotify();
+}
+
 export function sendMessage(runtime, message) {
   runtime.sendMessage(message);
 }
 
-export function sendViaTransport(runtime, text) {
-  runtime.sendViaTransport(text);
+export function sendViaTransport(runtime, bytes) {
+  runtime.sendViaTransport(bytes);
 }
 
 export function setConnectionStatus(runtime, connected) {
@@ -288,10 +292,6 @@ export function setTransport(runtime, transport) {
 
 export function setUserMessageHook(runtime, hook) {
   runtime.setUserMessageHook(hook);
-}
-
-export function initialNotify(runtime) {
-  runtime.initialNotify();
 }
 
 // =============================================================================
