@@ -24,24 +24,26 @@ fn ser() {
 pub fn encode_acknowledge_test() {
   let result = transport.encode(Acknowledge(sequence: 1), serialiser: ser())
   result
-  |> should.equal(bit_array.from_string("{\"type\":\"acknowledge\",\"sequence\":1}"))
+  |> should.equal(bit_array.from_string(
+    "{\"type\":\"acknowledge\",\"sequence\":1}",
+  ))
 }
 
 pub fn encode_client_message_test() {
   let result =
     transport.encode(ClientMessage(payload: Increment), serialiser: ser())
   result
-  |> should.equal(
-    bit_array.from_string(
-      "{\"type\":\"client_message\",\"payload\":{\"tag\":\"Increment\"}}",
-    ),
-  )
+  |> should.equal(bit_array.from_string(
+    "{\"type\":\"client_message\",\"payload\":{\"tag\":\"Increment\"}}",
+  ))
 }
 
 pub fn encode_resync_test() {
   let result = transport.encode(Resync(after_sequence: 7), serialiser: ser())
   result
-  |> should.equal(bit_array.from_string("{\"type\":\"resync\",\"after_sequence\":7}"))
+  |> should.equal(bit_array.from_string(
+    "{\"type\":\"resync\",\"after_sequence\":7}",
+  ))
 }
 
 pub fn encode_server_message_test() {
@@ -51,11 +53,9 @@ pub fn encode_server_message_test() {
       serialiser: ser(),
     )
   result
-  |> should.equal(
-    bit_array.from_string(
-      "{\"type\":\"server_message\",\"sequence\":3,\"payload\":{\"tag\":\"Decrement\"}}",
-    ),
-  )
+  |> should.equal(bit_array.from_string(
+    "{\"type\":\"server_message\",\"sequence\":3,\"payload\":{\"tag\":\"Decrement\"}}",
+  ))
 }
 
 pub fn encode_snapshot_test() {
@@ -63,11 +63,9 @@ pub fn encode_snapshot_test() {
   let result =
     transport.encode(Snapshot(sequence: 2, state: model), serialiser: ser())
   result
-  |> should.equal(
-    bit_array.from_string(
-      "{\"type\":\"snapshot\",\"sequence\":2,\"state\":{\"count\":5,\"name\":\"Bob\",\"connected\":true}}",
-    ),
-  )
+  |> should.equal(bit_array.from_string(
+    "{\"type\":\"snapshot\",\"sequence\":2,\"state\":{\"count\":5,\"name\":\"Bob\",\"connected\":true}}",
+  ))
 }
 
 // =============================================================================
@@ -102,7 +100,8 @@ pub fn decode_client_message_with_fields_test() {
 }
 
 pub fn decode_resync_test() {
-  let bytes = bit_array.from_string("{\"type\":\"resync\",\"after_sequence\":7}")
+  let bytes =
+    bit_array.from_string("{\"type\":\"resync\",\"after_sequence\":7}")
   let result = transport.decode(bytes, serialiser: ser())
   result
   |> should.equal(Ok(Resync(after_sequence: 7)))
@@ -150,7 +149,8 @@ pub fn decode_empty_returns_error_test() {
 }
 
 pub fn decode_invalid_bytes_returns_error_test() {
-  let result = transport.decode(bit_array.from_string("not json"), serialiser: ser())
+  let result =
+    transport.decode(bit_array.from_string("not json"), serialiser: ser())
   result
   |> should.be_error
 }
@@ -236,17 +236,17 @@ pub fn custom_json_use_json_is_noop_test() {
 
 pub fn use_json_forces_json_path_test() {
   let serialiser = transport.automatic() |> transport.use_json()
-  let bytes =
-    transport.encode(Acknowledge(sequence: 1), serialiser: serialiser)
+  let bytes = transport.encode(Acknowledge(sequence: 1), serialiser: serialiser)
   transport.decode(bytes, serialiser: serialiser)
   |> should.equal(Ok(Acknowledge(sequence: 1)))
 }
 
 pub fn use_message_pack_restores_message_pack_path_test() {
   let serialiser =
-    transport.automatic() |> transport.use_json() |> transport.use_message_pack()
-  let bytes =
-    transport.encode(Acknowledge(sequence: 1), serialiser: serialiser)
+    transport.automatic()
+    |> transport.use_json()
+    |> transport.use_message_pack()
+  let bytes = transport.encode(Acknowledge(sequence: 1), serialiser: serialiser)
   transport.decode(bytes, serialiser: serialiser)
   |> should.equal(Ok(Acknowledge(sequence: 1)))
 }

@@ -492,11 +492,8 @@ fn ffi_connect(
 @external(javascript, "./server.ffi.mjs", "createServer")
 fn ffi_create_server(
   _initial_state: ServerState(model, message),
-  _handle_connect: fn(
+  _handle_connect: fn(ServerState(model, message), String, fn(BitArray) -> Nil) ->
     ServerState(model, message),
-    String,
-    fn(BitArray) -> Nil,
-  ) -> ServerState(model, message),
   _handle_disconnect: fn(ServerState(model, message), String) ->
     ServerState(model, message),
   _handle_incoming: fn(ServerState(model, message), String, BitArray) ->

@@ -61,6 +61,8 @@ export function connect(url, reconnectBaseMs, reconnectMaxMs, handler) {
     ws.onmessage = function (event) {
       if (event.data instanceof ArrayBuffer) {
         handler.on_receive(new BitArray(new Uint8Array(event.data)));
+      } else if (typeof event.data === "string") {
+        handler.on_receive(new BitArray(new TextEncoder().encode(event.data)));
       }
     };
 

@@ -136,8 +136,10 @@ pub fn auto_erl_roundtrip_acknowledge_test() {
 pub fn auto_erl_roundtrip_nested_test() {
   let inner = test_fixtures.Model(count: 3, name: "Eve", connected: False)
   let nested = test_fixtures.Nested(inner:)
-  let nested_ser: transport.Serialiser(test_fixtures.Nested, test_fixtures.Message) =
-    transport.automatic()
+  let nested_ser: transport.Serialiser(
+    test_fixtures.Nested,
+    test_fixtures.Message,
+  ) = transport.automatic()
   let encoded =
     transport.encode(
       Snapshot(sequence: 1, state: nested),
@@ -161,4 +163,56 @@ pub fn auto_erl_roundtrip_list_field_test() {
     )
   transport.decode(encoded, serialiser: list_ser)
   |> should.equal(Ok(Snapshot(sequence: 0, state: with_list)))
+}
+
+// =============================================================================
+// FORMAT ISOLATION
+// =============================================================================
+
+@target(erlang)
+pub fn auto_erl_message_pack_bytes_fail_under_json_test() {
+  // MessagePack bytes should not decode as JSON
+  let mp_bytes = transport.encode(Acknowledge(sequence: 1), serialiser: ser())
+  let json_ser = transport.automatic() |> transport.use_json()
+  transport.decode(mp_bytes, serialiser: json_ser)
+  |> should.be_error
+}
+
+// =============================================================================
+// TOGGLE BEHAVIOUR
+// =============================================================================
+
+@target(erlang)
+pub fn auto_erl_use_json_roundtrip_test() {
+  let json_ser = transport.automatic() |> transport.use_json()
+  let encoded = transport.encode(Acknowledge(sequence: 9), serialiser: json_ser)
+  transport.decode(encoded, serialiser: json_ser)
+  |> should.equal(Ok(Acknowledge(sequence: 9)))
+}
+
+@target(erlang)
+pub fn auto_erl_use_message_pack_after_json_roundtrip_test() {
+  let mp_ser =
+    transport.automatic()
+    |> transport.use_json()
+    |> transport.use_message_pack()
+  let encoded = transport.encode(Acknowledge(sequence: 5), serialiser: mp_ser)
+  transport.decode(encoded, serialiser: mp_ser)
+  |> should.equal(Ok(Acknowledge(sequence: 5)))
+}
+
+// =============================================================================
+// ERROR PATHS
+// =============================================================================
+
+@target(erlang)
+pub fn auto_erl_empty_bytes_returns_error_test() {
+  transport.decode(<<>>, serialiser: ser())
+  |> should.be_error
+}
+
+@target(erlang)
+pub fn auto_erl_invalid_bytes_returns_error_test() {
+  transport.decode(<<0xFF, 0xFE, 0x00>>, serialiser: ser())
+  |> should.be_error
 }

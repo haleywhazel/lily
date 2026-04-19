@@ -332,9 +332,11 @@ pub fn server_incoming_from_unknown_client_test() {
 pub fn server_incoming_invalid_json_test() {
   let srv = new_server()
   let s1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", bytes: bit_array.from_string(
-    "not json at all",
-  ))
+  server.incoming(
+    srv,
+    client_id: "c1",
+    bytes: bit_array.from_string("not json at all"),
+  )
   // Server ignores invalid JSON — no message sent
   recv(s1)
   |> should.be_error
@@ -344,9 +346,11 @@ pub fn server_incoming_invalid_json_test() {
 pub fn server_incoming_unknown_protocol_type_test() {
   let srv = new_server()
   let s1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", bytes: bit_array.from_string(
-    "{\"type\":\"unknown\"}",
-  ))
+  server.incoming(
+    srv,
+    client_id: "c1",
+    bytes: bit_array.from_string("{\"type\":\"unknown\"}"),
+  )
   recv(s1)
   |> should.be_error
 }

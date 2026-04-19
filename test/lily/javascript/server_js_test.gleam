@@ -272,9 +272,11 @@ pub fn js_server_no_hook_does_not_crash_test() {
 pub fn js_server_incoming_invalid_json_test() {
   let srv = new_server()
   let get_c1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", bytes: bit_array.from_string(
-    "not json at all",
-  ))
+  server.incoming(
+    srv,
+    client_id: "c1",
+    bytes: bit_array.from_string("not json at all"),
+  )
   get_c1()
   |> list.length
   |> should.equal(0)

@@ -160,7 +160,10 @@ pub fn auto_js_register_enables_decode_test() {
 
 @target(javascript)
 pub fn auto_js_json_roundtrip_test() {
-  // Verify the JSON path still works after switching from MessagePack
+  // Register SetName so the auto-decoder can reconstruct it from JSON bytes.
+  // (Tests run alphabetically; this test runs before any roundtrip that would
+  // encode SetName and populate the registry as a side-effect.)
+  transport.register([SetName("")])
   let json_ser = transport.automatic() |> transport.use_json()
   let json_bytes =
     bit_array.from_string(
@@ -182,7 +185,10 @@ pub fn auto_js_roundtrip_nested_test() {
   let nested_ser: transport.Serialiser(test_fixtures.Nested, Message) =
     transport.automatic()
   let encoded =
-    transport.encode(Snapshot(sequence: 1, state: nested), serialiser: nested_ser)
+    transport.encode(
+      Snapshot(sequence: 1, state: nested),
+      serialiser: nested_ser,
+    )
   transport.decode(encoded, serialiser: nested_ser)
   |> should.equal(Ok(Snapshot(sequence: 1, state: nested)))
 }
@@ -193,7 +199,62 @@ pub fn auto_js_roundtrip_list_field_test() {
   let list_ser: transport.Serialiser(test_fixtures.WithList, Message) =
     transport.automatic()
   let encoded =
-    transport.encode(Snapshot(sequence: 0, state: with_list), serialiser: list_ser)
+    transport.encode(
+      Snapshot(sequence: 0, state: with_list),
+      serialiser: list_ser,
+    )
   transport.decode(encoded, serialiser: list_ser)
   |> should.equal(Ok(Snapshot(sequence: 0, state: with_list)))
+}
+
+// =============================================================================
+// FORMAT ISOLATION
+// =============================================================================
+
+@target(javascript)
+pub fn auto_js_message_pack_bytes_fail_under_json_test() {
+  // MessagePack bytes should not decode as JSON
+  let mp_bytes = transport.encode(Acknowledge(sequence: 1), serialiser: ser())
+  let json_ser = transport.automatic() |> transport.use_json()
+  transport.decode(mp_bytes, serialiser: json_ser)
+  |> should.be_error
+}
+
+// =============================================================================
+// TOGGLE BEHAVIOUR
+// =============================================================================
+
+@target(javascript)
+pub fn auto_js_use_json_roundtrip_test() {
+  let json_ser = transport.automatic() |> transport.use_json()
+  let encoded = transport.encode(Acknowledge(sequence: 9), serialiser: json_ser)
+  transport.decode(encoded, serialiser: json_ser)
+  |> should.equal(Ok(Acknowledge(sequence: 9)))
+}
+
+@target(javascript)
+pub fn auto_js_use_message_pack_after_json_roundtrip_test() {
+  let mp_ser =
+    transport.automatic()
+    |> transport.use_json()
+    |> transport.use_message_pack()
+  let encoded = transport.encode(Acknowledge(sequence: 5), serialiser: mp_ser)
+  transport.decode(encoded, serialiser: mp_ser)
+  |> should.equal(Ok(Acknowledge(sequence: 5)))
+}
+
+// =============================================================================
+// ERROR PATHS
+// =============================================================================
+
+@target(javascript)
+pub fn auto_js_empty_bytes_returns_error_test() {
+  transport.decode(<<>>, serialiser: ser())
+  |> should.be_error
+}
+
+@target(javascript)
+pub fn auto_js_invalid_bytes_returns_error_test() {
+  transport.decode(<<0xFF, 0xFE, 0x00>>, serialiser: ser())
+  |> should.be_error
 }

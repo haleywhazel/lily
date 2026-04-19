@@ -139,10 +139,15 @@ export function triggerWebSocketClose(ws) {
 }
 
 export function getWebSocketSent(ws) {
-  // Convert JS array to Gleam list using proper NonEmpty/Empty instances
+  // Convert JS array to Gleam list; decode ArrayBuffers to UTF-8 strings so
+  // tests can use string.contains() on the sent frames.
   let result = new Empty();
   for (let i = ws._sent.length - 1; i >= 0; i--) {
-    result = new NonEmpty(ws._sent[i], result);
+    let item = ws._sent[i];
+    if (item instanceof ArrayBuffer || item instanceof Uint8Array) {
+      item = new TextDecoder().decode(item);
+    }
+    result = new NonEmpty(item, result);
   }
   return result;
 }

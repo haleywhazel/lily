@@ -166,22 +166,24 @@ type BinaryCodec(model, message) {
 /// client), call [`transport.register`](#register) before connecting.
 pub fn automatic() -> Serialiser(model, message) {
   let auto_binary =
-    option.Some(BinaryCodec(
-      encode_message: ffi_auto_encode_message_pack,
-      decode_message: fn(bytes) {
-        case ffi_auto_decode_message_pack(bytes) {
-          Ok(value) -> Ok(value)
-          Error(_) -> Error(Nil)
-        }
-      },
-      encode_model: ffi_auto_encode_message_pack,
-      decode_model: fn(bytes) {
-        case ffi_auto_decode_message_pack(bytes) {
-          Ok(value) -> Ok(value)
-          Error(_) -> Error(Nil)
-        }
-      },
-    ))
+    option.Some(
+      BinaryCodec(
+        encode_message: ffi_auto_encode_message_pack,
+        decode_message: fn(bytes) {
+          case ffi_auto_decode_message_pack(bytes) {
+            Ok(value) -> Ok(value)
+            Error(_) -> Error(Nil)
+          }
+        },
+        encode_model: ffi_auto_encode_message_pack,
+        decode_model: fn(bytes) {
+          case ffi_auto_decode_message_pack(bytes) {
+            Ok(value) -> Ok(value)
+            Error(_) -> Error(Nil)
+          }
+        },
+      ),
+    )
   Serialiser(
     encode_message: ffi_auto_encode,
     decode_message: decode.new_primitive_decoder("Auto", ffi_auto_decode),
@@ -270,7 +272,10 @@ pub fn encode(
 /// Create a new [`Transport`](#Transport) with the given send and close
 /// functions. This is used by transport implementations (WebSocket, HTTP) to
 /// construct the Transport handle they return from their connector.
-pub fn new(send send: fn(BitArray) -> Nil, close close: fn() -> Nil) -> Transport {
+pub fn new(
+  send send: fn(BitArray) -> Nil,
+  close close: fn() -> Nil,
+) -> Transport {
   Transport(send: send, close: close)
 }
 
