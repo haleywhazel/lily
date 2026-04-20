@@ -4,11 +4,11 @@
 @target(javascript)
 import gleeunit/should
 @target(javascript)
+import lily
+@target(javascript)
 import lily/client
 @target(javascript)
 import lily/event
-@target(javascript)
-import lily/store
 @target(javascript)
 import lily/test_dom
 @target(javascript)
@@ -24,7 +24,7 @@ import lily/test_setup
 
 @target(javascript)
 fn new_runtime() -> client.Runtime(Model, Message) {
-  let s = store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+  let s = lily.new(test_fixtures.initial_model(), with: test_fixtures.update)
   client.start(s)
 }
 

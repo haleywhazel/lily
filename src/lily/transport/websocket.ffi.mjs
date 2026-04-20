@@ -25,7 +25,7 @@ const STORAGE_KEY_PENDING = "lily_ws_pending";
 // =============================================================================
 
 /** Establish WebSocket connection with reconnection and offline queueing */
-export function connect(url, reconnectBaseMs, reconnectMaxMs, handler) {
+export function connect(url, reconnectBaseMs, reconnectMaxMs, jitterRatio, multiplier, handler) {
   // Closure-scoped state (not module-level, allows multiple instances)
   let ws = null;
   let reconnectDelay = null;
@@ -85,8 +85,8 @@ export function connect(url, reconnectBaseMs, reconnectMaxMs, handler) {
       reconnectDelay = reconnectBaseMs;
     }
 
-    // ±25% jitter spreads reconnects after a mass disconnect (thundering herd)
-    const jitteredDelay = reconnectDelay * (0.75 + Math.random() * 0.5);
+    // Jitter spreads reconnects after a mass disconnect (thundering herd)
+    const jitteredDelay = reconnectDelay * (1 - jitterRatio + Math.random() * jitterRatio * 2);
     reconnectTimer = setTimeout(function () {
       reconnectTimer = null;
       openConnection();
@@ -94,7 +94,7 @@ export function connect(url, reconnectBaseMs, reconnectMaxMs, handler) {
 
     // Advance the progression regardless of jitter so the ceiling is reached
     // in a predictable number of attempts
-    reconnectDelay = Math.min(reconnectDelay * 2, reconnectMaxMs);
+    reconnectDelay = Math.min(reconnectDelay * multiplier, reconnectMaxMs);
   }
 
   // -------------------------------------------------------------------------

@@ -105,33 +105,24 @@ pub opaque type Component(model, message, html) {
     compare: CompareStrategy,
   )
 
-  /// Keyed list with innerHTML rendering for each child
-  ///
-  /// The produce function combines slicing, key, and rendering into a single
-  /// function to use within the JavaScript module when calling `component.each`
-  /// constructor. The function returns a list of the key and the render
-  /// result.
-  ///
-  /// ## Example
-  ///
-  /// ```gleam
-  /// produce: fn(model) {
-  ///   list.map(slice(model), fn(item) {
-  ///     #(string.inspect(key(item)), render(item))
-  ///   })
-  /// }
-  /// ```
-  Each(produce: fn(model) -> List(#(String, html)), compare: CompareStrategy)
+  /// Keyed list with innerHTML rendering for each child. Carries the primitive
+  /// slice, key, and render functions directly so the FFI can evaluate only
+  /// what it needs per item.
+  Each(
+    slice: fn(model) -> List(Dynamic),
+    key: fn(Dynamic) -> String,
+    render: fn(Dynamic) -> html,
+    compare: CompareStrategy,
+  )
 
-  /// Keyed list with patch-based rendering for each child
-  ///
-  /// `apply` returns key/patch pairs for all items in one pass. `initial`
-  /// returns key/html pairs for rendering new items when their key first
-  /// appears. Keys are derived from `apply`'s result, avoiding a separate
-  /// iteration.
+  /// Keyed list with patch-based rendering for each child. Carries the primitive
+  /// slice, key, initial, and patch functions so the FFI calls `initial` only
+  /// for items whose key first appears, not for the whole list.
   EachLive(
-    initial: fn(model) -> List(#(String, html)),
-    apply: fn(model) -> List(#(String, List(Patch))),
+    slice: fn(model) -> List(Dynamic),
+    key: fn(Dynamic) -> String,
+    initial: fn(Dynamic) -> html,
+    patch: fn(Dynamic) -> List(Patch),
     compare: CompareStrategy,
   )
 
@@ -205,11 +196,9 @@ pub fn each(
   render render: fn(item) -> html,
 ) -> Component(model, message, html) {
   Each(
-    produce: fn(model) {
-      list.map(slice(model), fn(item) {
-        #(string.inspect(key(item)), render(item))
-      })
-    },
+    slice: fn(model) { list.map(slice(model), to_dynamic) },
+    key: fn(item) { string.inspect(key(from_dynamic(item))) },
+    render: fn(item) { render(from_dynamic(item)) },
     compare: ReferenceEqual,
   )
 }
@@ -254,16 +243,10 @@ pub fn each_live(
   patch patch: fn(item) -> List(Patch),
 ) -> Component(model, message, html) {
   EachLive(
-    initial: fn(model) {
-      list.map(slice(model), fn(item) {
-        #(string.inspect(key(item)), initial(item))
-      })
-    },
-    apply: fn(model) {
-      list.map(slice(model), fn(item) {
-        #(string.inspect(key(item)), patch(item))
-      })
-    },
+    slice: fn(model) { list.map(slice(model), to_dynamic) },
+    key: fn(item) { string.inspect(key(from_dynamic(item))) },
+    initial: fn(item) { initial(from_dynamic(item)) },
+    patch: fn(item) { patch(from_dynamic(item)) },
     compare: ReferenceEqual,
   )
 }
@@ -468,9 +451,16 @@ pub fn structural(
         apply: apply,
         compare: StructuralEqual,
       )
-    Each(produce, _) -> Each(produce: produce, compare: StructuralEqual)
-    EachLive(initial, apply, _) ->
-      EachLive(initial: initial, apply: apply, compare: StructuralEqual)
+    Each(slice, key, render, _) ->
+      Each(slice: slice, key: key, render: render, compare: StructuralEqual)
+    EachLive(slice, key, initial, patch, _) ->
+      EachLive(
+        slice: slice,
+        key: key,
+        initial: initial,
+        patch: patch,
+        compare: StructuralEqual,
+      )
     Fragment(children) -> Fragment(children)
     RequireConnection(inner, connected) ->
       RequireConnection(inner: structural(inner), connected: connected)

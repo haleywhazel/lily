@@ -9,6 +9,7 @@
 // IMPORTS
 // =============================================================================
 
+import { Ok, Error } from "../gleam.mjs";
 import {
   SetText,
   SetAttribute,
@@ -43,10 +44,9 @@ export function applyPatchesToElement(rootElement, patches) {
 }
 
 /** Create a specific Runtime */
-export function createRuntime(store, apply, notify) {
+export function createRuntime(store, apply) {
   let currentStore = store;
   const applyMessage = apply;
-  const notifyHandlers = notify;
   let onMessageHook = null;
   let userMessageHook = null;
   let frameScheduled = false;
@@ -55,11 +55,10 @@ export function createRuntime(store, apply, notify) {
   let componentCounter = 0;
   const componentRegistry = new Map();
   let sessionConfig = null;
-  let previousSession = null;
+  const previousFieldValues = new Map();
   let connectionStatusConfig = null;
 
   function flushNotify() {
-    notifyHandlers(currentStore);
     const model = currentStore.model;
     for (const handler of componentRegistry.values()) {
       handler(model);
@@ -88,10 +87,14 @@ export function createRuntime(store, apply, notify) {
     const prefix = "lily_session_";
 
     for (const field of fields) {
-      const value = field.get(session);
+      // Serialise first — Json values are objects, string comparison is stable
+      const serialised = JSON.stringify(field.get(session));
+      const previous = previousFieldValues.get(field.key);
+      if (previous !== undefined && previous === serialised) continue;
+      previousFieldValues.set(field.key, serialised);
       const key = prefix + field.key;
       try {
-        localStorage.setItem(key, JSON.stringify(value));
+        localStorage.setItem(key, serialised);
       } catch (error) {
         console.error(`Failed to persist session field "${field.key}":`, error);
       }
@@ -106,14 +109,7 @@ export function createRuntime(store, apply, notify) {
 
       // Persist session changes if configured
       if (sessionConfig) {
-        const currentSession = sessionConfig.get(currentStore.model);
-        if (
-          previousSession === null ||
-          !referenceEqual(previousSession, currentSession)
-        ) {
-          persistSessionChanges(currentSession);
-          previousSession = currentSession;
-        }
+        persistSessionChanges(sessionConfig.get(currentStore.model));
       }
 
       scheduleNotify();
@@ -207,9 +203,12 @@ export function createRuntime(store, apply, notify) {
     },
     setSessionConfig(config) {
       sessionConfig = config;
-      // Initialise previousSession with current session state
+      // Seed per-field previous values so the first update only writes changes
       if (sessionConfig) {
-        previousSession = sessionConfig.get(currentStore.model);
+        const session = sessionConfig.get(currentStore.model);
+        for (const field of sessionConfig.fields) {
+          previousFieldValues.set(field.key, JSON.stringify(field.get(session)));
+        }
       }
     },
     setUserMessageHook(hook) {
@@ -292,6 +291,41 @@ export function setTransport(runtime, transport) {
 
 export function setUserMessageHook(runtime, hook) {
   runtime.setUserMessageHook(hook);
+}
+
+export function clearSession(prefix) {
+  const keysToRemove = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key && key.startsWith(prefix)) {
+      keysToRemove.push(key);
+    }
+  }
+  for (const key of keysToRemove) {
+    localStorage.removeItem(key);
+  }
+}
+
+export function readField(prefix, key) {
+  try {
+    const fullKey = prefix + key;
+    const raw = localStorage.getItem(fullKey);
+    if (raw === null) return new Error(undefined);
+    const parsed = JSON.parse(raw);
+    return new Ok(parsed);
+  } catch (_error) {
+    return new Error(undefined);
+  }
+}
+
+export function setSessionConfig(runtime, persistence, get, set) {
+  const fields = persistence.fields.toArray();
+  runtime.setSessionConfig({
+    persistence,
+    get,
+    set,
+    fields,
+  });
 }
 
 // =============================================================================

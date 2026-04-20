@@ -8,11 +8,11 @@ import gleam/string
 @target(javascript)
 import gleeunit/should
 @target(javascript)
+import lily
+@target(javascript)
 import lily/client
 @target(javascript)
 import lily/component
-@target(javascript)
-import lily/store
 @target(javascript)
 import lily/test_dom
 @target(javascript)
@@ -31,7 +31,7 @@ fn to_html(html: String) -> String {
 
 @target(javascript)
 fn new_runtime() -> client.Runtime(Model, Message) {
-  store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+  lily.new(test_fixtures.initial_model(), with: test_fixtures.update)
   |> client.start
 }
 
@@ -280,7 +280,7 @@ pub fn component_fragment_renders_children_test() {
 pub fn component_each_renders_keyed_list_test() {
   test_setup.reset_dom()
   let runtime =
-    store.new(test_fixtures.WithList(items: [1, 2, 3]), with: fn(model, _msg) {
+    lily.new(test_fixtures.WithList(items: [1, 2, 3]), with: fn(model, _msg) {
       model
     })
     |> client.start
@@ -334,7 +334,7 @@ pub fn component_require_connection_adds_disabled_when_disconnected_test() {
 pub fn component_require_connection_removes_disabled_when_connected_test() {
   test_setup.reset_dom()
   let runtime =
-    store.new(
+    lily.new(
       test_fixtures.Model(count: 0, name: "", connected: True),
       with: test_fixtures.update,
     )

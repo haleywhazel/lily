@@ -8,9 +8,9 @@ import gleam/string
 @target(javascript)
 import gleeunit/should
 @target(javascript)
-import lily/client
+import lily
 @target(javascript)
-import lily/store
+import lily/client
 @target(javascript)
 import lily/test_fixtures.{type Message, type Model, Increment, Noop, SetName}
 @target(javascript)
@@ -26,7 +26,7 @@ import lily/transport
 
 @target(javascript)
 fn new_runtime() -> client.Runtime(Model, Message) {
-  store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+  lily.new(test_fixtures.initial_model(), with: test_fixtures.update)
   |> client.start
 }
 
@@ -35,24 +35,10 @@ fn new_runtime() -> client.Runtime(Model, Message) {
 // =============================================================================
 
 @target(javascript)
-pub fn client_start_notifies_handlers_test() {
-  test_setup.reset_dom()
-  let ref = test_ref.new(0)
-  let _runtime =
-    store.new(test_fixtures.initial_model(), with: test_fixtures.update)
-    |> store.subscribe(selector: "#app", with: fn(_model) {
-      test_ref.set(ref, test_ref.get(ref) + 1)
-    })
-    |> client.start
-  test_ref.get(ref)
-  |> should.equal(1)
-}
-
-@target(javascript)
 pub fn client_start_preserves_initial_model_test() {
   test_setup.reset_dom()
   let runtime =
-    store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+    lily.new(test_fixtures.initial_model(), with: test_fixtures.update)
     |> client.start
   let model = client.get_current_model(runtime)
   model.count
@@ -68,7 +54,7 @@ pub fn client_start_returns_runtime_test() {
   test_setup.reset_dom()
   test_setup.reset_mocks()
   let runtime =
-    store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+    lily.new(test_fixtures.initial_model(), with: test_fixtures.update)
     |> client.start
   client.get_current_model(runtime)
   |> should.equal(test_fixtures.initial_model())

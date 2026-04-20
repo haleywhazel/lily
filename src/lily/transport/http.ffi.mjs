@@ -29,7 +29,7 @@ const STORAGE_KEY_PENDING = "lily_http_pending";
 // =============================================================================
 
 /** Establish HTTP/SSE transport connection with offline queueing */
-export function connect(postUrl, eventsUrl, handler) {
+export function connect(postUrl, eventsUrl, flushBatchSize, handler) {
   // Closure-scoped state (not module-level, allows multiple instances)
   let eventSource = null;
   let pending = [];
@@ -88,12 +88,11 @@ export function connect(postUrl, eventsUrl, handler) {
     if (pending.length === 0) return;
 
     isFlushing = true;
-    const batchSize = 10;
     let totalSent = 0;
 
-    for (let i = 0; i < pending.length; i += batchSize) {
+    for (let i = 0; i < pending.length; i += flushBatchSize) {
       if (!isConnected) break;
-      const batch = pending.slice(i, i + batchSize);
+      const batch = pending.slice(i, i + flushBatchSize);
       const results = await Promise.allSettled(
         batch.map(function (frame) {
           return fetch(postUrl, {

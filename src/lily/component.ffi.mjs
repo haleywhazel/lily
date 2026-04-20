@@ -83,7 +83,7 @@ export function renderTree(
 // =============================================================================
 
 /** Create handler for `component.each` (returns the handler function) */
-function createEachHandler(selector, produce, toHtml, compare) {
+function createEachHandler(selector, slice, getKey, render, toHtml, compare) {
   const children = new Map();
   let previousHtmlByKey = new Map();
   let cachedContainer = null;
@@ -96,10 +96,8 @@ function createEachHandler(selector, produce, toHtml, compare) {
     const container = cachedContainer;
     if (!container) return;
 
-    // produce() gives back [key, rendered content] pairs — toHtml hasn't
-    // run yet at this point
-    const pairs = produce(model).toArray();
-    const currentKeySet = new Set(pairs.map((pair) => pair[0]));
+    const items = slice(model).toArray();
+    const currentKeySet = new Set(items.map((item) => getKey(item)));
 
     // Drop children whose keys are no longer in the list
     for (const [keyStr, child] of children) {
@@ -111,9 +109,10 @@ function createEachHandler(selector, produce, toHtml, compare) {
     }
 
     // Sync children — create, update, and reorder in one pass
-    for (let i = 0; i < pairs.length; i++) {
-      const keyStr = pairs[i][0];
-      const htmlValue = pairs[i][1];
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const keyStr = getKey(item);
+      const htmlValue = render(item);
 
       // Look up or create the element for this key
       let element = children.get(keyStr);
@@ -140,7 +139,15 @@ function createEachHandler(selector, produce, toHtml, compare) {
 }
 
 /** Create handler for `component.each_live` (returns the handler function) */
-function createEachLiveHandler(selector, initial, apply, toHtml, compare) {
+function createEachLiveHandler(
+  selector,
+  slice,
+  getKey,
+  initial,
+  patch,
+  toHtml,
+  compare,
+) {
   const children = new Map();
   let previousPatchesByKey = new Map();
   let cachedContainer = null;
@@ -153,10 +160,8 @@ function createEachLiveHandler(selector, initial, apply, toHtml, compare) {
     const container = cachedContainer;
     if (!container) return;
 
-    // apply() gives all key/patch pairs — derive key list from it (one call)
-    const applyPairs = apply(model).toArray();
-    const keyList = applyPairs.map((pair) => pair[0]);
-    const currentKeySet = new Set(keyList);
+    const items = slice(model).toArray();
+    const currentKeySet = new Set(items.map((item) => getKey(item)));
 
     // Drop children whose keys are no longer in the list
     for (const [keyStr, element] of children) {
@@ -167,43 +172,30 @@ function createEachLiveHandler(selector, initial, apply, toHtml, compare) {
       }
     }
 
-    // Build the initial HTML map — only needed when new keys have appeared,
-    // since existing elements already have their content
-    const needsInitial = keyList.some((k) => !children.has(k));
-    const initialMap = new Map();
-    if (needsInitial) {
-      const initialPairs = initial(model).toArray();
-      for (const pair of initialPairs) {
-        initialMap.set(pair[0], pair[1]);
-      }
-    }
-
     // Sync children — create, update, and reorder in one pass
-    for (let i = 0; i < keyList.length; i++) {
-      const keyStr = keyList[i];
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const keyStr = getKey(item);
 
       // Look up or create the element for this key
       let element = children.get(keyStr);
       if (!element) {
+        // Only call initial() for this specific new item — not the whole list
         element = document.createElement("div");
         element.setAttribute("data-lily-key", keyStr);
-        const html = initialMap.get(keyStr);
-        if (html !== undefined) {
-          element.innerHTML = toHtml(html);
-        }
+        element.innerHTML = toHtml(initial(item));
         children.set(keyStr, element);
       }
 
       // Only patch if the patch list has changed (respects compare strategy)
-      const patchList = applyPairs[i][1];
+      const patchList = patch(item);
       const previousPatches = previousPatchesByKey.get(keyStr);
       if (
         patchList !== undefined &&
         (previousPatches === undefined || !compare(previousPatches, patchList))
       ) {
         previousPatchesByKey.set(keyStr, patchList);
-        const patches = patchList.toArray();
-        applyPatchesToElement(element, patches);
+        applyPatchesToElement(element, patchList.toArray());
       }
 
       // Slot into the right position if it's drifted
@@ -311,12 +303,19 @@ function renderEach(
   const componentId = runtime.nextComponentId();
   const selector = `[data-lily-component="${componentId}"]`;
 
-  const { produce, compare } = component;
+  const { slice, key, render, compare } = component;
 
   const compareStrategy =
     compare instanceof StructuralEqual ? isEqual : referenceEqual;
 
-  const handler = createEachHandler(selector, produce, toHtml, compareStrategy);
+  const handler = createEachHandler(
+    selector,
+    slice,
+    key,
+    render,
+    toHtml,
+    compareStrategy,
+  );
 
   // Register handler to be called on model updates
   runtime.registerComponent(componentId, handler);
@@ -338,15 +337,17 @@ function renderEachLive(
   const componentId = runtime.nextComponentId();
   const selector = `[data-lily-component="${componentId}"]`;
 
-  const { initial, apply, compare } = component;
+  const { slice, key, initial, patch, compare } = component;
 
   const compareStrategy =
     compare instanceof StructuralEqual ? isEqual : referenceEqual;
 
   const handler = createEachLiveHandler(
     selector,
+    slice,
+    key,
     initial,
-    apply,
+    patch,
     toHtml,
     compareStrategy,
   );

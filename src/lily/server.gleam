@@ -8,19 +8,19 @@
 //// [`Server`](#Server) opaque type and public functions work on both
 //// targets.
 ////
-//// The server owns the canonical [`Store`](./store.html#Store), applies
+//// The server owns the canonical [`Store`](../lily.html#Store), applies
 //// client messages sequentially while assigning sequence numbers, broadcasts
 //// updates to all clients except the originator, and sends full state
 //// snapshots to clients that reconnect
 ////
 //// ```gleam
+//// import lily
 //// import lily/server
-//// import lily/store
 //// import lily/transport
 ////
 //// pub fn main() {
 ////   // Create your store
-////   let app_store = store.new(initial_model, with: update)
+////   let app_store = lily.new(initial_model, with: update)
 ////
 ////   // Start the server
 ////   let assert Ok(srv) = server.start(
@@ -59,7 +59,7 @@
 import gleam/dict.{type Dict}
 import gleam/option.{type Option}
 import gleam/result
-import lily/store.{type Store}
+import lily.{type Store}
 import lily/transport.{type Serialiser}
 
 @target(erlang)
@@ -154,10 +154,10 @@ pub fn on_message(
 /// ## Example
 ///
 /// ```gleam
+/// import lily
 /// import lily/server
-/// import lily/store
 ///
-/// let app_store = store.new(initial_model, with: update)
+/// let app_store = lily.new(initial_model, with: update)
 /// let assert Ok(srv) = server.start(store: app_store, serialiser: my_serialiser)
 /// ```
 pub fn start(
@@ -252,7 +252,7 @@ fn handle_client_message_logic(
   client_id: String,
   payload: message,
 ) -> ServerState(model, message) {
-  let updated_store = store.apply(state.store, message: payload)
+  let updated_store = lily.apply(state.store, message: payload)
   let new_sequence = state.sequence + 1
 
   let server_message = transport.ServerMessage(sequence: new_sequence, payload:)

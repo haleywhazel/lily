@@ -1,4 +1,4 @@
-// Tests for lily/transport/websocket — WebSocket transport lifecycle.
+// Tests for transport.websocket — WebSocket transport lifecycle.
 // All functions are @target(javascript) — skipped on Erlang.
 
 @target(javascript)
@@ -10,9 +10,9 @@ import gleam/string
 @target(javascript)
 import gleeunit/should
 @target(javascript)
-import lily/client
+import lily
 @target(javascript)
-import lily/store
+import lily/client
 @target(javascript)
 import lily/test_fixtures.{type Message, type Model}
 @target(javascript)
@@ -21,8 +21,6 @@ import lily/test_ref
 import lily/test_setup
 @target(javascript)
 import lily/transport
-@target(javascript)
-import lily/transport/websocket
 
 // =============================================================================
 // HELPERS
@@ -30,8 +28,40 @@ import lily/transport/websocket
 
 @target(javascript)
 fn new_runtime() -> client.Runtime(Model, Message) {
-  store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+  lily.new(test_fixtures.initial_model(), with: test_fixtures.update)
   |> client.start
+}
+
+// =============================================================================
+// CONFIGURATION
+// =============================================================================
+
+@target(javascript)
+pub fn websocket_config_has_default_jitter_ratio_test() {
+  get_jitter_ratio(transport.websocket(url: "ws://localhost/ws"))
+  |> should.equal(0.25)
+}
+
+@target(javascript)
+pub fn websocket_config_has_default_multiplier_test() {
+  get_multiplier(transport.websocket(url: "ws://localhost/ws"))
+  |> should.equal(2.0)
+}
+
+@target(javascript)
+pub fn websocket_reconnect_jitter_ratio_sets_value_test() {
+  transport.websocket(url: "ws://localhost/ws")
+  |> transport.reconnect_jitter_ratio(0.1)
+  |> get_jitter_ratio
+  |> should.equal(0.1)
+}
+
+@target(javascript)
+pub fn websocket_reconnect_multiplier_sets_value_test() {
+  transport.websocket(url: "ws://localhost/ws")
+  |> transport.reconnect_multiplier(1.5)
+  |> get_multiplier
+  |> should.equal(1.5)
 }
 
 // =============================================================================
@@ -44,7 +74,7 @@ pub fn websocket_connect_creates_websocket_test() {
   test_setup.reset_mocks()
   let runtime = new_runtime()
   let connector =
-    websocket.config(url: "ws://localhost/ws") |> websocket.connect
+    transport.websocket(url: "ws://localhost/ws") |> transport.websocket_connect
   let _r =
     client.connect(
       runtime,
@@ -104,7 +134,7 @@ pub fn websocket_connect_receives_messages_test() {
   let runtime = new_runtime()
   // Use the real websocket connector and trigger open on the mock WS
   let connector =
-    websocket.config(url: "ws://localhost/ws") |> websocket.connect
+    transport.websocket(url: "ws://localhost/ws") |> transport.websocket_connect
   let _r =
     client.connect(
       runtime,
@@ -130,7 +160,7 @@ pub fn websocket_send_when_open_sends_directly_test() {
   test_setup.reset_mocks()
   let runtime = new_runtime()
   let connector =
-    websocket.config(url: "ws://localhost/ws") |> websocket.connect
+    transport.websocket(url: "ws://localhost/ws") |> transport.websocket_connect
   let _r =
     client.connect(
       runtime,
@@ -151,7 +181,7 @@ pub fn websocket_send_when_closed_queues_to_localstorage_test() {
   test_setup.reset_mocks()
   let runtime = new_runtime()
   let connector =
-    websocket.config(url: "ws://localhost/ws") |> websocket.connect
+    transport.websocket(url: "ws://localhost/ws") |> transport.websocket_connect
   let _r =
     client.connect(
       runtime,
@@ -181,7 +211,7 @@ pub fn websocket_flush_pending_on_reconnect_test() {
   )
   let runtime = new_runtime()
   let connector =
-    websocket.config(url: "ws://localhost/ws") |> websocket.connect
+    transport.websocket(url: "ws://localhost/ws") |> transport.websocket_connect
   let _r =
     client.connect(
       runtime,
@@ -215,4 +245,16 @@ fn read_local_storage(_key: String) -> String {
 @external(javascript, "./websocket_test.ffi.mjs", "isNull")
 fn is_null(_value: dynamic.Dynamic) -> Bool {
   False
+}
+
+@target(javascript)
+@external(javascript, "./websocket_test.ffi.mjs", "getJitterRatio")
+fn get_jitter_ratio(_config: transport.WebSocketConfig) -> Float {
+  0.0
+}
+
+@target(javascript)
+@external(javascript, "./websocket_test.ffi.mjs", "getMultiplier")
+fn get_multiplier(_config: transport.WebSocketConfig) -> Float {
+  0.0
 }

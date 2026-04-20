@@ -8,22 +8,22 @@
 //// [`client.connect`](#connect)). When connected, it monitors online/
 //// offline status and queues messages in localStorage while disconnected.
 ////
-//// The typical flow: create a store with [`store.new`](./store.html#new),
+//// The typical flow: create a store with [`lily.new`](../lily.html#new),
 //// start the runtime with [`client.start`](#start), mount your UI using
 //// [`component.mount`](./component.html#mount), attach event handlers with
 //// [`event.on_click`](./event.html#on_click) and friends, then optionally
 //// connect to a server with [`client.connect`](#connect)
 ////
 //// ```gleam
+//// import lily
 //// import lily/client
 //// import lily/component
 //// import lily/event
-//// import lily/store
-//// import lily/transport/websocket
+//// import lily/transport
 ////
 //// pub fn main() {
 ////   // 1. Create your store
-////   let app_store = store.new(Model(count: 0), with: update)
+////   let app_store = lily.new(Model(count: 0), with: update)
 ////
 ////   // 2. Start the runtime
 ////   let runtime = client.start(app_store)
@@ -37,7 +37,8 @@
 ////
 ////   // 5. Connect to server (optional)
 ////   |> client.connect(
-////     with: websocket.config(url: "ws://localhost:8080/ws") |> websocket.connect,
+////     with: transport.websocket(url: "ws://localhost:8080/ws")
+////       |> transport.websocket_connect,
 ////     serialiser: my_serialiser,
 ////   )
 //// }
@@ -61,13 +62,32 @@
 // =============================================================================
 
 @target(javascript)
-import lily/store.{type Store}
+import gleam/dynamic.{type Dynamic}
+@target(javascript)
+import gleam/dynamic/decode
+@target(javascript)
+import gleam/json.{type Json}
+@target(javascript)
+import gleam/list
+@target(javascript)
+import gleam/result
+@target(javascript)
+import lily.{type Store}
 @target(javascript)
 import lily/transport
 
 // =============================================================================
 // PUBLIC TYPES
 // =============================================================================
+
+@target(javascript)
+/// Complete session persistence configuration. Build using
+/// [`client.session_persistence`](#session_persistence) and add fields with
+/// [`client.session_field`](#session_field). Attach to the runtime with
+/// [`client.attach_session`](#attach_session).
+pub opaque type Persistence(session) {
+  Persistence(fields: List(Field(session)))
+}
 
 @target(javascript)
 /// Opaque handle to a running Lily application instance. Each runtime is
@@ -81,6 +101,70 @@ pub opaque type Runtime(model, message) {
 // =============================================================================
 
 @target(javascript)
+/// Attach session persistence to the runtime. Reads `localStorage` on start
+/// to hydrate the initial model, then writes changes to `localStorage` after
+/// each update. The `get` and `set` functions extract and inject the session
+/// slice from the model.
+///
+/// Call this after `client.start`, or in the pipe chain after `client.start`.
+///
+/// ## Example
+///
+/// ```gleam
+/// let persistence =
+///   client.session_persistence()
+///   |> client.session_field(
+///     key: "token",
+///     get: fn(session) { session.token },
+///     set: fn(session, value) { SessionData(..session, token: value) },
+///     encode: json.nullable(json.string),
+///     decoder: decode.optional(decode.string),
+///   )
+///
+/// client.start(app_store)
+/// |> client.attach_session(
+///   persistence:,
+///   get: fn(model) { model.session },
+///   set: fn(model, session) { Model(..model, session: session) },
+/// )
+/// ```
+pub fn attach_session(
+  runtime: Runtime(model, message),
+  persistence persistence: Persistence(session),
+  get get: fn(model) -> session,
+  set set: fn(model, session) -> model,
+) -> Runtime(model, message) {
+  let current_model = get_current_model(runtime)
+  let hydrated_session = hydrate_session(persistence, get(current_model))
+  let hydrated_model = set(current_model, hydrated_session)
+  set_current_model(runtime, hydrated_model)
+  let Runtime(handle) = runtime
+  ffi_set_session_config(handle, persistence, get, set)
+  runtime
+}
+
+@target(javascript)
+/// Clear all session data from `localStorage`. Removes all keys with the
+/// `lily_session_` prefix.
+///
+/// ## Example
+///
+/// ```gleam
+/// fn update(model, msg) {
+///   case msg {
+///     Logout -> {
+///       client.clear_session()
+///       model
+///     }
+///     _ -> model
+///   }
+/// }
+/// ```
+pub fn clear_session() -> Nil {
+  ffi_clear_session(session_storage_prefix())
+}
+
+@target(javascript)
 /// Connect the runtime to a server using the provided transport. The
 /// connector function is obtained from a transport implementation (e.g.,
 /// `websocket.connect(config)` or `http.connect(config)`).
@@ -88,13 +172,13 @@ pub opaque type Runtime(model, message) {
 /// ## Example
 ///
 /// ```gleam
-/// import lily/transport/websocket
+/// import lily/transport
 ///
 /// runtime
 /// |> client.connect(
-///   with: websocket.config(url: "ws://localhost:8080/ws")
-///     |> websocket.reconnect_base_milliseconds(2000)
-///     |> websocket.connect,
+///   with: transport.websocket(url: "ws://localhost:8080/ws")
+///     |> transport.reconnect_base_milliseconds(2000)
+///     |> transport.websocket_connect,
 ///   serialiser: my_serialiser,
 /// )
 /// ```
@@ -217,6 +301,60 @@ pub fn on_message(
 }
 
 @target(javascript)
+/// Add a field to the session persistence configuration. Each field represents
+/// a single value stored in `localStorage` under `lily_session_{key}`.
+///
+/// The `get` and `set` functions extract and inject the field from the session
+/// type. The `encode` and `decoder` handle JSON serialisation.
+///
+/// ## Example
+///
+/// ```gleam
+/// client.session_persistence()
+/// |> client.session_field(
+///   key: "theme",
+///   get: fn(session) { session.theme },
+///   set: fn(session, theme) { SessionData(..session, theme: theme) },
+///   encode: theme_to_json,
+///   decoder: theme_decoder,
+/// )
+/// ```
+pub fn session_field(
+  persistence: Persistence(session),
+  key key: String,
+  get get: fn(session) -> a,
+  set set: fn(session, a) -> session,
+  encode encode: fn(a) -> Json,
+  decoder decoder: decode.Decoder(a),
+) -> Persistence(session) {
+  let Persistence(fields) = persistence
+  let f =
+    Field(
+      key: key,
+      get: fn(session) { encode(get(session)) },
+      set: fn(session, dynamic_value) {
+        decode.run(dynamic_value, decoder)
+        |> result.map(set(session, _))
+        |> result.replace_error(Nil)
+      },
+    )
+  Persistence(fields: [f, ..fields])
+}
+
+@target(javascript)
+/// Create an empty session persistence configuration. Add fields using
+/// [`client.session_field`](#session_field).
+///
+/// ## Example
+///
+/// ```gleam
+/// let persistence = client.session_persistence()
+/// ```
+pub fn session_persistence() -> Persistence(session) {
+  Persistence(fields: [])
+}
+
+@target(javascript)
 /// Start the client runtime. Returns a Runtime handle that should be used
 /// with [`component.mount`](./component.html#mount), event handlers, and
 /// optionally [`client.connect`](#connect).
@@ -225,7 +363,7 @@ pub fn on_message(
 ///
 /// ```gleam
 /// let runtime =
-///   store.new(Model(count: 0), with: update)
+///   lily.new(Model(count: 0), with: update)
 ///   |> client.start
 ///
 /// runtime
@@ -233,7 +371,7 @@ pub fn on_message(
 /// |> event.on_click(selector: "#app", decoder: parse_msg)
 /// ```
 pub fn start(store: Store(model, message)) -> Runtime(model, message) {
-  let handle = create_runtime(store, store.apply, store.notify)
+  let handle = create_runtime(store, lily.apply)
   set_store(handle, store)
   initial_notify(handle)
   Runtime(handle)
@@ -297,6 +435,15 @@ pub fn set_current_model(runtime: Runtime(model, message), model: model) -> Nil 
 // =============================================================================
 
 @target(javascript)
+type Field(session) {
+  Field(
+    key: String,
+    get: fn(session) -> Json,
+    set: fn(session, Dynamic) -> Result(session, Nil),
+  )
+}
+
+@target(javascript)
 /// JavaScript doesn't have type parameters, so we can't pass Runtime directly.
 /// The public `Runtime(model, message)` type wraps this for type safety:
 ///
@@ -304,13 +451,32 @@ pub fn set_current_model(runtime: Runtime(model, message), model: model) -> Nil 
 ///   parameterized for compile-time type safety
 /// - `RuntimeHandle`: Internal concrete type that matches the JavaScript
 ///   object returned by `createRuntime()`. Marked `@internal` for use by
-///   other Lily modules (session, component) that need FFI access.
+///   other Lily modules (component) that need FFI access.
 @internal
 pub type RuntimeHandle
 
 // =============================================================================
 // PRIVATE FUNCTIONS
 // =============================================================================
+
+@target(javascript)
+fn hydrate_session(
+  persistence: Persistence(session),
+  initial: session,
+) -> session {
+  let Persistence(fields) = persistence
+  list.fold(fields, initial, fn(session, f) {
+    let Field(key, _get, set) = f
+    ffi_read_field(session_storage_prefix(), key)
+    |> result.try(set(session, _))
+    |> result.unwrap(session)
+  })
+}
+
+@target(javascript)
+fn session_storage_prefix() -> String {
+  "lily_session_"
+}
 
 @target(javascript)
 /// Handles incoming message from the server, decodes it, set local sequences
@@ -374,7 +540,6 @@ fn apply_remote_message(_handle: RuntimeHandle, _message: message) -> Nil {
 fn create_runtime(
   _store: Store(model, message),
   _apply: fn(Store(model, message), message) -> Store(model, message),
-  _notify: fn(Store(model, message)) -> Nil,
 ) -> RuntimeHandle {
   // This will never run (RuntimeHandle is only a JavaScript type so we're
   // putting it here as a workaround)
@@ -497,6 +662,32 @@ fn set_transport(_handle: RuntimeHandle, _transport: transport.Transport) -> Nil
 fn set_user_message_hook(
   _handle: RuntimeHandle,
   _hook: fn(message, model) -> Nil,
+) -> Nil {
+  Nil
+}
+
+@target(javascript)
+/// Clear all session keys from localStorage
+@external(javascript, "./client.ffi.mjs", "clearSession")
+fn ffi_clear_session(_prefix: String) -> Nil {
+  Nil
+}
+
+@target(javascript)
+/// Read a field from localStorage as a raw dynamic value for direct decoding
+@external(javascript, "./client.ffi.mjs", "readField")
+fn ffi_read_field(_prefix: String, _key: String) -> Result(Dynamic, Nil) {
+  Error(Nil)
+}
+
+@target(javascript)
+/// Store session config on runtime
+@external(javascript, "./client.ffi.mjs", "setSessionConfig")
+fn ffi_set_session_config(
+  _handle: RuntimeHandle,
+  _persistence: Persistence(session),
+  _get: fn(model) -> session,
+  _set: fn(model, session) -> model,
 ) -> Nil {
   Nil
 }

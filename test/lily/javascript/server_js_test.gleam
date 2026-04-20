@@ -8,9 +8,9 @@ import gleam/list
 @target(javascript)
 import gleeunit/should
 @target(javascript)
-import lily/server
+import lily
 @target(javascript)
-import lily/store
+import lily/server
 @target(javascript)
 import lily/test_fixtures.{type Message, type Model, Increment, SetName}
 @target(javascript)
@@ -30,7 +30,7 @@ fn ser() {
 @target(javascript)
 fn new_server() -> server.Server(Model, Message) {
   let app_store =
-    store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+    lily.new(test_fixtures.initial_model(), with: test_fixtures.update)
   let assert Ok(srv) = server.start(store: app_store, serialiser: ser())
   srv
 }
@@ -70,7 +70,7 @@ fn encode_resync(seq: Int) -> BitArray {
 @target(javascript)
 pub fn js_server_start_returns_ok_test() {
   let app_store =
-    store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+    lily.new(test_fixtures.initial_model(), with: test_fixtures.update)
   server.start(store: app_store, serialiser: ser())
   |> should.be_ok
 }

@@ -1,46 +1,67 @@
-//// The transport module handles client-server communication and
-//// serialisation. It's target-agnostic and works on both Erlang and
-//// JavaScript.
+//// The transport module handles client-server communication, serialisation,
+//// and the two built-in transport implementations. It works on both Erlang
+//// and JavaScript. The WebSocket and HTTP/SSE transports are JavaScript-only
+//// and use `@target(javascript)`.
 ////
-//// This module provides the wire format ([`Protocol`](#Protocol) envelope
-//// types for client-server messages), serialisation
-//// ([`Serialiser`](#Serialiser) encode/decode functions), automatic
-//// serialisation ([`automatic`](#automatic) zero-config codec,
-//// recommended), custom serialisation ([`custom_json`](#custom_json) and
-//// [`custom_binary`](#custom_binary) for explicit encode/decode), and
-//// transport abstraction ([`Connector`](#Connector) and
-//// [`Transport`](#Transport) for swapping between WebSocket, HTTP, or custom
-//// transports).
+//// This module provides:
+////
+//// - **Wire format** — [`Protocol`](#Protocol) envelope types for
+////   client-server messages
+//// - **Serialisation** — [`Serialiser`](#Serialiser) with automatic
+////   ([`automatic`](#automatic)) and custom ([`custom_json`](#custom_json),
+////   [`custom_binary`](#custom_binary)) options
+//// - **WebSocket transport** — [`websocket`](#websocket) config builder and
+////   [`websocket_connect`](#websocket_connect) connector with automatic
+////   reconnection and offline queueing
+//// - **HTTP/SSE transport** — [`http`](#http) config builder and
+////   [`http_connect`](#http_connect) connector using EventSource + POST
 ////
 //// For most apps, use [`transport.automatic`](#automatic) for
-//// zero-configuration serialisation of any Gleam custom type. The default
-//// wire format is MessagePack (compact binary). Use
-//// [`transport.use_json`](#use_json) for human-readable frames during
+//// zero-configuration serialisation, then pick a transport:
+////
+//// ```gleam
+//// import lily/client
+//// import lily/transport
+////
+//// pub fn main() {
+////   let runtime = client.start(app_store)
+////
+////   client.connect(runtime,
+////     with: transport.websocket(url: "ws://localhost:8080/ws")
+////       |> transport.reconnect_base_milliseconds(1000)
+////       |> transport.websocket_connect,
+////     serialiser: transport.automatic(),
+////   )
+//// }
+//// ```
+////
+//// Switch to HTTP/SSE when WebSocket connections are blocked:
+////
+//// ```gleam
+//// client.connect(runtime,
+////   with: transport.http(
+////     post_url: "/api/messages",
+////     events_url: "/api/events",
+////   ) |> transport.http_connect,
+////   serialiser: transport.automatic(),
+//// )
+//// ```
+////
+//// Use [`transport.use_json`](#use_json) for human-readable frames during
 //// development:
 ////
 //// ```gleam
-//// import lily/transport
-////
-//// // Production: MessagePack (default)
-//// client.connect(runtime, with: connector, serialiser: transport.automatic())
-//// server.start(store: app_store, serialiser: transport.automatic())
-////
-//// // Development: JSON, readable in DevTools
-//// client.connect(runtime, with: connector,
-////   serialiser: transport.automatic() |> transport.use_json())
+//// transport.automatic() |> transport.use_json()
 //// ```
 ////
-//// The automatic serialiser uses positional encoding with the wire format
+//// The automatic serialiser uses positional encoding:
 //// `{"_":"ConstructorName","0":field0,"1":field1,...}`. On JavaScript,
-//// constructors are discovered automatically from message sends and the
-//// initial model. For server-only message types that never get sent by the
-//// client, use [`transport.register`](#register).
+//// constructors are discovered from message sends and the initial model. For
+//// server-only message types, use [`transport.register`](#register).
 ////
-//// For cases where automatic serialisation isn't suitable (third-party APIs,
-//// human-readable JSON, backwards compatibility), use
-//// [`transport.custom_json`](#custom_json) with explicit encode/decode
-//// functions, or [`transport.custom_binary`](#custom_binary) for a custom
-//// binary codec.
+//// For cases where automatic serialisation isn't suitable, use
+//// [`transport.custom_json`](#custom_json) or
+//// [`transport.custom_binary`](#custom_binary) for explicit encode/decode.
 ////
 
 // =============================================================================
@@ -127,6 +148,26 @@ pub opaque type Transport {
   Transport(send: fn(BitArray) -> Nil, close: fn() -> Nil)
 }
 
+@target(javascript)
+/// Configuration for a WebSocket connection. Use the builder functions to
+/// customise reconnection behaviour.
+pub opaque type WebSocketConfig {
+  WebSocketConfig(
+    url: String,
+    reconnect_base_milliseconds: Int,
+    reconnect_max_milliseconds: Int,
+    reconnect_jitter_ratio: Float,
+    reconnect_multiplier: Float,
+  )
+}
+
+@target(javascript)
+/// Configuration for an HTTP/SSE connection. Requires both a POST URL for
+/// client-to-server messages and an SSE events URL for server-to-client.
+pub opaque type HttpConfig {
+  HttpConfig(post_url: String, events_url: String, flush_batch_size: Int)
+}
+
 // =============================================================================
 // PRIVATE TYPES
 // =============================================================================
@@ -139,6 +180,12 @@ type BinaryCodec(model, message) {
     decode_model: fn(BitArray) -> Result(model, Nil),
   )
 }
+
+@target(javascript)
+type HttpHandle
+
+@target(javascript)
+type WsHandle
 
 // =============================================================================
 // PUBLIC FUNCTIONS
@@ -269,6 +316,65 @@ pub fn encode(
   }
 }
 
+@target(javascript)
+/// Set the maximum number of queued messages POSTed in parallel when the
+/// HTTP/SSE connection reconnects. Reducing this limits concurrent POST
+/// requests during a reconnect burst; increasing it flushes the queue faster.
+/// Default is 10.
+pub fn flush_batch_size(config: HttpConfig, size: Int) -> HttpConfig {
+  HttpConfig(..config, flush_batch_size: size)
+}
+
+@target(javascript)
+/// Create a new HTTP/SSE transport configuration. The `post_url` is used for
+/// sending messages to the server, and the `events_url` is used for receiving
+/// Server-Sent Events.
+///
+/// ## Example
+///
+/// ```gleam
+/// transport.http(
+///   post_url: "/api/messages",
+///   events_url: "/api/events",
+/// )
+/// ```
+pub fn http(
+  post_url post_url: String,
+  events_url events_url: String,
+) -> HttpConfig {
+  HttpConfig(post_url: post_url, events_url: events_url, flush_batch_size: 10)
+}
+
+@target(javascript)
+/// Returns a connector function that establishes an HTTP/SSE connection. Pass
+/// the result to `client.connect`.
+///
+/// ## Example
+///
+/// ```gleam
+/// client.connect(runtime,
+///   with: transport.http(
+///     post_url: "/api/messages",
+///     events_url: "/api/events",
+///   ) |> transport.http_connect,
+///   serialiser: transport.automatic(),
+/// )
+/// ```
+pub fn http_connect(config: HttpConfig) -> Connector {
+  fn(handler: Handler) {
+    let handle =
+      ffi_http_connect(
+        config.post_url,
+        config.events_url,
+        config.flush_batch_size,
+        handler,
+      )
+    new(send: fn(bytes) { ffi_http_send(handle, bytes) }, close: fn() {
+      ffi_http_close(handle)
+    })
+  }
+}
+
 /// Create a new [`Transport`](#Transport) with the given send and close
 /// functions. This is used by transport implementations (WebSocket, HTTP) to
 /// construct the Transport handle they return from their connector.
@@ -277,6 +383,50 @@ pub fn new(
   close close: fn() -> Nil,
 ) -> Transport {
   Transport(send: send, close: close)
+}
+
+@target(javascript)
+/// Set the base delay in milliseconds for WebSocket reconnection attempts. The
+/// actual delay doubles on each failed attempt until reaching the maximum.
+pub fn reconnect_base_milliseconds(
+  config: WebSocketConfig,
+  milliseconds: Int,
+) -> WebSocketConfig {
+  WebSocketConfig(..config, reconnect_base_milliseconds: milliseconds)
+}
+
+@target(javascript)
+/// Set the jitter ratio applied to each WebSocket reconnection delay. A ratio
+/// of `0.25` produces ±25% randomisation, which spreads reconnects across
+/// clients after a mass disconnect (thundering-herd mitigation). Must be
+/// between 0.0 (no jitter) and 1.0 (full randomisation). Default is 0.25.
+pub fn reconnect_jitter_ratio(
+  config: WebSocketConfig,
+  ratio: Float,
+) -> WebSocketConfig {
+  WebSocketConfig(..config, reconnect_jitter_ratio: ratio)
+}
+
+@target(javascript)
+/// Set the maximum delay in milliseconds between WebSocket reconnection
+/// attempts.
+pub fn reconnect_max_milliseconds(
+  config: WebSocketConfig,
+  milliseconds: Int,
+) -> WebSocketConfig {
+  WebSocketConfig(..config, reconnect_max_milliseconds: milliseconds)
+}
+
+@target(javascript)
+/// Set the backoff multiplier for WebSocket reconnection attempts. The delay
+/// after each failed attempt is multiplied by this value, up to the maximum
+/// set by [`reconnect_max_milliseconds`](#reconnect_max_milliseconds). Default
+/// is 2.0 (standard exponential backoff).
+pub fn reconnect_multiplier(
+  config: WebSocketConfig,
+  multiplier: Float,
+) -> WebSocketConfig {
+  WebSocketConfig(..config, reconnect_multiplier: multiplier)
 }
 
 /// Register constructors for the auto-serialiser's decoder. Only needed on
@@ -331,6 +481,67 @@ pub fn use_message_pack(
   serialiser: Serialiser(model, message),
 ) -> Serialiser(model, message) {
   Serialiser(..serialiser, binary: serialiser.auto_binary)
+}
+
+@target(javascript)
+/// Derive a WebSocket URL from the browser's current location. Automatically
+/// uses `wss:` for HTTPS pages and `ws:` for HTTP. The `path` argument
+/// specifies the WebSocket endpoint path.
+///
+/// ## Example
+///
+/// ```gleam
+/// // On https://example.com:3000/app
+/// transport.url_from_current_location("/ws")
+/// // Returns "wss://example.com:3000/ws"
+/// ```
+pub fn url_from_current_location(path path: String) -> String {
+  ffi_ws_url_from_current_location(path)
+}
+
+@target(javascript)
+/// Create a new WebSocket configuration with the given URL. Default reconnect
+/// settings are 1000ms base delay and 30000ms maximum delay (exponential
+/// backoff).
+pub fn websocket(url url: String) -> WebSocketConfig {
+  WebSocketConfig(
+    url: url,
+    reconnect_base_milliseconds: 1000,
+    reconnect_max_milliseconds: 30_000,
+    reconnect_jitter_ratio: 0.25,
+    reconnect_multiplier: 2.0,
+  )
+}
+
+@target(javascript)
+/// Returns a connector function that establishes a WebSocket connection. Pass
+/// the result to `client.connect`.
+///
+/// ## Example
+///
+/// ```gleam
+/// client.connect(runtime,
+///   with: transport.websocket(url: "ws://localhost:8080/ws")
+///     |> transport.reconnect_base_milliseconds(2000)
+///     |> transport.websocket_connect,
+///   serialiser: transport.automatic(),
+/// )
+/// ```
+pub fn websocket_connect(config: WebSocketConfig) -> Connector {
+  fn(handler: Handler) {
+    let handle =
+      ffi_ws_connect(
+        config.url,
+        config.reconnect_base_milliseconds,
+        config.reconnect_max_milliseconds,
+        config.reconnect_jitter_ratio,
+        config.reconnect_multiplier,
+        handler,
+      )
+    new(send: fn(bytes) { ffi_ws_send(handle, bytes) }, close: fn() {
+      ffi_ws_close(handle)
+    })
+  }
 }
 
 // =============================================================================
@@ -514,4 +725,58 @@ fn ffi_encode_message_pack_protocol(
 @external(javascript, "./transport.ffi.mjs", "register")
 fn ffi_register(_constructors: List(a)) -> Nil {
   Nil
+}
+
+@target(javascript)
+@external(javascript, "./transport/http.ffi.mjs", "close")
+fn ffi_http_close(_handle: HttpHandle) -> Nil {
+  Nil
+}
+
+@target(javascript)
+@external(javascript, "./transport/http.ffi.mjs", "connect")
+fn ffi_http_connect(
+  _post_url: String,
+  _events_url: String,
+  _flush_batch_size: Int,
+  _handler: Handler,
+) -> HttpHandle {
+  panic as "JavaScript only"
+}
+
+@target(javascript)
+@external(javascript, "./transport/http.ffi.mjs", "send")
+fn ffi_http_send(_handle: HttpHandle, _bytes: BitArray) -> Nil {
+  Nil
+}
+
+@target(javascript)
+@external(javascript, "./transport/websocket.ffi.mjs", "close")
+fn ffi_ws_close(_handle: WsHandle) -> Nil {
+  Nil
+}
+
+@target(javascript)
+@external(javascript, "./transport/websocket.ffi.mjs", "connect")
+fn ffi_ws_connect(
+  _url: String,
+  _reconnect_base_ms: Int,
+  _reconnect_max_ms: Int,
+  _reconnect_jitter_ratio: Float,
+  _reconnect_multiplier: Float,
+  _handler: Handler,
+) -> WsHandle {
+  panic as "JavaScript only"
+}
+
+@target(javascript)
+@external(javascript, "./transport/websocket.ffi.mjs", "send")
+fn ffi_ws_send(_handle: WsHandle, _bytes: BitArray) -> Nil {
+  Nil
+}
+
+@target(javascript)
+@external(javascript, "./transport/websocket.ffi.mjs", "urlFromCurrentLocation")
+fn ffi_ws_url_from_current_location(_path: String) -> String {
+  panic as "JavaScript only"
 }

@@ -8,9 +8,9 @@ import gleam/erlang/process
 @target(erlang)
 import gleeunit/should
 @target(erlang)
-import lily/server
+import lily
 @target(erlang)
-import lily/store
+import lily/server
 @target(erlang)
 import lily/test_fixtures.{type Message, type Model, Increment, SetName}
 @target(erlang)
@@ -27,7 +27,7 @@ fn ser() {
 
 @target(erlang)
 fn new_server() -> server.Server(Model, Message) {
-  let s = store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+  let s = lily.new(test_fixtures.initial_model(), with: test_fixtures.update)
   let assert Ok(srv) = server.start(store: s, serialiser: ser())
   srv
 }
@@ -67,7 +67,7 @@ fn encode_resync(seq: Int) -> BitArray {
 
 @target(erlang)
 pub fn server_start_returns_ok_test() {
-  let s = store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+  let s = lily.new(test_fixtures.initial_model(), with: test_fixtures.update)
   server.start(store: s, serialiser: ser())
   |> should.be_ok
 }

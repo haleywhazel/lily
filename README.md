@@ -55,18 +55,18 @@ Mounts components, binds events, and connects to the server.
 ```gleam
 import counter_shared
 import gleam/int
+import lily
 import lily/client
 import lily/component
 import lily/event
-import lily/store
-import lily/transport/websocket
+import lily/transport
 import lustre/attribute
 import lustre/element
 import lustre/element/html
 
 pub fn main() {
   let runtime =
-    store.new(
+    lily.new(
       counter_shared.Model(count: 0, connected: True),
       with: counter_shared.update,
     )
@@ -80,8 +80,8 @@ pub fn main() {
   )
   |> event.on_click(selector: "#app", decoder: parse_click)
   |> client.connect(
-    with: websocket.config(url: "ws://localhost:8080/ws")
-      |> websocket.connect,
+    with: transport.websocket(url: "ws://localhost:8080/ws")
+      |> transport.websocket_connect,
     serialiser: counter_shared.serialiser(),
   )
   |> client.connection_status(
@@ -133,13 +133,13 @@ import gleam/erlang/process
 import gleam/http/request
 import gleam/http/response
 import gleam/option.{None, Some}
+import lily
 import lily/server
-import lily/store
 import mist.{type Connection, type ResponseData}
 
 pub fn main() {
   let app_store =
-    store.new(
+    lily.new(
       counter_shared.Model(count: 0, connected: True),
       with: counter_shared.update,
     )
