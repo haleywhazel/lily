@@ -4,6 +4,8 @@
  * code which sends messages to the store.
  */
 
+import { NonEmpty, Empty } from "../gleam.mjs";
+
 // =============================================================================
 // EXPORT FUNCTIONS
 // =============================================================================
@@ -62,6 +64,30 @@ export function setupSimpleEventWithPreventDefault(
     event.preventDefault();
     if (event.target.closest("[data-lily-disabled]")) return;
     handler();
+  });
+}
+
+/**
+ * Attaches a submit handler that extracts FormData entries as a Gleam list of
+ * name/value tuples, calls the handler, then resets the form. preventDefault
+ * is called so the browser does not navigate away. File uploads are skipped.
+ */
+export function setupSubmitFormEvent(selector, handler) {
+  const target = resolveTarget(selector);
+  if (!target) return;
+  target.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (event.target.closest("[data-lily-disabled]")) return;
+    const form = event.target;
+    const entries = Array.from(new FormData(form).entries()).filter(
+      ([, value]) => typeof value === "string",
+    );
+    let list = new Empty();
+    for (let i = entries.length - 1; i >= 0; i--) {
+      list = new NonEmpty(entries[i], list);
+    }
+    handler(list);
+    form.reset();
   });
 }
 

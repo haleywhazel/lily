@@ -47,11 +47,12 @@
 //// )
 //// ```
 ////
-//// Use [`transport.use_json`](#use_json) for human-readable frames during
-//// development:
+//// `automatic()` defaults to JSON so frames are human-readable in DevTools.
+//// Opt into MessagePack for production with
+//// [`transport.use_message_pack`](#use_message_pack):
 ////
 //// ```gleam
-//// transport.automatic() |> transport.use_json()
+//// transport.automatic() |> transport.use_message_pack()
 //// ```
 ////
 //// The automatic serialiser uses positional encoding:
@@ -229,18 +230,19 @@ type WsHandle
 // PUBLIC FUNCTIONS
 // =============================================================================
 
-/// Create an automatic serialiser. Uses MessagePack by default (compact
-/// binary). Positional encoding works for any Gleam custom type on both
+/// Create an automatic serialiser. Uses JSON by default (human-readable in
+/// DevTools). Positional encoding works for any Gleam custom type on both
 /// targets without configuration.
 ///
-/// Switch to JSON for development with [`transport.use_json`](#use_json):
+/// Switch to MessagePack for production — smaller, faster binary frames —
+/// with [`transport.use_message_pack`](#use_message_pack):
 ///
 /// ```gleam
-/// // Production: MessagePack
+/// // Development: JSON, readable in DevTools
 /// transport.automatic()
 ///
-/// // Development: JSON, readable in DevTools
-/// transport.automatic() |> transport.use_json()
+/// // Production: MessagePack
+/// transport.automatic() |> transport.use_message_pack()
 /// ```
 ///
 /// On JavaScript, constructors must be registered before connecting so the
@@ -275,7 +277,7 @@ pub fn automatic() -> Serialiser(model, message) {
     decode_message: decode.new_primitive_decoder("Auto", ffi_auto_decode),
     encode_model: ffi_auto_encode,
     decode_model: decode.new_primitive_decoder("Auto", ffi_auto_decode),
-    binary: auto_binary,
+    binary: option.None,
     auto_binary: auto_binary,
   )
 }

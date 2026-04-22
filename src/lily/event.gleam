@@ -418,7 +418,11 @@ pub fn on_scroll(
 
 @target(javascript)
 /// Fires when a form is submitted. Prevents the browser's default form
-/// submission behavior automatically.
+/// submission behaviour automatically. Use this for controlled forms — where
+/// input state is already tracked in the model via `on_input` — or for
+/// action buttons wrapped in a `<form>`. For uncontrolled forms where the
+/// handler needs the submitted field values, use
+/// [`on_submit_form`](#on_submit_form) instead.
 pub fn on_submit(
   runtime: Runtime(model, message),
   selector selector: String,
@@ -426,6 +430,41 @@ pub fn on_submit(
 ) -> Runtime(model, message) {
   setup_simple_event_prevent_default(selector, "submit", fn() {
     client.send_message(runtime, handler())
+  })
+  runtime
+}
+
+@target(javascript)
+/// Fires when a form is submitted, passing the submitted field values as a
+/// list of name/value pairs (from the form's `FormData`). Prevents the
+/// browser's default form submission, and resets the form after the handler
+/// runs so the inputs clear automatically.
+///
+/// The handler returns `Result(message, Nil)` — return `Error(Nil)` to skip
+/// dispatching a message (e.g. when a required field is empty).
+///
+/// Use this for uncontrolled forms — where the DOM is the source of truth
+/// for draft input — so you can avoid plumbing draft state through the
+/// model. The list shape matches the `formal` hex package, which can decode
+/// it into typed structs:
+///
+/// ```gleam
+/// use fields <- event.on_submit_form(runtime, selector: "#my-form")
+/// formal.decoding(my_decoder)
+/// |> formal.add_values(fields)
+/// |> formal.run
+/// |> result.map(Submit)
+/// ```
+pub fn on_submit_form(
+  runtime: Runtime(model, message),
+  selector selector: String,
+  handler handler: fn(List(#(String, String))) -> Result(message, Nil),
+) -> Runtime(model, message) {
+  setup_submit_form_event(selector, fn(fields) {
+    case handler(fields) {
+      Ok(message) -> client.send_message(runtime, message)
+      Error(Nil) -> Nil
+    }
   })
   runtime
 }
@@ -533,6 +572,15 @@ fn setup_simple_event_prevent_default(
   _selector: String,
   _event_name: String,
   _handler: fn() -> Nil,
+) -> Nil {
+  Nil
+}
+
+@target(javascript)
+@external(javascript, "./event.ffi.mjs", "setupSubmitFormEvent")
+fn setup_submit_form_event(
+  _selector: String,
+  _handler: fn(List(#(String, String))) -> Nil,
 ) -> Nil {
   Nil
 }

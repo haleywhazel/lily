@@ -16,6 +16,7 @@ import {
   SetStyle,
   RemoveAttribute,
 } from "./component.mjs";
+import { log as logLine } from "./logging.ffi.mjs";
 
 // =============================================================================
 // EXPORT FUNCTIONS
@@ -96,7 +97,10 @@ export function createRuntime(store, apply) {
       try {
         localStorage.setItem(key, serialised);
       } catch (error) {
-        console.error(`Failed to persist session field "${field.key}":`, error);
+        logLine(
+          "EROR",
+          `failed to persist session field "${field.key}": ${error}`,
+        );
       }
     }
   }
