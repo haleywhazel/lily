@@ -133,14 +133,20 @@ pub fn auto_js_roundtrip_acknowledge_test() {
 }
 
 // =============================================================================
-// REGISTRY — REGISTER ENABLES DECODE
+// REGISTRY — MODULE REGISTRATION ENABLES DECODE
 // =============================================================================
 
 @target(javascript)
+@external(javascript, "./transport_auto_js_test.ffi.mjs", "registerTestFixtures")
+fn register_test_fixtures() -> Nil {
+  Nil
+}
+
+@target(javascript)
 pub fn auto_js_register_enables_decode_test() {
-  // Register constructors that would normally only come from the server.
+  // Register all constructors from the test_fixtures module.
   // After registering, decode should succeed even without a prior encode.
-  transport.register([Noop, Reset, SetName("")])
+  register_test_fixtures()
   // Encode a ServerMessage with SetName, simulating a server-originated message.
   // The encode caches the constructor; then decode can reconstruct it.
   let encoded =
@@ -160,10 +166,8 @@ pub fn auto_js_register_enables_decode_test() {
 
 @target(javascript)
 pub fn auto_js_json_roundtrip_test() {
-  // Register SetName so the auto-decoder can reconstruct it from JSON bytes.
-  // (Tests run alphabetically; this test runs before any roundtrip that would
-  // encode SetName and populate the registry as a side-effect.)
-  transport.register([SetName("")])
+  // Register all fixtures so the auto-decoder can reconstruct types from JSON.
+  register_test_fixtures()
   let json_ser = transport.automatic() |> transport.use_json()
   let json_bytes =
     bit_array.from_string(

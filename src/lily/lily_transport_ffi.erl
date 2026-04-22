@@ -6,9 +6,7 @@
     auto_encode/1,
     auto_encode_message_pack/1,
     decode_message_pack_protocol/2,
-    encode_message_pack_protocol/2,
-    register/1,
-    register_model/1
+    encode_message_pack_protocol/2
 ]).
 
 %%% ============================================================================
@@ -57,14 +55,6 @@ auto_encode(Value) ->
 %% Automatically encode any Gleam value to MessagePack bytes
 auto_encode_message_pack(Value) ->
     encode_message_pack(Value).
-
-%% No-op on Erlang, as constructors are self-describing via atoms
-register(_Constructors) ->
-    nil.
-
-%% No-op on Erlang, as model walk not needed
-register_model(_Model) ->
-    nil.
 
 %%% ============================================================================
 %%% MSGPACK PROTOCOL ENCODE

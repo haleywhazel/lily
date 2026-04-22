@@ -56,8 +56,46 @@
 ////
 //// The automatic serialiser uses positional encoding:
 //// `{"_":"ConstructorName","0":field0,"1":field1,...}`. On JavaScript,
-//// constructors are discovered from message sends and the initial model. For
-//// server-only message types, use [`transport.register`](#register).
+//// constructors must be registered so the decoder can reconstruct them.
+//// The recommended pattern is a small FFI shim in your shared types module
+//// that calls `registerModule` from `transport.ffi.mjs`:
+////
+//// ```javascript
+//// // my_shared.ffi.mjs
+//// import * as self from "./my_shared.mjs";
+//// import { registerModule } from "../lily/lily/transport.ffi.mjs";
+////
+//// export function registerTypes() { registerModule(self); }
+//// ```
+////
+//// ```gleam
+//// // my_shared.gleam
+//// pub fn serialiser() -> transport.Serialiser(Model, Message) {
+////   let _ = register_types()
+////   transport.automatic()
+//// }
+////
+//// @target(javascript)
+//// @external(javascript, "./my_shared.ffi.mjs", "registerTypes")
+//// fn register_types() -> Nil { Nil }
+////
+//// @target(erlang)
+//// fn register_types() -> Nil { Nil }
+//// ```
+////
+//// For shared types split across multiple modules, call `registerModule`
+//// once per file in the FFI shim:
+////
+//// ```javascript
+//// import * as messages from "./messages.mjs";
+//// import * as model from "./model.mjs";
+//// import { registerModule } from "../lily/lily/transport.ffi.mjs";
+////
+//// export function registerTypes() {
+////   registerModule(messages);
+////   registerModule(model);
+//// }
+//// ```
 ////
 //// For cases where automatic serialisation isn't suitable, use
 //// [`transport.custom_json`](#custom_json) or
@@ -205,12 +243,13 @@ type WsHandle
 /// transport.automatic() |> transport.use_json()
 /// ```
 ///
-/// On JavaScript, constructors are discovered automatically:
-/// - Model types: walked recursively from the initial model at start time
-/// - Message types: cached on first send
-///
-/// For message types that only arrive from the server (never sent by this
-/// client), call [`transport.register`](#register) before connecting.
+/// On JavaScript, constructors must be registered before connecting so the
+/// decoder can reconstruct all types — including those that only arrive from
+/// the server or from other clients. The recommended pattern is a FFI shim in
+/// your shared types module that calls `registerModule` from
+/// `transport.ffi.mjs`. Multiple modules are supported by calling
+/// `registerModule` once per file. See the module documentation for the
+/// full pattern.
 pub fn automatic() -> Serialiser(model, message) {
   let auto_binary =
     option.Some(
@@ -427,24 +466,6 @@ pub fn reconnect_multiplier(
   multiplier: Float,
 ) -> WebSocketConfig {
   WebSocketConfig(..config, reconnect_multiplier: multiplier)
-}
-
-/// Register constructors for the auto-serialiser's decoder. Only needed on
-/// JavaScript for types that arrive from the server but are never sent by the
-/// client and don't appear in the initial model.
-///
-/// Call before `client.connect`. Field values are placeholders — only the
-/// constructor shape is extracted.
-///
-/// No-op on Erlang (constructors are self-describing).
-///
-/// ## Example
-///
-/// ```gleam
-/// transport.register([AdminKick(""), ServerAnnouncement("")])
-/// ```
-pub fn register(constructors: List(anything)) -> Nil {
-  ffi_register(constructors)
 }
 
 /// Send bytes through the transport. The bytes should be a serialised
@@ -718,13 +739,6 @@ fn ffi_encode_message_pack_protocol(
   _codec: BinaryCodec(model, message),
 ) -> BitArray {
   panic as "encode_message_pack_protocol is implemented in FFI"
-}
-
-/// Register constructors
-@external(erlang, "lily_transport_ffi", "register")
-@external(javascript, "./transport.ffi.mjs", "register")
-fn ffi_register(_constructors: List(a)) -> Nil {
-  Nil
 }
 
 @target(javascript)

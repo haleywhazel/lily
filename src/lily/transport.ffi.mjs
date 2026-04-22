@@ -84,7 +84,7 @@ function autoDecodeInner(json) {
 
     if (!ctor) {
       throw new globalThis.Error(
-        `Unknown constructor: ${tag}. Did you forget to call transport.register()?`,
+        `Unknown constructor: ${tag}. Did you forget to call register_types()?`,
       );
     }
 
@@ -151,24 +151,25 @@ export function autoEncode(value) {
 }
 
 /**
- * Register constructors by walking a list of example values.
- * Extracts constructor functions and adds them to the registry.
+ * Walk a module namespace and register every class that extends CustomType.
+ * Pass the result of `import * as mod from "..."`.
  */
-export function register(constructors) {
-  // Gleam lists are linked lists ({head, tail}), not JS arrays
-  let current = constructors;
-  while (current && current.head !== undefined) {
-    walkAndRegister(current.head);
-    current = current.tail;
+export function registerModule(moduleNamespace) {
+  for (const key in moduleNamespace) {
+    const value = moduleNamespace[key];
+    if (typeof value === "function" && isCustomTypeClass(value)) {
+      constructorRegistry.set(value.name, value);
+    }
   }
 }
 
-/**
- * Walk the initial model recursively to register all nested constructors.
- * Called automatically from client.connect.
- */
-export function registerModel(model) {
-  walkAndRegister(model);
+function isCustomTypeClass(fn) {
+  let proto = fn.prototype;
+  while (proto) {
+    if (proto.constructor && proto.constructor.name === "CustomType") return true;
+    proto = Object.getPrototypeOf(proto);
+  }
+  return false;
 }
 
 // =============================================================================
@@ -534,47 +535,3 @@ function messagePackEncodeValue(value, buf) {
 // =============================================================================
 // PRIVATE FUNCTIONS
 // =============================================================================
-
-/**
- * Recursively walk a value and register all custom type constructors found.
- */
-function walkAndRegister(value) {
-  // Skip primitives and null/undefined
-  if (
-    value === null ||
-    value === undefined ||
-    typeof value === "boolean" ||
-    typeof value === "string" ||
-    typeof value === "number"
-  ) {
-    return;
-  }
-
-  // Handle Lists (Gleam lists are nested {head, tail} objects)
-  if (value && typeof value === "object" && "head" in value && "tail" in value) {
-    let current = value;
-    while (current && current.head !== undefined) {
-      walkAndRegister(current.head);
-      current = current.tail;
-    }
-    return;
-  }
-
-  // Handle custom types
-  if (value && typeof value === "object" && value.constructor) {
-    const ctor = value.constructor;
-    const name = ctor.name;
-
-    // Skip built-in types
-    if (name === "Object" || name === "Array") return;
-
-    if (!constructorRegistry.has(name)) {
-      constructorRegistry.set(name, ctor);
-    }
-
-    // Recursively walk fields (Gleam JS stores fields by name, not numeric index)
-    for (const field of Object.keys(value)) {
-      walkAndRegister(value[field]);
-    }
-  }
-}

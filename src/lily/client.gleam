@@ -189,10 +189,6 @@ pub fn connect(
 ) -> Runtime(model, message) {
   let Runtime(handle) = runtime
 
-  // Register model types for auto-serialiser (walks model recursively)
-  let current_model = get_model(handle)
-  ffi_register_model(current_model)
-
   let handler =
     transport.Handler(
       on_receive: fn(bytes) { handle_incoming(handle, bytes, serialiser) },
@@ -557,13 +553,6 @@ fn dispatch_model(_handle: RuntimeHandle, _model: model) -> Nil {
 /// Clear the component cache
 @external(javascript, "./client.ffi.mjs", "clearComponentCache")
 fn ffi_clear_component_cache(_handle: RuntimeHandle, _selector: String) -> Nil {
-  Nil
-}
-
-@target(javascript)
-/// Register model constructors for auto-serialiser
-@external(javascript, "./transport.ffi.mjs", "registerModel")
-fn ffi_register_model(_model: model) -> Nil {
   Nil
 }
 
