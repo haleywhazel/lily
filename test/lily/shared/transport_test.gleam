@@ -216,7 +216,7 @@ pub fn decode_unknown_type_returns_error_test() {
 pub fn json_bytes_decode_fails_under_message_pack_test() {
   let json_bytes =
     transport.encode(ClientMessage(payload: Increment), serialiser: ser())
-  let message_pack_ser = transport.automatic()
+  let message_pack_ser = transport.automatic() |> transport.use_message_pack()
   transport.decode(json_bytes, serialiser: message_pack_ser)
   |> should.be_error
 }

@@ -172,8 +172,12 @@ pub fn auto_erl_roundtrip_list_field_test() {
 @target(erlang)
 pub fn auto_erl_message_pack_bytes_fail_under_json_test() {
   // MessagePack bytes should not decode as JSON
-  let mp_bytes = transport.encode(Acknowledge(sequence: 1), serialiser: ser())
-  let json_ser = transport.automatic() |> transport.use_json()
+  let mp_bytes =
+    transport.encode(
+      Acknowledge(sequence: 1),
+      serialiser: transport.automatic() |> transport.use_message_pack(),
+    )
+  let json_ser = transport.automatic()
   transport.decode(mp_bytes, serialiser: json_ser)
   |> should.be_error
 }
