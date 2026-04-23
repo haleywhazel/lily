@@ -1,6 +1,8 @@
 //// Components subscribe to the [`Store`](./store.html#Store) and re-render
 //// when their slice of the model changes. They're functions that return
-//// renderable content, composable like React or Lustre components.
+//// renderable content, composable like React or Lustre components. That said,
+//// it's closer to React than Lustre, with smaller, more modular components
+//// being preferable as components themselves don't hold states.
 ////
 //// Lily provides five component types with different performance
 //// characteristics: [`static`](#static) renders once and never updates,
@@ -13,30 +15,38 @@
 //// Components work with any HTML library - Lustre, Nakai, or raw strings.
 //// The `to_html` function provided at [`component.mount`](#mount) converts
 //// your chosen library's types to strings. We recommend
-//// [Lustre elements](https://hexdocs.pm/lustre/lustre/element/html.html)
+//// [Lustre elements](https://hexdocs.pm/lustre/lustre/element/html.html).
 ////
 //// ```gleam
+//// import lily
+//// import lily/client
 //// import lily/component
-//// import lustre/element.{type Element}
+//// import lily/event
+//// import lustre/attribute
+//// import lustre/element
 //// import lustre/element/html
 ////
-//// // View function
-//// fn counter_view(count: Int) -> Element(Message) {
-////   html.div([], [
-////     html.p([], [element.text("Count: " <> int.to_string(count))]),
-////     html.button([event.on_click(Increment)], [element.text("+")]),
-////   ])
+//// fn app(_model: Model) {
+////   component.simple(
+////     slice: fn(m: Model) { m.count },
+////     render: fn(count) {
+////       html.div([], [
+////         html.button([attribute.data("msg", "decrement")], [html.text("-")]),
+////         html.p([], [html.text(int.to_string(count))]),
+////         html.button([attribute.data("msg", "increment")], [html.text("+")]),
+////       ])
+////     },
+////   )
 //// }
 ////
 //// pub fn main() {
-////   store.new(Model(count: 0), with: update)
-////   |> component.mount("#app", to_html: element.to_string, view: counter_view)
-////   |> component.simple(
-////     selector: "#counter",
-////     slice: fn(model) { model.count },
-////     render: fn(count) { html.p([], [element.text(int.to_string(count))]) },
-////   )
-////   |> client.start
+////   let runtime =
+////     lily.new(Model(count: 0), with: update)
+////     |> client.start
+////
+////   runtime
+////   |> component.mount(selector: "#app", to_html: element.to_string, view: app)
+////   |> event.on_click(selector: "#app", decoder: parse_click)
 //// }
 //// ```
 ////
@@ -140,9 +150,9 @@ pub opaque type Component(model, message, html) {
 }
 
 @target(javascript)
-/// Patches are DOM updates to apply to a component, avoiding a full
-/// re-render used for [`component.live`](#live) and
-/// [`component.each_live`](#each_live).The `target` field is a CSS selector
+/// Patches are DOM updates to apply to a component, avoiding a full re-render
+/// used for [`component.live`](#live) and
+/// [`component.each_live`](#each_live). The `target` field is a CSS selector
 /// relative to the component's root element, with an empty string provided
 /// if the component's root element is itself. Patches are scoped to their
 /// component, preventing cross-component interference.
@@ -224,16 +234,16 @@ pub fn each(
 ///
 /// ```gleam
 /// component.each_live(
-///   items: fn(model) { model.series },
-///   key: fn(series) { series.data.id },
-///   initial: fn(data) {
+///   slice: fn(model) { model.series },
+///   key: fn(series) { series.id },
+///   initial: fn(series) {
 ///     html.div([class("display-data")], [
 ///       html.span([class("value")], [html.text("0")])
 ///     ])
 ///   },
 ///   patch: fn(series) {
-///     [SetText(".value", int.to_string(series.data.value))]
-///   }
+///     [SetText(".value", int.to_string(series.value))]
+///   },
 /// )
 /// ```
 pub fn each_live(
@@ -259,13 +269,13 @@ pub fn each_live(
 /// ## Example
 ///
 /// ```gleam
-/// fn app() -> Component(Model, Message, Element(Message)) {
+/// fn app(_model: Model) -> Component(Model, Message, Element(Message)) {
 ///   component.fragment([
 ///     component.static(html.h1([], [html.text("My App")])),
 ///     component.simple(...),
 ///     component.each(...),
 ///   ])
-///   }
+/// }
 /// ```
 pub fn fragment(
   children: List(Component(model, message, html)),

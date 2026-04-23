@@ -515,7 +515,7 @@ pub fn use_message_pack(
 ///
 /// ```gleam
 /// // On https://example.com:3000/app
-/// transport.url_from_current_location("/ws")
+/// transport.url_from_current_location(path: "/ws")
 /// // Returns "wss://example.com:3000/ws"
 /// ```
 pub fn url_from_current_location(path path: String) -> String {
@@ -744,13 +744,13 @@ fn ffi_encode_message_pack_protocol(
 }
 
 @target(javascript)
-@external(javascript, "./transport/http.ffi.mjs", "close")
+@external(javascript, "./transport.ffi.mjs", "transportClose")
 fn ffi_http_close(_handle: HttpHandle) -> Nil {
   Nil
 }
 
 @target(javascript)
-@external(javascript, "./transport/http.ffi.mjs", "connect")
+@external(javascript, "./transport.ffi.mjs", "httpConnect")
 fn ffi_http_connect(
   _post_url: String,
   _events_url: String,
@@ -761,19 +761,19 @@ fn ffi_http_connect(
 }
 
 @target(javascript)
-@external(javascript, "./transport/http.ffi.mjs", "send")
+@external(javascript, "./transport.ffi.mjs", "transportSend")
 fn ffi_http_send(_handle: HttpHandle, _bytes: BitArray) -> Nil {
   Nil
 }
 
 @target(javascript)
-@external(javascript, "./transport/websocket.ffi.mjs", "close")
+@external(javascript, "./transport.ffi.mjs", "transportClose")
 fn ffi_ws_close(_handle: WsHandle) -> Nil {
   Nil
 }
 
 @target(javascript)
-@external(javascript, "./transport/websocket.ffi.mjs", "connect")
+@external(javascript, "./transport.ffi.mjs", "wsConnect")
 fn ffi_ws_connect(
   _url: String,
   _reconnect_base_ms: Int,
@@ -786,13 +786,13 @@ fn ffi_ws_connect(
 }
 
 @target(javascript)
-@external(javascript, "./transport/websocket.ffi.mjs", "send")
+@external(javascript, "./transport.ffi.mjs", "transportSend")
 fn ffi_ws_send(_handle: WsHandle, _bytes: BitArray) -> Nil {
   Nil
 }
 
 @target(javascript)
-@external(javascript, "./transport/websocket.ffi.mjs", "urlFromCurrentLocation")
+@external(javascript, "./transport.ffi.mjs", "wsUrlFromCurrentLocation")
 fn ffi_ws_url_from_current_location(_path: String) -> String {
   panic as "JavaScript only"
 }

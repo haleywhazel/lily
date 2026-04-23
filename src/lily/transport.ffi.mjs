@@ -1,23 +1,19 @@
 /**
- * TRANSPORT AUTO-SERIALISER (JAVASCRIPT)
+ * TRANSPORT FFI
  *
- * Provides automatic JSON serialisation for Gleam custom types using a
- * positional encoding scheme. The wire format is:
+ * All JavaScript FFI for the transport module in one place:
  *
- *   {"_":"ConstructorName","0":field0,"1":field1,...}
+ *   - Auto-serialiser: positional JSON encoding with a constructor registry
+ *   - MessagePack codec: inline binary codec (no external dependencies)
+ *   - HTTP transport: SSE (server→client) + fetch POST (client→server)
+ *   - WebSocket transport: binary frames with exponential-backoff reconnect
  *
- * Primitives (Int, Float, String, Bool, Nil) and Lists encode naturally
- * to JSON. Custom types are encoded as objects with a "_" tag and numbered
- * fields matching constructor parameter order.
- *
- * The constructor registry is built automatically from:
- * 1. Encode-time caching — when encoding a value, cache its constructor
- * 2. Initial model walk — recursively walk the initial model to find types
- * 3. Manual registration — `register([...])` for server-only message types
+ * Both transports persist offline queues to localStorage (base64-encoded frames)
+ * and flush them on reconnection before sending Resync.
  */
 
 // =============================================================================
-// CONSTRUCTOR REGISTRY
+// IMPORTS
 // =============================================================================
 
 import { Ok, Error, NonEmpty, Empty, BitArray } from "../gleam.mjs";
@@ -33,14 +29,21 @@ import {
   Snapshot,
 } from "./transport.mjs";
 
-/**
- * Maps constructor name → constructor function.
- * Built automatically during encode and model walk.
- */
+// =============================================================================
+// PRIVATE CONSTANTS
+// =============================================================================
+
+/** Maps constructor name → constructor function, built during encode and model walk. */
 const constructorRegistry = new Map();
 
+const STORAGE_KEY_HTTP_PENDING = "lily_http_pending";
+const STORAGE_KEY_WS_PENDING = "lily_ws_pending";
+
+const messagePackTextDecoder = new TextDecoder();
+const messagePackTextEncoder = new TextEncoder();
+
 // =============================================================================
-// EXPORT FUNCTIONS
+// AUTO-SERIALISER
 // =============================================================================
 
 /**
@@ -57,50 +60,17 @@ export function autoDecode(json) {
 }
 
 /**
- * Inner recursive decode — returns raw value or throws on unknown constructor.
+ * Decode a BitArray of MessagePack bytes to a Gleam value.
+ * Returns Ok(value) or Error(undefined).
  */
-function autoDecodeInner(json) {
-  // Primitives
-  if (json === null) return undefined; // Gleam's Nil
-  if (typeof json === "boolean") return json;
-  if (typeof json === "string") return json;
-  if (typeof json === "number") return json;
-
-  // Array → Gleam List
-  if (Array.isArray(json)) {
-    // Build Gleam list from right to left using proper NonEmpty/Empty instances
-    let result = new Empty();
-    for (let i = json.length - 1; i >= 0; i--) {
-      const decodedItem = autoDecodeInner(json[i]);
-      result = new NonEmpty(decodedItem, result);
-    }
-    return result;
+export function autoDecodeMessagePack(bitArray) {
+  try {
+    const view = new DataView(bitArray.rawBuffer.buffer, bitArray.rawBuffer.byteOffset, bitArray.rawBuffer.byteLength);
+    const [jsValue] = messagePackDecodeAt(view, 0);
+    return new Ok(autoDecodeInner(jsValue));
+  } catch (_e) {
+    return new Error(undefined);
   }
-
-  // Custom type (object with "_" tag)
-  if (json && typeof json === "object" && "_" in json) {
-    const tag = json._;
-    const ctor = constructorRegistry.get(tag);
-
-    if (!ctor) {
-      throw new globalThis.Error(
-        `Unknown constructor: ${tag}. Did you forget to call register_types()?`,
-      );
-    }
-
-    // Collect positional fields
-    const fields = [];
-    let fieldIndex = 0;
-    while (String(fieldIndex) in json) {
-      fields.push(autoDecodeInner(json[String(fieldIndex)]));
-      fieldIndex++;
-    }
-
-    return new ctor(...fields);
-  }
-
-  // Fallback
-  return json;
 }
 
 /**
@@ -151,6 +121,17 @@ export function autoEncode(value) {
 }
 
 /**
+ * Encode any Gleam value to a BitArray using MessagePack.
+ * Uses autoEncode to convert Gleam objects to plain JS objects first.
+ */
+export function autoEncodeMessagePack(value) {
+  const jsValue = autoEncode(value);
+  const buf = [];
+  messagePackEncodeValue(jsValue, buf);
+  return new BitArray(new Uint8Array(buf));
+}
+
+/**
  * Walk a module namespace and register every class that extends CustomType.
  * Pass the result of `import * as mod from "..."`.
  */
@@ -163,50 +144,157 @@ export function registerModule(moduleNamespace) {
   }
 }
 
-function isCustomTypeClass(fn) {
-  let proto = fn.prototype;
-  while (proto) {
-    if (proto.constructor && proto.constructor.name === "CustomType") return true;
-    proto = Object.getPrototypeOf(proto);
-  }
-  return false;
-}
-
 // =============================================================================
-// PRIVATE FUNCTIONS
+// HTTP TRANSPORT
 // =============================================================================
-
-// =============================================================================
-// MESSAGEPACK CODEC (inline, no external dependencies)
-// =============================================================================
-
-const messagePackTextEncoder = new TextEncoder();
-const messagePackTextDecoder = new TextDecoder();
 
 /**
- * Decode a BitArray of MessagePack bytes to a Gleam value.
- * Returns Ok(value) or Error(undefined).
+ * Establish HTTP/SSE transport connection with offline queueing.
+ *
+ * Server→client: SSE text frames (EventSource).
+ * Client→server: binary POST (application/octet-stream).
+ * Offline queue: base64-encoded frames persisted to localStorage.
  */
-export function autoDecodeMessagePack(bitArray) {
+export function httpConnect(postUrl, eventsUrl, flushBatchSize, handler) {
+  // Closure-scoped state (not module-level, allows multiple instances)
+  let eventSource = null;
+  let pending = [];
+  let isConnected = false;
+  let persistScheduled = false;
+  let isFlushing = false;
+
+  function getPending() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY_HTTP_PENDING);
+      if (raw) return JSON.parse(raw).map(base64ToFrame);
+    } catch (_error) {
+      // Corrupted data, reset to empty queue
+    }
+    return [];
+  }
+
+  function queuePending(frame) {
+    const wasEmpty = pending.length === 0;
+    pending.push(frame);
+    if (wasEmpty) {
+      try {
+        localStorage.setItem(STORAGE_KEY_HTTP_PENDING, JSON.stringify(pending.map(frameToBase64)));
+      } catch (_error) {
+        // Quota exceeded — frame remains in-memory, sent on reconnect
+      }
+    } else if (!persistScheduled) {
+      // Subsequent frames are coalesced — avoids O(n²) writes in rapid batches.
+      persistScheduled = true;
+      queueMicrotask(function () {
+        persistScheduled = false;
+        try {
+          localStorage.setItem(STORAGE_KEY_HTTP_PENDING, JSON.stringify(pending.map(frameToBase64)));
+        } catch (_error) {
+          // Quota exceeded — frames remain in-memory, sent on reconnect
+        }
+      });
+    }
+  }
+
+  async function flushPending() {
+    // Guard against a second concurrent flush if onopen fires again mid-flush
+    if (isFlushing) return;
+    // Use in-memory queue; load from storage only on first flush after page load
+    if (pending.length === 0) {
+      pending = getPending();
+    }
+    if (pending.length === 0) return;
+
+    isFlushing = true;
+    let totalSent = 0;
+
+    for (let i = 0; i < pending.length; i += flushBatchSize) {
+      if (!isConnected) break;
+      const batch = pending.slice(i, i + flushBatchSize);
+      const results = await Promise.allSettled(
+        batch.map(function (frame) {
+          return fetch(postUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/octet-stream" },
+            body: frame,
+          });
+        }),
+      );
+      const sent = results.filter(function (result) {
+        return result.status === "fulfilled";
+      }).length;
+      totalSent += sent;
+      if (sent < batch.length) break;
+    }
+
+    if (totalSent === pending.length) {
+      localStorage.removeItem(STORAGE_KEY_HTTP_PENDING);
+      pending = [];
+    } else if (totalSent > 0) {
+      pending = pending.slice(totalSent);
+      localStorage.setItem(STORAGE_KEY_HTTP_PENDING, JSON.stringify(pending.map(frameToBase64)));
+    }
+
+    isFlushing = false;
+  }
+
   try {
-    const view = new DataView(bitArray.rawBuffer.buffer, bitArray.rawBuffer.byteOffset, bitArray.rawBuffer.byteLength);
-    const [jsValue] = messagePackDecodeAt(view, 0);
-    return new Ok(autoDecodeInner(jsValue));
-  } catch (_e) {
-    return new Error(undefined);
+    eventSource = new EventSource(eventsUrl);
+  } catch (error) {
+    console.error("Failed to create EventSource:", error);
+    return { send() {}, close() {} };
   }
+
+  eventSource.onopen = function () {
+    isConnected = true;
+    flushPending();
+    handler.on_reconnect();
+  };
+
+  eventSource.onmessage = function (event) {
+    if (typeof event.data === "string") {
+      // SSE is text-only; convert to bytes so the handler always gets BitArray
+      handler.on_receive(new BitArray(new TextEncoder().encode(event.data)));
+    }
+  };
+
+  eventSource.onerror = function (_error) {
+    isConnected = false;
+    handler.on_disconnect();
+    // Browser automatically attempts to reconnect (SSE built-in behaviour)
+  };
+
+  return {
+    send(bytes) {
+      const frame = bytes.rawBuffer;
+      if (isConnected) {
+        fetch(postUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/octet-stream" },
+          body: frame,
+        })
+          .then(function () {})
+          .catch(function (error) {
+            console.error("Failed to POST message:", error);
+            queuePending(frame);
+          });
+      } else {
+        queuePending(frame);
+      }
+    },
+    close() {
+      isConnected = false;
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+    },
+  };
 }
 
-/**
- * Encode any Gleam value to a BitArray using MessagePack.
- * Uses autoEncode to convert Gleam objects to plain JS objects first.
- */
-export function autoEncodeMessagePack(value) {
-  const jsValue = autoEncode(value);
-  const buf = [];
-  messagePackEncodeValue(jsValue, buf);
-  return new BitArray(new Uint8Array(buf));
-}
+// =============================================================================
+// MESSAGEPACK CODEC
+// =============================================================================
 
 /**
  * Decode MessagePack bytes to a Protocol using the provided codec.
@@ -308,6 +396,219 @@ export function encodeMessagePackProtocol(protocol, codec) {
   }
 
   return new BitArray(new Uint8Array(buf));
+}
+
+// =============================================================================
+// WEBSOCKET TRANSPORT
+// =============================================================================
+
+/**
+ * Establish WebSocket connection with exponential-backoff reconnection and
+ * offline queueing. Binary frames (ArrayBuffer) are used exclusively.
+ * Offline queue is base64-encoded and persisted to localStorage.
+ */
+export function wsConnect(url, reconnectBaseMs, reconnectMaxMs, jitterRatio, multiplier, handler) {
+  // Closure-scoped state (not module-level, allows multiple instances)
+  let ws = null;
+  let reconnectDelay = null;
+  let reconnectTimer = null;
+  let pending = [];
+  let persistScheduled = false;
+
+  function openConnection() {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+
+    try {
+      ws = new WebSocket(url);
+      ws.binaryType = "arraybuffer";
+    } catch (_error) {
+      scheduleReconnect();
+      return;
+    }
+
+    ws.onopen = function () {
+      reconnectDelay = reconnectBaseMs;
+      flushPending();
+      handler.on_reconnect();
+    };
+
+    ws.onmessage = function (event) {
+      if (event.data instanceof ArrayBuffer) {
+        handler.on_receive(new BitArray(new Uint8Array(event.data)));
+      } else if (typeof event.data === "string") {
+        handler.on_receive(new BitArray(new TextEncoder().encode(event.data)));
+      }
+    };
+
+    ws.onclose = function () {
+      ws = null;
+      handler.on_disconnect();
+      scheduleReconnect();
+    };
+
+    ws.onerror = function () {
+      // onclose fires after onerror, which triggers reconnect
+    };
+  }
+
+  function scheduleReconnect() {
+    if (reconnectTimer) return;
+
+    if (reconnectDelay === null) {
+      reconnectDelay = reconnectBaseMs;
+    }
+
+    // Jitter spreads reconnects after a mass disconnect (thundering herd)
+    const jitteredDelay = reconnectDelay * (1 - jitterRatio + Math.random() * jitterRatio * 2);
+    reconnectTimer = setTimeout(function () {
+      reconnectTimer = null;
+      openConnection();
+    }, jitteredDelay);
+
+    // Advance the progression regardless of jitter so the ceiling is reached
+    // in a predictable number of attempts
+    reconnectDelay = Math.min(reconnectDelay * multiplier, reconnectMaxMs);
+  }
+
+  function flushPending() {
+    // Use in-memory queue; load from storage only on first flush after page load
+    if (pending.length === 0) {
+      pending = getPending();
+    }
+    if (pending.length === 0) return;
+
+    const sent = [];
+    for (const frame of pending) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(frame);
+        sent.push(frame);
+      } else {
+        break;
+      }
+    }
+
+    if (sent.length === pending.length) {
+      // Everything went out — wipe the queue
+      localStorage.removeItem(STORAGE_KEY_WS_PENDING);
+      pending = [];
+    } else if (sent.length > 0) {
+      // Partial flush — keep whatever didn't make it
+      const remaining = pending.slice(sent.length);
+      localStorage.setItem(STORAGE_KEY_WS_PENDING, JSON.stringify(remaining.map(frameToBase64)));
+      pending = remaining;
+    }
+  }
+
+  function getPending() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY_WS_PENDING);
+      if (raw) return JSON.parse(raw).map(base64ToFrame);
+    } catch (_error) {
+      // Corrupted data, reset to empty queue
+    }
+    return [];
+  }
+
+  function queuePending(frame) {
+    const wasEmpty = pending.length === 0;
+    pending.push(frame);
+    if (wasEmpty) {
+      try {
+        localStorage.setItem(STORAGE_KEY_WS_PENDING, JSON.stringify(pending.map(frameToBase64)));
+      } catch (_error) {
+        // Quota exceeded — frame remains in-memory, sent on reconnect
+      }
+    } else if (!persistScheduled) {
+      // Subsequent frames are coalesced — avoids O(n²) writes in rapid batches.
+      persistScheduled = true;
+      queueMicrotask(function () {
+        persistScheduled = false;
+        try {
+          localStorage.setItem(STORAGE_KEY_WS_PENDING, JSON.stringify(pending.map(frameToBase64)));
+        } catch (_error) {
+          // Quota exceeded — frames remain in-memory, sent on reconnect
+        }
+      });
+    }
+  }
+
+  openConnection();
+
+  return {
+    send(bytes) {
+      const frame = bytes.rawBuffer;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(frame);
+      } else {
+        queuePending(frame);
+      }
+    },
+    close() {
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      if (ws) {
+        ws.close();
+        ws = null;
+      }
+    },
+  };
+}
+
+/** Derive WebSocket URL from current browser location. Uses wss: for HTTPS, ws: for HTTP. */
+export function wsUrlFromCurrentLocation(path) {
+  const protocol = globalThis.location.protocol === "https:" ? "wss:" : "ws:";
+  return protocol + "//" + globalThis.location.host + path;
+}
+
+// =============================================================================
+// WRAPPER EXPORTS
+// =============================================================================
+
+/** Close a transport handle (HTTP or WebSocket). */
+export function transportClose(handle) {
+  handle.close();
+}
+
+/** Send bytes through a transport handle (HTTP or WebSocket). */
+export function transportSend(handle, bytes) {
+  handle.send(bytes);
+}
+
+// =============================================================================
+// PRIVATE FUNCTIONS
+// =============================================================================
+
+/** Decode a base64 string back to a Uint8Array. */
+function base64ToFrame(b64) {
+  const binary = globalThis.atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+/** Encode a Uint8Array to a base64 string for localStorage persistence. */
+function frameToBase64(frame) {
+  let binary = "";
+  for (let i = 0; i < frame.byteLength; i++) {
+    binary += String.fromCharCode(frame[i]);
+  }
+  return globalThis.btoa(binary);
+}
+
+function isCustomTypeClass(fn) {
+  let proto = fn.prototype;
+  while (proto) {
+    if (proto.constructor && proto.constructor.name === "CustomType") return true;
+    proto = Object.getPrototypeOf(proto);
+  }
+  return false;
 }
 
 function messagePackDecodeArray(view, pos, len) {
@@ -475,9 +776,7 @@ function messagePackEncodeString(str, buf) {
   for (const b of bytes) buf.push(b);
 }
 
-/**
- * Encode a JS value (produced by autoEncode) to a Uint8Array using MessagePack.
- */
+/** Encode a JS value (produced by autoEncode) to a Uint8Array using MessagePack. */
 function messagePackEncodeValue(value, buf) {
   if (value === null || value === undefined) {
     buf.push(0xc0);
@@ -532,6 +831,47 @@ function messagePackEncodeValue(value, buf) {
   }
 }
 
-// =============================================================================
-// PRIVATE FUNCTIONS
-// =============================================================================
+/** Inner recursive JSON decode — returns raw value or throws on unknown constructor. */
+function autoDecodeInner(json) {
+  // Primitives
+  if (json === null) return undefined; // Gleam's Nil
+  if (typeof json === "boolean") return json;
+  if (typeof json === "string") return json;
+  if (typeof json === "number") return json;
+
+  // Array → Gleam List
+  if (Array.isArray(json)) {
+    // Build Gleam list from right to left using proper NonEmpty/Empty instances
+    let result = new Empty();
+    for (let i = json.length - 1; i >= 0; i--) {
+      const decodedItem = autoDecodeInner(json[i]);
+      result = new NonEmpty(decodedItem, result);
+    }
+    return result;
+  }
+
+  // Custom type (object with "_" tag)
+  if (json && typeof json === "object" && "_" in json) {
+    const tag = json._;
+    const ctor = constructorRegistry.get(tag);
+
+    if (!ctor) {
+      throw new globalThis.Error(
+        `Unknown constructor: ${tag}. Did you forget to call register_types()?`,
+      );
+    }
+
+    // Collect positional fields
+    const fields = [];
+    let fieldIndex = 0;
+    while (String(fieldIndex) in json) {
+      fields.push(autoDecodeInner(json[String(fieldIndex)]));
+      fieldIndex++;
+    }
+
+    return new ctor(...fields);
+  }
+
+  // Fallback
+  return json;
+}

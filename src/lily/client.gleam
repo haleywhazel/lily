@@ -28,14 +28,10 @@
 ////   // 2. Start the runtime
 ////   let runtime = client.start(app_store)
 ////
-////   // 3. Mount your UI
+////   // Mount UI, attach events, and optionally connect to server
 ////   runtime
 ////   |> component.mount(selector: "#app", to_html: element.to_string, view: app)
-////
-////   // 4. Attach events
 ////   |> event.on_click(selector: "#app", decoder: parse_msg)
-////
-////   // 5. Connect to server (optional)
 ////   |> client.connect(
 ////     with: transport.websocket(url: "ws://localhost:8080/ws")
 ////       |> transport.websocket_connect,
@@ -236,7 +232,8 @@ pub fn connect(
 ///   set: fn(model, status) { Model(..model, connected: status) },
 /// )
 /// |> client.connect(
-///   with: websocket.connect(config),
+///   with: transport.websocket(url: "ws://localhost:8080/ws")
+///     |> transport.websocket_connect,
 ///   serialiser: my_serialiser,
 /// )
 /// ```

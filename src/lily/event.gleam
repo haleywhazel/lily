@@ -7,21 +7,29 @@
 //// attributes). They're set up once and persist until page unload
 ////
 //// ```gleam
+//// import lily
+//// import lily/client
+//// import lily/component
 //// import lily/event
 ////
 //// pub fn main() {
-////   store.new(Model(count: 0), with: update)
-////   |> component.mount("#app", to_html: element.to_string, view: app)
-////   |> event.on_click(selector: "#increment", handler: fn() { Increment })
-////   |> event.on_click(selector: "#decrement", handler: fn() { Decrement })
-////   |> event.on_input(selector: "#name", decoder: decode_name_input)
-////   |> client.start
+////   let runtime =
+////     lily.new(Model(count: 0), with: update)
+////     |> client.start
+////
+////   runtime
+////   |> component.mount(selector: "#app", to_html: element.to_string, view: app)
+////   |> event.on_click(selector: "#app", decoder: parse_click)
+////   |> event.on_input(selector: "#search", handler: fn(text) { Search(text) })
+////   |> event.on_key_down(selector: "document", handler: fn(key) { KeyPressed(key) })
 //// }
 ////
-//// fn decode_name_input(event: Dynamic) -> Result(Message, Nil) {
-////   use target <- result.try(dynamic.field("target", dynamic.dynamic)(event))
-////   use value <- result.try(dynamic.field("value", dynamic.string)(target))
-////   Ok(SetName(value))
+//// fn parse_click(msg_name: String) -> Result(Message, Nil) {
+////   case msg_name {
+////     "increment" -> Ok(Increment)
+////     "decrement" -> Ok(Decrement)
+////     _ -> Error(Nil)
+////   }
 //// }
 //// ```
 ////
