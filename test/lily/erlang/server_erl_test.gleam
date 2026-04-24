@@ -6,11 +6,15 @@ import gleam/bit_array
 @target(erlang)
 import gleam/erlang/process
 @target(erlang)
+import gleam/string
+@target(erlang)
 import gleeunit/should
 @target(erlang)
-import lily
+import lily/logging
 @target(erlang)
 import lily/server
+@target(erlang)
+import lily/store
 @target(erlang)
 import lily/test_fixtures.{type Message, type Model, Increment, SetName}
 @target(erlang)
@@ -27,7 +31,7 @@ fn ser() {
 
 @target(erlang)
 fn new_server() -> server.Server(Model, Message) {
-  let s = lily.new(test_fixtures.initial_model(), with: test_fixtures.update)
+  let s = store.new(test_fixtures.initial_model(), with: test_fixtures.update)
   let assert Ok(srv) = server.start(store: s, serialiser: ser())
   srv
 }
@@ -67,7 +71,7 @@ fn encode_resync(seq: Int) -> BitArray {
 
 @target(erlang)
 pub fn server_start_returns_ok_test() {
-  let s = lily.new(test_fixtures.initial_model(), with: test_fixtures.update)
+  let s = store.new(test_fixtures.initial_model(), with: test_fixtures.update)
   server.start(store: s, serialiser: ser())
   |> should.be_ok
 }
@@ -369,4 +373,35 @@ pub fn server_sequence_starts_at_zero_test() {
     }
     Error(_) -> should.fail()
   }
+}
+
+// =============================================================================
+// GENERATE CLIENT ID
+// =============================================================================
+
+@target(erlang)
+pub fn server_generate_client_id_is_unique_test() {
+  server.generate_client_id()
+  |> should.not_equal(server.generate_client_id())
+}
+
+@target(erlang)
+pub fn server_generate_client_id_returns_32_char_hex_test() {
+  let id = server.generate_client_id()
+  string.length(id)
+  |> should.equal(32)
+}
+
+// =============================================================================
+// AUTO LOG MESSAGES
+// =============================================================================
+
+@target(erlang)
+pub fn server_auto_log_messages_processes_normally_test() {
+  let srv = new_server()
+  let _srv2 = server.auto_log_messages(srv, level: logging.Info)
+  let s1 = connect_client(srv, "c1")
+  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
+  recv(s1)
+  |> should.be_ok
 }

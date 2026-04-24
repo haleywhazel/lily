@@ -1,26 +1,28 @@
-//// The [`Server`](#Server) holds authoritative state and broadcasts updates
-//// to connected clients. It works on both Erlang and JavaScript targets,
-//// though we recommend Erlang for production use.
+//// The [`Server`](#Server) holds authoritative (with an asterisk) state and
+//// broadcasts updates to connected clients. It works on both Erlang and
+//// JavaScript targets, though we recommend Erlang for production use to make
+//// full use of the BEAM.
+////
+//// The asterisk on the authoritative state comes from client disconnections
+//// and reconnections, which allows for local modifications and editing to
+//// update the server store on reconnect. This is done by assigning sequence
+//// numbers.
 ////
 //// On Erlang, the server uses an OTP actor with sequential message
-//// processing. On JavaScript, it uses closure-scoped mutable state (JS is
+//// processing, and on JavaScript, it uses closure-scoped mutable state (JS is
 //// single-threaded). Both expose identical APIs - the same
 //// [`Server`](#Server) opaque type and public functions work on both
 //// targets.
 ////
-//// The server owns the canonical [`Store`](../lily.html#Store), applies
-//// client messages sequentially while assigning sequence numbers, broadcasts
-//// updates to all clients except the originator, and sends full state
-//// snapshots to clients that reconnect
 ////
 //// ```gleam
-//// import lily
 //// import lily/server
+//// import lily/store
 //// import lily/transport
 ////
 //// pub fn main() {
 ////   // Create your store
-////   let app_store = lily.new(initial_model, with: update)
+////   let app_store = store.new(initial_model, with: update)
 ////
 ////   // Start the server
 ////   let assert Ok(srv) = server.start(
@@ -37,16 +39,17 @@
 ////   })
 ////
 ////   // Wire into your transport (mist/wisp WebSocket handler)
-////   // See server/handler.gleam for examples
 //// }
 //// ```
 ////
-//// The server is transport-agnostic. It doesn't depend on mist or wisp -
-//// those are your backend dependencies. Use [`server.connect`](#connect),
-//// [`server.disconnect`](#disconnect), and [`server.incoming`](#incoming)
-//// to wire the server into your WebSocket or HTTP handlers. See
-//// `lily/src/lily/server/handler.gleam` for a complete example with mist
-//// and wisp.
+//// The server is transport-agnostic. It doesn't depend on mist or wisp —
+//// those are your backend dependencies, and you can just as easily switch
+//// to using a Node server if you so wish (although at this point just use
+//// the TypeScript with fp-ts to prevent having to deal with Gleam/JS ffi).
+////
+//// Use [`server.connect`](#connect), [`server.disconnect`](#disconnect), and
+//// [`server.incoming`](#incoming) to wire the server into your WebSocket or
+//// HTTP handlers.
 ////
 //// Note: within this module, "message" often refers to internal events, not
 //// your user-defined message type for model updates.
@@ -59,7 +62,8 @@
 import gleam/dict.{type Dict}
 import gleam/option.{type Option}
 import gleam/result
-import lily.{type Store}
+import lily/logging
+import lily/store.{type Store}
 import lily/transport.{type Serialiser}
 
 @target(erlang)
@@ -81,13 +85,31 @@ pub opaque type Server(model, message) {
 // PUBLIC FUNCTIONS
 // =============================================================================
 
+/// Install a hook that logs every incoming message using
+/// [`logging.auto_log`](./logging.html#auto_log). Equivalent to:
+///
+/// ```gleam
+/// server.on_message(srv, fn(msg, _model, _client_id) {
+///   logging.auto_log(level, msg)
+/// })
+/// ```
+///
+/// Returns the server so it can be chained.
+pub fn auto_log_messages(
+  server: Server(model, message),
+  level level: logging.Level,
+) -> Server(model, message) {
+  on_message(server, fn(msg, _model, _client_id) {
+    logging.auto_log(level, msg)
+  })
+  server
+}
+
 /// Register a client connection with the server. The `send` callback is how
 /// the server pushes messages back to this specific client.
 ///
 /// On Erlang, if you have a `Subject(BitArray)` from mist's WebSocket handler,
 /// wrap it: `send: process.send(outgoing_subject, _)`.
-///
-/// ## Example
 ///
 /// ```gleam
 /// // Erlang with mist WebSocket
@@ -112,6 +134,18 @@ pub fn disconnect(
   client_id client_id: String,
 ) -> Nil {
   platform_disconnect(server.handle, client_id)
+}
+
+/// Generate a cryptographically random client identifier (16 bytes, hex-encoded
+/// to a 32-character string). Use this to create unique client IDs when wiring
+/// up WebSocket connections.
+///
+/// ```gleam
+/// let client_id = server.generate_client_id()
+/// server.connect(srv, client_id: client_id, send: fn(bytes) { ... })
+/// ```
+pub fn generate_client_id() -> String {
+  ffi_generate_client_id()
 }
 
 /// Process an incoming message from a client. The bytes should be a
@@ -154,10 +188,10 @@ pub fn on_message(
 /// ## Example
 ///
 /// ```gleam
-/// import lily
 /// import lily/server
+/// import lily/store
 ///
-/// let app_store = lily.new(initial_model, with: update)
+/// let app_store = store.new(initial_model, with: update)
 /// let assert Ok(srv) = server.start(store: app_store, serialiser: my_serialiser)
 /// ```
 pub fn start(
@@ -252,7 +286,7 @@ fn handle_client_message_logic(
   client_id: String,
   payload: message,
 ) -> ServerState(model, message) {
-  let updated_store = lily.apply(state.store, message: payload)
+  let updated_store = store.apply(state.store, message: payload)
   let new_sequence = state.sequence + 1
 
   let server_message = transport.ServerMessage(sequence: new_sequence, payload:)
@@ -531,4 +565,16 @@ fn ffi_set_hook(
   _hook: fn(message, model, String) -> Nil,
 ) -> Nil {
   Nil
+}
+
+@target(erlang)
+@external(erlang, "lily_server_ffi", "generate_client_id")
+fn ffi_generate_client_id() -> String {
+  ""
+}
+
+@target(javascript)
+@external(javascript, "./server.ffi.mjs", "generateClientId")
+fn ffi_generate_client_id() -> String {
+  ""
 }

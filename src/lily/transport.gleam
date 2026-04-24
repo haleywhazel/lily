@@ -1,23 +1,27 @@
-//// The transport module handles client-server communication, serialisation,
-//// and the two built-in transport implementations. It works on both Erlang
-//// and JavaScript. The WebSocket and HTTP/SSE transports are JavaScript-only
-//// and use `@target(javascript)`.
+//// We need the [`Store`](./store.html#Store) that sits between client and
+//// server to communicate somehow, and this transport module provides that.
+//// It works on both Erlang and JS targets since both the client and server
+//// need it.
+////
+//// The WebSocket and HTTP/SSE transports are JS-only for client to receive
+//// info (on the server-side, a dedicated webserver should be used instead).
 ////
 //// This module provides:
 ////
-//// - **Wire format** — [`Protocol`](#Protocol) envelope types for
+//// - Wire format: [`Protocol`](#Protocol) envelope types for
 ////   client-server messages
-//// - **Serialisation** — [`Serialiser`](#Serialiser) with automatic
+//// - Serialisation: [`Serialiser`](#Serialiser) with automatic
 ////   ([`automatic`](#automatic)) and custom ([`custom_json`](#custom_json),
 ////   [`custom_binary`](#custom_binary)) options
-//// - **WebSocket transport** — [`websocket`](#websocket) config builder and
+//// - WebSocket transport: [`websocket`](#websocket) config builder and
 ////   [`websocket_connect`](#websocket_connect) connector with automatic
 ////   reconnection and offline queueing
-//// - **HTTP/SSE transport** — [`http`](#http) config builder and
+//// - HTTP/SSE transport: [`http`](#http) config builder and
 ////   [`http_connect`](#http_connect) connector using EventSource + POST
 ////
 //// For most apps, use [`transport.automatic`](#automatic) for
-//// zero-configuration serialisation, then pick a transport:
+//// zero-configuration serialisation, then pick a transport (WebSockets work
+//// for most, although use HTTP when corporate firewalls might block them):
 ////
 //// ```gleam
 //// import lily/client
@@ -48,8 +52,8 @@
 //// ```
 ////
 //// `automatic()` defaults to JSON so frames are human-readable in DevTools.
-//// Opt into MessagePack for production with
-//// [`transport.use_message_pack`](#use_message_pack):
+//// You can use MessagePack for production (for smaller transport packages)
+//// with [`transport.use_message_pack`](#use_message_pack):
 ////
 //// ```gleam
 //// transport.automatic() |> transport.use_message_pack()
@@ -58,7 +62,9 @@
 //// The automatic serialiser uses positional encoding:
 //// `{"_":"ConstructorName","0":field0,"1":field1,...}`. On JavaScript,
 //// constructors must be registered so the decoder can reconstruct them.
-//// The recommended pattern is a small FFI shim in your shared types module
+////
+//// The way this module is currently designed (and I have gone back-and-forth
+//// on this a lot) is to use a small FFI shim in your shared types module
 //// that calls `registerModule` from `transport.ffi.mjs`:
 ////
 //// ```javascript
@@ -98,7 +104,7 @@
 //// }
 //// ```
 ////
-//// For cases where automatic serialisation isn't suitable, use
+//// For cases where automatic serialisation isn't suitable, you can use
 //// [`transport.custom_json`](#custom_json) or
 //// [`transport.custom_binary`](#custom_binary) for explicit encode/decode.
 ////
@@ -439,8 +445,9 @@ pub fn reconnect_base_milliseconds(
 @target(javascript)
 /// Set the jitter ratio applied to each WebSocket reconnection delay. A ratio
 /// of `0.25` produces ±25% randomisation, which spreads reconnects across
-/// clients after a mass disconnect (thundering-herd mitigation). Must be
-/// between 0.0 (no jitter) and 1.0 (full randomisation). Default is 0.25.
+/// clients after a mass disconnect. Must be between 0.0 (no jitter) and 1.0
+/// (full randomisation). Default is 0.25. I've also added caching of store
+/// for mass re-syncs to help with this to prevent unnecessary re-serialisation.
 pub fn reconnect_jitter_ratio(
   config: WebSocketConfig,
   ratio: Float,
@@ -481,8 +488,6 @@ pub fn send(transport: Transport, bytes: BitArray) -> Nil {
 /// [`automatic`](#automatic) serialisers; no-op on `custom_json` or
 /// `custom_binary`.
 ///
-/// ## Example
-///
 /// ```gleam
 /// // Dev: readable JSON in DevTools
 /// transport.automatic() |> transport.use_json()
@@ -511,8 +516,6 @@ pub fn use_message_pack(
 /// uses `wss:` for HTTPS pages and `ws:` for HTTP. The `path` argument
 /// specifies the WebSocket endpoint path.
 ///
-/// ## Example
-///
 /// ```gleam
 /// // On https://example.com:3000/app
 /// transport.url_from_current_location(path: "/ws")
@@ -539,8 +542,6 @@ pub fn websocket(url url: String) -> WebSocketConfig {
 @target(javascript)
 /// Returns a connector function that establishes a WebSocket connection. Pass
 /// the result to `client.connect`.
-///
-/// ## Example
 ///
 /// ```gleam
 /// client.connect(runtime,

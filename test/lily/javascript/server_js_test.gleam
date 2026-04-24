@@ -6,11 +6,15 @@ import gleam/bit_array
 @target(javascript)
 import gleam/list
 @target(javascript)
+import gleam/string
+@target(javascript)
 import gleeunit/should
 @target(javascript)
-import lily
+import lily/logging
 @target(javascript)
 import lily/server
+@target(javascript)
+import lily/store
 @target(javascript)
 import lily/test_fixtures.{type Message, type Model, Increment, SetName}
 @target(javascript)
@@ -30,7 +34,7 @@ fn ser() {
 @target(javascript)
 fn new_server() -> server.Server(Model, Message) {
   let app_store =
-    lily.new(test_fixtures.initial_model(), with: test_fixtures.update)
+    store.new(test_fixtures.initial_model(), with: test_fixtures.update)
   let assert Ok(srv) = server.start(store: app_store, serialiser: ser())
   srv
 }
@@ -70,7 +74,7 @@ fn encode_resync(seq: Int) -> BitArray {
 @target(javascript)
 pub fn js_server_start_returns_ok_test() {
   let app_store =
-    lily.new(test_fixtures.initial_model(), with: test_fixtures.update)
+    store.new(test_fixtures.initial_model(), with: test_fixtures.update)
   server.start(store: app_store, serialiser: ser())
   |> should.be_ok
 }
@@ -296,4 +300,36 @@ pub fn js_server_sequence_starts_at_zero_test() {
     }
     [] -> should.fail()
   }
+}
+
+// =============================================================================
+// GENERATE CLIENT ID
+// =============================================================================
+
+@target(javascript)
+pub fn js_server_generate_client_id_is_unique_test() {
+  server.generate_client_id()
+  |> should.not_equal(server.generate_client_id())
+}
+
+@target(javascript)
+pub fn js_server_generate_client_id_returns_32_char_hex_test() {
+  let id = server.generate_client_id()
+  string.length(id)
+  |> should.equal(32)
+}
+
+// =============================================================================
+// AUTO LOG MESSAGES
+// =============================================================================
+
+@target(javascript)
+pub fn js_server_auto_log_messages_processes_normally_test() {
+  let srv = new_server()
+  let _srv2 = server.auto_log_messages(srv, level: logging.Info)
+  let get_c1 = connect_client(srv, "c1")
+  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
+  get_c1()
+  |> list.length
+  |> should.equal(1)
 }

@@ -1,57 +1,63 @@
-//// The [`Runtime`](#Runtime) is the core of every Lily application running
-//// in the browser. It manages the update loop, component subscriptions, and
-//// optional server synchronisation.
+//// The client within Lily manages the [`Runtime`](#Runtime) within Lily,
+//// managing the update loop, component subscriptions, local persistence,
+//// and server synchronisation. When connected, it also monitors online/
+//// offline status and queues messages in localStorage while disconnected. The
+//// client is meant to be used on the browser-side, so the Erlang compilation
+//// target is not supported by this module.
 ////
-//// The runtime routes messages from events and the server to your update
-//// function, notifies subscribed components when the model changes, and
-//// optionally connects to a server to sync state across clients (see
-//// [`client.connect`](#connect)). When connected, it monitors online/
-//// offline status and queues messages in localStorage while disconnected.
+//// The typical frontend setup would look like:
 ////
-//// The typical flow: create a store with [`lily.new`](../lily.html#new),
-//// start the runtime with [`client.start`](#start), mount your UI using
-//// [`component.mount`](./component.html#mount), attach event handlers with
-//// [`event.on_click`](./event.html#on_click) and friends, then optionally
-//// connect to a server with [`client.connect`](#connect)
+//// 1. Creating a store with [`store.new`](./store.html#new)
+//// 2. Starting the runtime with [`client.start`](#start)
+//// 3. Mounting your components using
+////    [`component.mount`](./component.html#mount)
+//// 4. Attaching event handlers
+//// 5. Connecting to a server with [`client.connect`](#connect)
 ////
 //// ```gleam
-//// import lily
 //// import lily/client
 //// import lily/component
 //// import lily/event
+//// import lily/store
 //// import lily/transport
 ////
 //// pub fn main() {
 ////   // 1. Create your store
-////   let app_store = lily.new(Model(count: 0), with: update)
+////   let app_store = store.new(Model(count: 0), with: update)
 ////
 ////   // 2. Start the runtime
 ////   let runtime = client.start(app_store)
 ////
-////   // Mount UI, attach events, and optionally connect to server
-////   runtime
+////   // 3. Mount UI
 ////   |> component.mount(selector: "#app", to_html: element.to_string, view: app)
+////   // 4. Attach events
 ////   |> event.on_click(selector: "#app", decoder: parse_msg)
+////
+////   // 5. Connect to server
 ////   |> client.connect(
 ////     with: transport.websocket(url: "ws://localhost:8080/ws")
 ////       |> transport.websocket_connect,
-////     serialiser: my_serialiser,
+////     serialiser: my_serialiser, // see transport module for more information
 ////   )
 //// }
 //// ```
 ////
 //// Each [`Runtime`](#Runtime) is completely isolated, allowing multiple
-//// independent Lily apps to coexist on the same page. However, we recommend
-//// using one runtime per page to avoid splitting your application state.
-//// If you need truly independent widget-style components, a different
-//// framework may be more appropriate.
+//// independent Lily runtimes to coexist on the same page. However, we
+//// recommend using one runtime per page to avoid splitting your application
+//// state (which can become hard to manage à la badly designed React apps
+//// with states everywhere). If you need truly stateful, independent
+//// widget-style components, a different framework may be more appropriate.
 ////
-//// The runtime is pure JavaScript and works only on the
-//// `@target(javascript)` platform. It uses a message queue to batch updates
-//// and prevent race conditions, ensuring your update function is called
-//// sequentially even when messages arrive from multiple sources (user
-//// events, server messages, timers, etc.).
+//// The client runtime uses a message queue to batch updates and prevent race
+//// conditions, ensuring your update function is called sequentially even when
+//// messages arrive from multiple sources (user events, server messages,
+//// timers, etc.).
 ////
+
+// A good amount of the internal workings of the client lives within the .mjs
+// file, so feel free to dig around there since the Gleam code is mostly just
+// wrappers for a public API that hides all the messy JS away.
 
 // =============================================================================
 // IMPORTS
@@ -68,7 +74,7 @@ import gleam/list
 @target(javascript)
 import gleam/result
 @target(javascript)
-import lily.{type Store}
+import lily/store.{type Store}
 @target(javascript)
 import lily/transport
 
@@ -77,10 +83,14 @@ import lily/transport
 // =============================================================================
 
 @target(javascript)
-/// Complete session persistence configuration. Build using
-/// [`client.session_persistence`](#session_persistence) and add fields with
-/// [`client.session_field`](#session_field). Attach to the runtime with
-/// [`client.attach_session`](#attach_session).
+/// Complete session persistence configuration. It's kept opaque so that users
+/// avoid having to mess with the fields themselves which can look quite messy.
+///
+/// To interact with the session persistence:
+///
+/// - Build using [`client.session_persistence`](#session_persistence)
+/// - Add fields with [`client.session_field`](#session_field)
+/// - Attach to the runtime  with [`client.attach_session`](#attach_session)
 pub opaque type Persistence(session) {
   Persistence(fields: List(Field(session)))
 }
@@ -97,14 +107,12 @@ pub opaque type Runtime(model, message) {
 // =============================================================================
 
 @target(javascript)
-/// Attach session persistence to the runtime. Reads `localStorage` on start
-/// to hydrate the initial model, then writes changes to `localStorage` after
-/// each update. The `get` and `set` functions extract and inject the session
-/// slice from the model.
+/// Attach session persistence to the runtime to allow for data to persist
+/// across page navigation etc.. This allows for model hydration via local
+/// storage, and also allows for local state to be updated by the model through
+/// the provided `get` and `set` functions.
 ///
-/// Call this after `client.start`, or in the pipe chain after `client.start`.
-///
-/// ## Example
+/// Pipe this in the chain after `client.start`.
 ///
 /// ```gleam
 /// let persistence =
@@ -140,14 +148,14 @@ pub fn attach_session(
 }
 
 @target(javascript)
-/// Clear all session data from `localStorage`. Removes all keys with the
-/// `lily_session_` prefix.
+/// Clear all Lily related session data from `localStorage` by removing all
+/// keys with the `lily_session_` prefix.
 ///
 /// ## Example
 ///
 /// ```gleam
-/// fn update(model, msg) {
-///   case msg {
+/// fn update(model, message) {
+///   case message {
 ///     Logout -> {
 ///       client.clear_session()
 ///       model
@@ -161,11 +169,13 @@ pub fn clear_session() -> Nil {
 }
 
 @target(javascript)
-/// Connect the runtime to a server using the provided transport. The
-/// connector function is obtained from a transport implementation (e.g.,
-/// `websocket.connect(config)` or `http.connect(config)`).
+/// Connect the runtime to a server using the provided transport method. The
+/// connector function is obtained from a transport implementation, e.g.
+/// [`websocket_connect(config)`](./transport.html#websocket_connect) or
+/// [`http_connect(config)`](./transport.html#http_connect).
 ///
-/// ## Example
+/// This also creates all the handlers for handling incoming messages, and
+/// changes to connection status.
 ///
 /// ```gleam
 /// import lily/transport
@@ -223,6 +233,10 @@ pub fn connect(
 /// This should be called before [`client.connect`](#connect) to ensure the
 /// initial connection state is captured.
 ///
+/// Also note that while this call is optional, connection status is tracked
+/// regardless internally, this mainly allows the status to be reflected within
+/// the model.
+///
 /// ## Example
 ///
 /// ```gleam
@@ -249,10 +263,10 @@ pub fn connection_status(
 
 @target(javascript)
 /// Get a dispatch function that sends messages into the runtime's update
-/// loop. Use this for side effects that need to feed results back as messages
-/// (fetch callbacks, timers, external listeners).
-///
-/// ## Example
+/// loop. Since the [`Store`](./store.html#Store), this is needed to handle
+/// side-effects (like fetch callbacks or timers). After generating the dispatch
+/// function, you are able to use this to send updates whenever some side-effect
+/// is called to update the store again.
 ///
 /// ```gleam
 /// let runtime = client.start(store)
@@ -274,9 +288,9 @@ pub fn dispatch(runtime: Runtime(model, message)) -> fn(message) -> Nil {
 /// ## Example
 ///
 /// ```gleam
-/// let dispatch = client.dispatch(runtime)
-///
-/// client.on_message(runtime, fn(message, model) {
+/// runtime
+/// |> client.connect(with: connector, serialiser: my_serialiser)
+/// |> client.on_message(fn(message, model) {
 ///   case message {
 ///     FetchUsers -> fetch("/api/users", fn(users) {
 ///       dispatch(UsersLoaded(users))
@@ -288,9 +302,10 @@ pub fn dispatch(runtime: Runtime(model, message)) -> fn(message) -> Nil {
 pub fn on_message(
   runtime: Runtime(model, message),
   hook: fn(message, model) -> Nil,
-) -> Nil {
+) -> Runtime(model, message) {
   let Runtime(handle) = runtime
   set_user_message_hook(handle, hook)
+  runtime
 }
 
 @target(javascript)
@@ -321,7 +336,7 @@ pub fn session_field(
   decoder decoder: decode.Decoder(a),
 ) -> Persistence(session) {
   let Persistence(fields) = persistence
-  let f =
+  let field =
     Field(
       key: key,
       get: fn(session) { encode(get(session)) },
@@ -331,18 +346,14 @@ pub fn session_field(
         |> result.replace_error(Nil)
       },
     )
-  Persistence(fields: [f, ..fields])
+  Persistence(fields: [field, ..fields])
 }
 
 @target(javascript)
-/// Create an empty session persistence configuration. Add fields using
-/// [`client.session_field`](#session_field).
+/// Create an empty session persistence configuration, ready to be used by
+/// adding fields using [`client.session_field`](#session_field).
 ///
-/// ## Example
-///
-/// ```gleam
-/// let persistence = client.session_persistence()
-/// ```
+/// There's an example above in [`client.attach_session`](#attach_session)
 pub fn session_persistence() -> Persistence(session) {
   Persistence(fields: [])
 }
@@ -350,13 +361,11 @@ pub fn session_persistence() -> Persistence(session) {
 @target(javascript)
 /// Start the client runtime. Returns a Runtime handle that should be used
 /// with [`component.mount`](./component.html#mount), event handlers, and
-/// optionally [`client.connect`](#connect).
-///
-/// ## Example
+/// [`client.connect`](#connect).
 ///
 /// ```gleam
 /// let runtime =
-///   lily.new(Model(count: 0), with: update)
+///   store.new(Model(count: 0), with: update)
 ///   |> client.start
 ///
 /// runtime
@@ -364,7 +373,7 @@ pub fn session_persistence() -> Persistence(session) {
 /// |> event.on_click(selector: "#app", decoder: parse_msg)
 /// ```
 pub fn start(store: Store(model, message)) -> Runtime(model, message) {
-  let handle = create_runtime(store, lily.apply)
+  let handle = create_runtime(store, store.apply)
   set_store(handle, store)
   initial_notify(handle)
   Runtime(handle)
@@ -373,18 +382,6 @@ pub fn start(store: Store(model, message)) -> Runtime(model, message) {
 // =============================================================================
 // INTERNAL FUNCTIONS
 // =============================================================================
-
-@target(javascript)
-/// Internal wrapper for the clear component cache FFI
-/// (used in component.gleam)
-@internal
-pub fn clear_component_cache(
-  runtime: Runtime(model, message),
-  selector: String,
-) -> Nil {
-  let Runtime(runtime_handle) = runtime
-  ffi_clear_component_cache(runtime_handle, selector)
-}
 
 @target(javascript)
 /// Get the current model from the runtime. Used internally by the session
@@ -428,6 +425,7 @@ pub fn set_current_model(runtime: Runtime(model, message), model: model) -> Nil 
 // =============================================================================
 
 @target(javascript)
+/// Basic field for local persistence
 type Field(session) {
   Field(
     key: String,
@@ -438,13 +436,13 @@ type Field(session) {
 
 @target(javascript)
 /// JavaScript doesn't have type parameters, so we can't pass Runtime directly.
-/// The public `Runtime(model, message)` type wraps this for type safety:
+/// The public `Runtime(model, message)` type wraps this.
 ///
-/// - `Runtime(model, message)`: Public opaque type users interact with,
-///   parameterized for compile-time type safety
+/// Differences between the two types:
+///
+/// - `Runtime(model, message)`: Public opaque type users interact with
 /// - `RuntimeHandle`: Internal concrete type that matches the JavaScript
-///   object returned by `createRuntime()`. Marked `@internal` for use by
-///   other Lily modules (component) that need FFI access.
+///   object returned by `createRuntime()`. `@internal` for use by other Lily /////   modules (component) that need FFI access.
 @internal
 pub type RuntimeHandle
 
@@ -453,6 +451,7 @@ pub type RuntimeHandle
 // =============================================================================
 
 @target(javascript)
+/// Hydrates the model from local persistence
 fn hydrate_session(
   persistence: Persistence(session),
   initial: session,
@@ -467,6 +466,9 @@ fn hydrate_session(
 }
 
 @target(javascript)
+/// Prefix for session storage; hopefully doesn't clash with most fields. Still
+/// debating whether or not this should be configurable or if that would be
+/// overkill for a public API.
 fn session_storage_prefix() -> String {
   "lily_session_"
 }
@@ -543,13 +545,6 @@ fn create_runtime(
 /// Dispatch the current model to listeners
 @external(javascript, "./client.ffi.mjs", "dispatchModel")
 fn dispatch_model(_handle: RuntimeHandle, _model: model) -> Nil {
-  Nil
-}
-
-@target(javascript)
-/// Clear the component cache
-@external(javascript, "./client.ffi.mjs", "clearComponentCache")
-fn ffi_clear_component_cache(_handle: RuntimeHandle, _selector: String) -> Nil {
   Nil
 }
 

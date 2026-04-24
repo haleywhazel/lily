@@ -8,9 +8,9 @@ import gleam/dynamic
 @target(javascript)
 import gleeunit/should
 @target(javascript)
-import lily
-@target(javascript)
 import lily/client
+@target(javascript)
+import lily/store
 @target(javascript)
 import lily/test_fixtures.{type Message, type Model}
 @target(javascript)
@@ -26,7 +26,7 @@ import lily/transport
 
 @target(javascript)
 fn new_runtime() -> client.Runtime(Model, Message) {
-  lily.new(test_fixtures.initial_model(), with: test_fixtures.update)
+  store.new(test_fixtures.initial_model(), with: test_fixtures.update)
   |> client.start
 }
 

@@ -27,8 +27,10 @@ globalThis.localStorage = dom.window.localStorage;
 globalThis.requestAnimationFrame = (cb) => { cb(0); };
 globalThis.location = dom.window.location;
 globalThis.Event = dom.window.Event;
-globalThis.MouseEvent = dom.window.MouseEvent;
+globalThis.FormData = dom.window.FormData;
+globalThis.HTMLFormElement = dom.window.HTMLFormElement;
 globalThis.KeyboardEvent = dom.window.KeyboardEvent;
+globalThis.MouseEvent = dom.window.MouseEvent;
 globalThis.WheelEvent = dom.window.WheelEvent;
 
 // =============================================================================

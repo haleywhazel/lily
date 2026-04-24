@@ -583,6 +583,51 @@ export function transportSend(handle, bytes) {
 // PRIVATE FUNCTIONS
 // =============================================================================
 
+/** Inner recursive JSON decode — returns raw value or throws on unknown constructor. */
+function autoDecodeInner(json) {
+  // Primitives
+  if (json === null) return undefined; // Gleam's Nil
+  if (typeof json === "boolean") return json;
+  if (typeof json === "string") return json;
+  if (typeof json === "number") return json;
+
+  // Array → Gleam List
+  if (Array.isArray(json)) {
+    // Build Gleam list from right to left using proper NonEmpty/Empty instances
+    let result = new Empty();
+    for (let i = json.length - 1; i >= 0; i--) {
+      const decodedItem = autoDecodeInner(json[i]);
+      result = new NonEmpty(decodedItem, result);
+    }
+    return result;
+  }
+
+  // Custom type (object with "_" tag)
+  if (json && typeof json === "object" && "_" in json) {
+    const tag = json._;
+    const ctor = constructorRegistry.get(tag);
+
+    if (!ctor) {
+      throw new globalThis.Error(
+        `Unknown constructor: ${tag}. Did you forget to call register_types()?`,
+      );
+    }
+
+    // Collect positional fields
+    const fields = [];
+    let fieldIndex = 0;
+    while (String(fieldIndex) in json) {
+      fields.push(autoDecodeInner(json[String(fieldIndex)]));
+      fieldIndex++;
+    }
+
+    return new ctor(...fields);
+  }
+
+  // Fallback
+  return json;
+}
+
 /** Decode a base64 string back to a Uint8Array. */
 function base64ToFrame(b64) {
   const binary = globalThis.atob(b64);
@@ -829,49 +874,4 @@ function messagePackEncodeValue(value, buf) {
       messagePackEncodeValue(value[key], buf);
     }
   }
-}
-
-/** Inner recursive JSON decode — returns raw value or throws on unknown constructor. */
-function autoDecodeInner(json) {
-  // Primitives
-  if (json === null) return undefined; // Gleam's Nil
-  if (typeof json === "boolean") return json;
-  if (typeof json === "string") return json;
-  if (typeof json === "number") return json;
-
-  // Array → Gleam List
-  if (Array.isArray(json)) {
-    // Build Gleam list from right to left using proper NonEmpty/Empty instances
-    let result = new Empty();
-    for (let i = json.length - 1; i >= 0; i--) {
-      const decodedItem = autoDecodeInner(json[i]);
-      result = new NonEmpty(decodedItem, result);
-    }
-    return result;
-  }
-
-  // Custom type (object with "_" tag)
-  if (json && typeof json === "object" && "_" in json) {
-    const tag = json._;
-    const ctor = constructorRegistry.get(tag);
-
-    if (!ctor) {
-      throw new globalThis.Error(
-        `Unknown constructor: ${tag}. Did you forget to call register_types()?`,
-      );
-    }
-
-    // Collect positional fields
-    const fields = [];
-    let fieldIndex = 0;
-    while (String(fieldIndex) in json) {
-      fields.push(autoDecodeInner(json[String(fieldIndex)]));
-      fieldIndex++;
-    }
-
-    return new ctor(...fields);
-  }
-
-  // Fallback
-  return json;
 }

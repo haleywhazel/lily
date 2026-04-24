@@ -89,10 +89,11 @@ function createEachHandler(selector, slice, getKey, render, toHtml, compare) {
   let cachedContainer = null;
 
   return function (model) {
-    // Re-query only if detached — handles re-mounts, free in the normal case
+    // Re-query only if detached (handles re-mounts, not run normally)
     if (!cachedContainer || !cachedContainer.isConnected) {
       cachedContainer = document.querySelector(selector);
     }
+
     const container = cachedContainer;
     if (!container) return;
 
@@ -108,7 +109,7 @@ function createEachHandler(selector, slice, getKey, render, toHtml, compare) {
       }
     }
 
-    // Sync children — create, update, and reorder in one pass
+    // Sync children (create, update, and reorder in one pass)
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
       const keyStr = getKey(item);
@@ -153,7 +154,7 @@ function createEachLiveHandler(
   let cachedContainer = null;
 
   return function (model) {
-    // Re-query only if detached — handles re-mounts, free in the normal case
+    // Re-query only if detached (handles re-mounts, not run normally)
     if (!cachedContainer || !cachedContainer.isConnected) {
       cachedContainer = document.querySelector(selector);
     }
@@ -172,7 +173,7 @@ function createEachLiveHandler(
       }
     }
 
-    // Sync children — create, update, and reorder in one pass
+    // Sync children (create, update, and reorder in one pass)
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
       const keyStr = getKey(item);
@@ -220,7 +221,9 @@ function renderComponent(
   const typeName = component.constructor.name;
 
   // Constructors are opaque in the public API, so instanceof doesn't work —
-  // string matching on the constructor name is the next best thing.
+  // string matching on the constructor name is the next best thing. Maybe this
+  // should be changed but it works for now, we're prioritising the cleanliness
+  // of the public API.
   switch (typeName) {
     case "Static":
       return renderStatic(component, toHtml);
@@ -412,7 +415,7 @@ function renderLive(
     (data) => {
       const patches = apply(data).toArray();
 
-      // Re-query only if detached — handles re-mounts, free in the normal case
+      // Re-query only if detached (handles re-mounts, not run normally)
       if (!cachedElement || !cachedElement.isConnected) {
         cachedElement = document.querySelector(selector);
       }
@@ -462,7 +465,7 @@ function renderRequireConnection(
     connected,
     runtime.referenceEqual,
     (isConnected) => {
-      // Re-query only if detached — handles re-mounts, free in the normal case
+      // Re-query only if detached (handles re-mounts, not run normally)
       if (!cachedElement || !cachedElement.isConnected) {
         cachedElement = document.querySelector(selector);
       }
@@ -512,7 +515,7 @@ function renderSimple(
     compareStrategy,
     (data) => {
       const html = toHtml(render(data));
-      // Re-query only if detached — handles re-mounts, free in the normal case
+      // Re-query only if detached (handles re-mounts, not run normally)
       if (!cachedElement || !cachedElement.isConnected) {
         cachedElement = document.querySelector(selector);
       }

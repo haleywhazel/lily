@@ -2,13 +2,17 @@
 // All functions are @target(javascript) — skipped on Erlang.
 
 @target(javascript)
-import gleeunit/should
+import gleam/list
 @target(javascript)
-import lily
+import gleam/option
+@target(javascript)
+import gleeunit/should
 @target(javascript)
 import lily/client
 @target(javascript)
 import lily/event
+@target(javascript)
+import lily/store
 @target(javascript)
 import lily/test_dom
 @target(javascript)
@@ -24,7 +28,7 @@ import lily/test_setup
 
 @target(javascript)
 fn new_runtime() -> client.Runtime(Model, Message) {
-  let s = lily.new(test_fixtures.initial_model(), with: test_fixtures.update)
+  let s = store.new(test_fixtures.initial_model(), with: test_fixtures.update)
   client.start(s)
 }
 
@@ -238,4 +242,189 @@ pub fn event_on_wheel_extracts_deltas_test() {
   |> should.equal(5.0)
   test_ref.get(dy_ref)
   |> should.equal(10.0)
+}
+
+// =============================================================================
+// FORM SUBMIT
+// =============================================================================
+
+@target(javascript)
+pub fn event_on_form_submit_passes_fields_test() {
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  test_dom.set_inner_html(
+    "#app",
+    "<form id=\"sub-form\"><input name=\"text\" id=\"sub-input\" /></form>",
+  )
+  let captured = test_ref.new("")
+  let _r =
+    event.on_form_submit(runtime, selector: "#sub-form", handler: fn(fields) {
+      case list.key_find(fields, "text") {
+        Ok(v) -> {
+          test_ref.set(captured, v)
+          Ok(Noop)
+        }
+        Error(_) -> Error(Nil)
+      }
+    })
+  test_dom.input_event("#sub-input", "hello")
+  test_dom.simple_event("#sub-form", "submit")
+  test_ref.get(captured)
+  |> should.equal("hello")
+}
+
+// =============================================================================
+// FORM CHANGE
+// =============================================================================
+
+@target(javascript)
+pub fn event_on_form_change_fires_on_input_test() {
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  test_dom.set_inner_html(
+    "#app",
+    "<form id=\"chg-form\"><input name=\"q\" id=\"chg-q\" /></form>",
+  )
+  let fired = test_ref.new(False)
+  let _r =
+    event.on_form_change(runtime, selector: "#chg-form", handler: fn(_fields) {
+      test_ref.set(fired, True)
+      Ok(Noop)
+    })
+  test_dom.input_event("#chg-q", "abc")
+  test_ref.get(fired)
+  |> should.be_true
+}
+
+@target(javascript)
+pub fn event_on_form_change_passes_fields_test() {
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  test_dom.set_inner_html(
+    "#app",
+    "<form id=\"chg2-form\"><input name=\"username\" id=\"chg2-in\" /></form>",
+  )
+  let captured = test_ref.new("")
+  let _r =
+    event.on_form_change(runtime, selector: "#chg2-form", handler: fn(fields) {
+      case list.key_find(fields, "username") {
+        Ok(v) -> {
+          test_ref.set(captured, v)
+          Ok(Noop)
+        }
+        Error(_) -> Error(Nil)
+      }
+    })
+  test_dom.input_event("#chg2-in", "alice")
+  test_ref.get(captured)
+  |> should.equal("alice")
+}
+
+// =============================================================================
+// ON-CLICK-WITH OPTIONS
+// =============================================================================
+
+@target(javascript)
+pub fn event_on_click_with_once_fires_only_once_test() {
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  test_dom.set_inner_html("#app", "<button data-msg=\"increment\">+</button>")
+  let _r =
+    event.on_click_with(
+      runtime,
+      selector: "#app",
+      options: event.EventOptions(..event.default_options(), once: True),
+      decoder: fn(name) {
+        case name {
+          "increment" -> Ok(Increment)
+          _ -> Error(Nil)
+        }
+      },
+    )
+  test_dom.click("[data-msg=\"increment\"]")
+  test_dom.click("[data-msg=\"increment\"]")
+  client.get_current_model(runtime).count
+  |> should.equal(1)
+}
+
+@target(javascript)
+pub fn event_on_click_with_stop_propagation_blocks_parent_test() {
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  test_dom.set_inner_html(
+    "#app",
+    "<div id=\"sp-outer\"><div id=\"sp-inner\"><button data-msg=\"increment\">+</button></div></div>",
+  )
+  let _r1 =
+    event.on_click_with(
+      runtime,
+      selector: "#sp-inner",
+      options: event.EventOptions(
+        ..event.default_options(),
+        stop_propagation: True,
+      ),
+      decoder: fn(name) {
+        case name {
+          "increment" -> Ok(Increment)
+          _ -> Error(Nil)
+        }
+      },
+    )
+  let _r2 =
+    event.on_click(runtime, selector: "#sp-outer", decoder: fn(name) {
+      case name {
+        "increment" -> Ok(Increment)
+        _ -> Error(Nil)
+      }
+    })
+  test_dom.click("[data-msg=\"increment\"]")
+  client.get_current_model(runtime).count
+  |> should.equal(1)
+}
+
+// =============================================================================
+// ON-INPUT-WITH OPTIONS
+// =============================================================================
+
+@target(javascript)
+pub fn event_on_input_with_no_options_fires_normally_test() {
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  test_dom.set_inner_html("#app", "<input id=\"in-with\" />")
+  let captured = test_ref.new("")
+  let _r =
+    event.on_input_with(
+      runtime,
+      selector: "#in-with",
+      options: event.default_options(),
+      handler: fn(value) {
+        test_ref.set(captured, value)
+        SetName(value)
+      },
+    )
+  test_dom.input_event("#in-with", "hello")
+  test_ref.get(captured)
+  |> should.equal("hello")
+}
+
+@target(javascript)
+pub fn event_on_input_with_throttle_limits_rate_test() {
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  test_dom.set_inner_html("#app", "<input id=\"throttle-in\" />")
+  let _r =
+    event.on_input_with(
+      runtime,
+      selector: "#throttle-in",
+      options: event.EventOptions(
+        ..event.default_options(),
+        throttle_ms: option.Some(10_000),
+      ),
+      handler: fn(_value) { Increment },
+    )
+  test_dom.input_event("#throttle-in", "a")
+  test_dom.input_event("#throttle-in", "b")
+  test_dom.input_event("#throttle-in", "c")
+  client.get_current_model(runtime).count
+  |> should.equal(1)
 }

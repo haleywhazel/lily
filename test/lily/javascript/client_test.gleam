@@ -8,9 +8,9 @@ import gleam/string
 @target(javascript)
 import gleeunit/should
 @target(javascript)
-import lily
-@target(javascript)
 import lily/client
+@target(javascript)
+import lily/store
 @target(javascript)
 import lily/test_fixtures.{type Message, type Model, Increment, Noop, SetName}
 @target(javascript)
@@ -26,7 +26,7 @@ import lily/transport
 
 @target(javascript)
 fn new_runtime() -> client.Runtime(Model, Message) {
-  lily.new(test_fixtures.initial_model(), with: test_fixtures.update)
+  store.new(test_fixtures.initial_model(), with: test_fixtures.update)
   |> client.start
 }
 
@@ -38,7 +38,7 @@ fn new_runtime() -> client.Runtime(Model, Message) {
 pub fn client_start_preserves_initial_model_test() {
   test_setup.reset_dom()
   let runtime =
-    lily.new(test_fixtures.initial_model(), with: test_fixtures.update)
+    store.new(test_fixtures.initial_model(), with: test_fixtures.update)
     |> client.start
   let model = client.get_current_model(runtime)
   model.count
@@ -54,7 +54,7 @@ pub fn client_start_returns_runtime_test() {
   test_setup.reset_dom()
   test_setup.reset_mocks()
   let runtime =
-    lily.new(test_fixtures.initial_model(), with: test_fixtures.update)
+    store.new(test_fixtures.initial_model(), with: test_fixtures.update)
     |> client.start
   client.get_current_model(runtime)
   |> should.equal(test_fixtures.initial_model())
@@ -108,6 +108,15 @@ pub fn client_dispatch_updates_model_test() {
 // =============================================================================
 // ON-MESSAGE HOOK
 // =============================================================================
+
+@target(javascript)
+pub fn client_on_message_returns_runtime_test() {
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  let returned = client.on_message(runtime, fn(_msg, _model) { Nil })
+  client.get_current_model(returned).count
+  |> should.equal(0)
+}
 
 @target(javascript)
 pub fn client_on_message_hook_fires_for_local_test() {

@@ -5,23 +5,29 @@
 //// being preferable as components themselves don't hold states.
 ////
 //// Lily provides five component types with different performance
-//// characteristics: [`static`](#static) renders once and never updates,
-//// [`simple`](#simple) uses innerHTML re-renders when the slice changes
-//// (most common), [`live`](#live) uses patch-based updates for 60fps
-//// performance, [`each`](#each) handles keyed lists with innerHTML
-//// rendering, and [`each_live`](#each_live) handles keyed lists with
-//// patch-based rendering.
+//// characteristics
 ////
-//// Components work with any HTML library - Lustre, Nakai, or raw strings.
-//// The `to_html` function provided at [`component.mount`](#mount) converts
+//// 1. [`static`](#static) renders once and never updates
+//// 2. [`simple`](#simple) uses innerHTML re-renders when the slice changes
+//// 3. [`live`](#live) uses patch-based updates to prevent full re-renders
+//// 4. [`each`](#each) handles keyed lists with innerHTML rendering
+//// 5. [`each_live`](#each_live) handles keyed lists with patch-based rendering
+////
+//// Components work with any HTML library - Lustre or raw strings. The
+//// `to_html` function provided at [`component.mount`](#mount) converts
 //// your chosen library's types to strings. We recommend
 //// [Lustre elements](https://hexdocs.pm/lustre/lustre/element/html.html).
 ////
+//// Each component declares a `slice` function that extracts relevant data
+//// from the model. The runtime caches the previous slice and skips rendering
+//// when unchanged (using reference equality by default, structural equality
+//// opt-in via [`component.structural`](#structural)).
+////
 //// ```gleam
-//// import lily
 //// import lily/client
 //// import lily/component
 //// import lily/event
+//// import lily/store
 //// import lustre/attribute
 //// import lustre/element
 //// import lustre/element/html
@@ -41,7 +47,7 @@
 ////
 //// pub fn main() {
 ////   let runtime =
-////     lily.new(Model(count: 0), with: update)
+////     store.new(Model(count: 0), with: update)
 ////     |> client.start
 ////
 ////   runtime
@@ -49,11 +55,6 @@
 ////   |> event.on_click(selector: "#app", decoder: parse_click)
 //// }
 //// ```
-////
-//// Each component declares a `slice` function that extracts relevant data
-//// from the model. The runtime caches the previous slice and skips rendering
-//// when unchanged (using reference equality by default, structural equality
-//// opt-in via [`component.structural`](#structural)).
 ////
 //// All components are JavaScript-only (`@target(javascript)`).
 ////
@@ -187,8 +188,6 @@ pub type Patch {
 /// The `render` function is called for each item and should return HTML (in
 /// whatever type is defined on [`component.mount`](#mount)).
 ///
-/// ## Example
-///
 /// ```gleam
 /// component.each(
 ///   slice: fn(model) { model.counters },
@@ -230,8 +229,6 @@ pub fn each(
 /// The `initial` function renders the initial HTML for each item.
 /// The `patch` function returns patches to apply on updates.
 ///
-/// ## Example
-///
 /// ```gleam
 /// component.each_live(
 ///   slice: fn(model) { model.series },
@@ -265,8 +262,6 @@ pub fn each_live(
 /// Fragments allow you to return multiple components from a single function.
 /// The children are rendered in order and concatenated into the parent's HTML.
 /// This is similar to Lustre's [`element.fragment`][https://hexdocs.pm/lustre/lustre/element.html#fragment].
-///
-/// ## Example
 ///
 /// ```gleam
 /// fn app(_model: Model) -> Component(Model, Message, Element(Message)) {
@@ -327,15 +322,11 @@ pub fn live(
 /// specific DOM element.. It creates a subscription to the store and renders
 /// the entire component tree whenever the model changes.
 ///
-/// ## Parameters
-///
 /// - `store`: The application store
 /// - `selector`: CSS selector for the mount point (e.g., `"#app"`)
 /// - `to_html`: Function to convert `html` type to `String` (e.g.,
 ///   `element.to_string` for Lustre or `fn(html) {html}` for raw HTML strings)
 /// - `view`: Function that takes the model and returns the root component tree
-///
-/// ## Example
 ///
 /// ```gleam
 /// runtime
@@ -347,9 +338,6 @@ pub fn mount(
   to_html to_html: fn(html) -> String,
   view view: fn(model) -> Component(model, message, html),
 ) -> Runtime(model, message) {
-  // Clear any previous mount at this selector
-  client.clear_component_cache(runtime, selector)
-
   // Initial render - this sets up all component subscriptions
   let model = get_model(runtime)
   let tree = view(model)
@@ -368,8 +356,6 @@ pub fn mount(
 /// component out or changing opacity, can be achieved with simple CSS styling.
 ///
 /// Pipe this after creating a component.
-///
-/// ## Example
 ///
 /// ```gleam
 /// component.simple(
@@ -394,8 +380,6 @@ pub fn require_connection(
 /// The `render` function should return HTML (in whatever type is defined on
 /// [`component.mount`](#mount)).
 ///
-/// ## Example
-///
 /// ```gleam
 /// component.simple(
 ///   slice: fn(model) { model.count },
@@ -419,8 +403,6 @@ pub fn simple(
 /// Static components render once and never update. Useful for headers, static
 /// text, or any content that doesn't depend on the model.
 ///
-/// ## Example
-///
 /// ```gleam
 /// component.static(html.h1([], [html.text("My App")]))
 /// ```
@@ -437,8 +419,6 @@ pub fn static(content: html) -> Component(model, message, html) {
 /// other constructed values on every call.
 ///
 /// Also see [`component.CompareStrategy`](#CompareStrategy).
-///
-/// ## Example
 ///
 /// ```gleam
 /// component.simple(
