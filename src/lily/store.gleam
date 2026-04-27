@@ -5,6 +5,13 @@
 //// store is similar to the TEA/MVU model that Elm/Lustre uses without the
 //// actual rendering/view part, which is owned by the individual components.
 ////
+//// Model fields that should not be synced to the server can be wrapped in
+//// [`Local`](#Local). These fields are client-only: the server holds them at
+//// their initial values, and the client runtime preserves them when the server
+//// sends a snapshot on reconnect. Pair with
+//// [`client.session_field`](./client.html#session_field) to persist them
+//// across page navigations.
+////
 //// The same store runs on the client via
 //// [`client.start`](./client.html#start) and the server via
 //// [`server.start`](./server.html#start), meaning your `update` function
@@ -54,6 +61,20 @@
 // PUBLIC TYPES
 // =============================================================================
 
+/// Model fields that are client-only and not synced to the server should be
+/// wrapped using Local(_). The server holds `Local` fields at their initial
+/// values and the client runtime preserves them when applying a server
+/// snapshot on reconnect.
+///
+/// ```gleam
+/// pub type Model {
+///   Model(count: Int, theme: store.Local(String))
+/// }
+/// ```
+pub type Local(a) {
+  Local(a)
+}
+
 /// The store with your application state and update logic. The same store
 /// runs on both the client (via [`client.start`](./client.html#start))
 /// and the server (via [`server.start`](./server.html#start)).
@@ -80,6 +101,12 @@ pub fn new(
   with update: fn(model, message) -> model,
 ) -> Store(model, message) {
   Store(model: model, update: update)
+}
+
+/// Unwrap a [`Local`](#Local) field to get the inner value.
+pub fn unwrap_local(local: Local(a)) -> a {
+  let Local(value) = local
+  value
 }
 
 // =============================================================================

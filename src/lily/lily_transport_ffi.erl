@@ -80,6 +80,13 @@ encode_message_pack_protocol(Protocol, Codec) ->
                 {<<"payload">>, {bin, PayloadBytes}}
             ]);
 
+        {push, Payload} ->
+            PayloadBytes = (element(2, Codec))(Payload),
+            encode_message_pack_map([
+                {<<"type">>, <<"push">>},
+                {<<"payload">>, {bin, PayloadBytes}}
+            ]);
+
         {server_message, Sequence, Payload} ->
             PayloadBytes = (element(2, Codec))(Payload),
             encode_message_pack_map([
@@ -124,6 +131,13 @@ decode_message_pack_protocol(Bytes, Codec) ->
                 when is_binary(PayloadBin) ->
                 case (element(3, Codec))(PayloadBin) of
                     {ok, Payload} -> {ok, {client_message, Payload}};
+                    _ -> {error, nil}
+                end;
+
+            #{<<"type">> := <<"push">>, <<"payload">> := PayloadBin}
+                when is_binary(PayloadBin) ->
+                case (element(3, Codec))(PayloadBin) of
+                    {ok, Payload} -> {ok, {push, Payload}};
                     _ -> {error, nil}
                 end;
 

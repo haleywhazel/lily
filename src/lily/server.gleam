@@ -194,6 +194,18 @@ pub fn on_message(
 /// let app_store = store.new(initial_model, with: update)
 /// let assert Ok(srv) = server.start(store: app_store, serialiser: my_serialiser)
 /// ```
+/// Stop a running server. Terminates the underlying actor on Erlang and
+/// releases the state box on JavaScript. Further calls to
+/// [`connect`](#connect), [`incoming`](#incoming), [`disconnect`](#disconnect),
+/// or [`on_message`](#on_message) on the stopped server are silently dropped.
+///
+/// This does not notify connected clients — closing their transports is the
+/// app's responsibility. See [`disconnect`](#disconnect) for per-client
+/// teardown.
+pub fn stop(server: Server(model, message)) -> Nil {
+  platform_stop(server.handle)
+}
+
 pub fn start(
   store store: Store(model, message),
   serialiser serialiser: Serialiser(model, message),
@@ -205,6 +217,7 @@ pub fn start(
       sequence: 0,
       serialiser:,
       on_message_hook: option.None,
+      cached_snapshot: option.None,
     )
 
   platform_start(initial_state)
@@ -230,9 +243,13 @@ type InternalEvent(model, message) {
   ClientDisconnected(client_id: String)
   Incoming(client_id: String, bytes: BitArray)
   SetHook(hook: fn(message, model, String) -> Nil)
+  Stop
 }
 
-/// Stores the current server state: model, clients, sequence, and serialiser
+/// Stores the current server state: model, clients, sequence, serialiser,
+/// optional message hook, and a cached encoded snapshot. The snapshot cache
+/// holds the bytes produced by the most recent `Resync` so that subsequent
+/// resyncs arriving before the next `ClientMessage` can skip re-encoding.
 type ServerState(model, message) {
   ServerState(
     store: Store(model, message),
@@ -240,6 +257,7 @@ type ServerState(model, message) {
     sequence: Int,
     serialiser: Serialiser(model, message),
     on_message_hook: Option(fn(message, model, String) -> Nil),
+    cached_snapshot: Option(BitArray),
   )
 }
 
@@ -306,7 +324,12 @@ fn handle_client_message_logic(
     option.None -> Nil
   }
 
-  ServerState(..state, store: updated_store, sequence: new_sequence)
+  ServerState(
+    ..state,
+    store: updated_store,
+    sequence: new_sequence,
+    cached_snapshot: option.None,
+  )
 }
 
 /// For an incoming payload, handle if it's a Resync or a ClientMessage
@@ -326,7 +349,10 @@ fn handle_incoming_logic(
   }
 }
 
-/// Handle a resync request by sending a snapshot of the current model
+/// Handle a resync request by sending a snapshot of the current model.
+/// Reuses `state.cached_snapshot` when populated — the cache is invalidated
+/// on every `ClientMessage`, so a `Some(bytes)` here is guaranteed to match
+/// the current model.
 fn handle_resync_logic(
   state: ServerState(model, message),
   client_id: String,
@@ -334,13 +360,23 @@ fn handle_resync_logic(
 ) -> ServerState(model, message) {
   case dict.get(state.clients, client_id) {
     Error(Nil) -> state
-    Ok(send) -> {
-      let snapshot =
-        transport.Snapshot(sequence: state.sequence, state: state.store.model)
-      let bytes = transport.encode(snapshot, serialiser: state.serialiser)
-      send(bytes)
-      state
-    }
+    Ok(send) ->
+      case state.cached_snapshot {
+        option.Some(bytes) -> {
+          send(bytes)
+          state
+        }
+        option.None -> {
+          let snapshot =
+            transport.Snapshot(
+              sequence: state.sequence,
+              state: state.store.model,
+            )
+          let bytes = transport.encode(snapshot, serialiser: state.serialiser)
+          send(bytes)
+          ServerState(..state, cached_snapshot: option.Some(bytes))
+        }
+      }
   }
 }
 
@@ -398,6 +434,8 @@ fn handle_message(
     SetHook(hook:) ->
       ServerState(..state, on_message_hook: option.Some(hook))
       |> actor.continue
+
+    Stop -> actor.stop()
   }
 }
 
@@ -437,6 +475,12 @@ fn platform_set_hook(
   hook: fn(message, model, String) -> Nil,
 ) -> Nil {
   actor.send(handle, SetHook(hook:))
+}
+
+@target(erlang)
+/// Send a stop event to the Erlang actor
+fn platform_stop(handle: ServerHandle(model, message)) -> Nil {
+  actor.send(handle, Stop)
 }
 
 @target(erlang)
@@ -491,6 +535,12 @@ fn platform_set_hook(
   hook: fn(message, model, String) -> Nil,
 ) -> Nil {
   ffi_set_hook(handle, hook)
+}
+
+@target(javascript)
+/// Stop the JavaScript server (clears its closure state)
+fn platform_stop(handle: ServerHandle(model, message)) -> Nil {
+  ffi_stop(handle)
 }
 
 @target(javascript)
@@ -564,6 +614,13 @@ fn ffi_set_hook(
   _handle: ServerHandle(model, message),
   _hook: fn(message, model, String) -> Nil,
 ) -> Nil {
+  Nil
+}
+
+@target(javascript)
+/// Call the stop method on the server handle
+@external(javascript, "./server.ffi.mjs", "stop")
+fn ffi_stop(_handle: ServerHandle(model, message)) -> Nil {
   Nil
 }
 

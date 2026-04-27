@@ -25,7 +25,7 @@
 ////   |> component.mount(selector: "#app", to_html: element.to_string, view: app)
 ////   |> event.on_click(selector: "#app", decoder: parse_click)
 ////   |> event.on_input(selector: "#search", handler: fn(text) { Search(text) })
-////   |> event.on_key_down(selector: "document", handler: fn(key) { KeyPressed(key) })
+////   |> event.on_key_down(selector: "document", handler: fn(ke) { KeyPressed(ke.key) })
 //// }
 ////
 //// fn parse_click(msg_name: String) -> Result(Message, Nil) {
@@ -55,7 +55,7 @@ import lily/client.{type Runtime}
 
 @target(javascript)
 /// Options for event handlers created with `*_with` variants. Controls
-/// debouncing, throttling, once-only firing, and propagation.
+/// debouncing, throttling, once-only firing, propagation, and default action.
 ///
 /// Build with [`default_options`](#default_options) and update fields:
 ///
@@ -67,9 +67,45 @@ pub type EventOptions {
   EventOptions(
     debounce_ms: Option(Int),
     stop_propagation: Bool,
+    prevent_default: Bool,
     throttle_ms: Option(Int),
     once: Bool,
   )
+}
+
+@target(javascript)
+/// Data extracted from the DOM element that matched the event handler's
+/// selector. `dataset` contains all `data-*` attributes as name/value pairs
+/// using their original kebab-case names (e.g., `data-card-id` → `"card-id"`).
+///
+/// ```gleam
+/// event.on_mouse_enter(runtime, selector: ".card", handler: fn(el) {
+///   case list.key_find(el.dataset, "id") {
+///     Ok(id) -> CardHovered(id)
+///     Error(Nil) -> NoOp
+///   }
+/// })
+/// ```
+pub type ElementData {
+  ElementData(dataset: List(#(String, String)))
+}
+
+@target(javascript)
+/// Data extracted from a keyboard event. `key` is the key name (e.g.,
+/// `"Enter"`, `"ArrowUp"`, `"a"`). The modifier flags match the corresponding
+/// browser event properties.
+///
+/// ```gleam
+/// event.on_key_down(runtime, selector: "#search", handler: fn(ke) {
+///   case ke.key, ke.ctrl {
+///     "k", True -> OpenSearch
+///     "Escape", _ -> CloseSearch
+///     _, _ -> NoOp
+///   }
+/// })
+/// ```
+pub type KeyEvent {
+  KeyEvent(key: String, ctrl: Bool, shift: Bool, alt: Bool, meta: Bool)
 }
 
 // =============================================================================
@@ -78,25 +114,27 @@ pub type EventOptions {
 
 @target(javascript)
 /// Returns an `EventOptions` with all modifiers disabled: no debounce,
-/// no throttle, fires every time, does not stop propagation.
+/// no throttle, fires every time, does not stop propagation or prevent default.
 pub fn default_options() -> EventOptions {
   EventOptions(
     debounce_ms: option.None,
     throttle_ms: option.None,
     once: False,
     stop_propagation: False,
+    prevent_default: False,
   )
 }
 
 @target(javascript)
-/// Fires when an element loses focus.
+/// Fires when an element loses focus. The handler receives [`ElementData`](#ElementData)
+/// for the element that lost focus, giving access to its `data-*` attributes.
 pub fn on_blur(
   runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn() -> message,
+  handler handler: fn(ElementData) -> message,
 ) -> Runtime(model, message) {
-  setup_simple_event(selector, "blur", fn() {
-    client.send_message(runtime, handler())
+  setup_element_event(selector, "blur", ElementData, fn(el) {
+    client.send_message(runtime, handler(el))
   })
   runtime
 }
@@ -149,6 +187,7 @@ pub fn on_click_with(
     option.unwrap(options.throttle_ms, -1),
     options.once,
     options.stop_propagation,
+    options.prevent_default,
     fn(message_name) {
       case decoder(message_name) {
         Ok(message) -> client.send_message(runtime, message)
@@ -161,14 +200,19 @@ pub fn on_click_with(
 
 @target(javascript)
 /// Fires when the context menu is opened (usually right-click). Provides mouse
-/// coordinates (x, y) relative to the viewport.
+/// coordinates (x, y) relative to the viewport and [`ElementData`](#ElementData)
+/// for the matched element.
 pub fn on_context_menu(
   runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(Int, Int) -> message,
+  handler handler: fn(Int, Int, ElementData) -> message,
 ) -> Runtime(model, message) {
-  setup_coordinate_event(selector, "contextmenu", fn(x, y) {
-    client.send_message(runtime, handler(x, y))
+  setup_coordinate_element_event(selector, "contextmenu", ElementData, fn(
+    x,
+    y,
+    el,
+  ) {
+    client.send_message(runtime, handler(x, y, el))
   })
   runtime
 }
@@ -200,14 +244,16 @@ pub fn on_cut(
 }
 
 @target(javascript)
-/// Fires on double-click events.
+/// Fires on double-click events. The handler receives [`ElementData`](#ElementData)
+/// for the matched element, giving access to its `data-*` attributes to
+/// identify which item was double-clicked.
 pub fn on_double_click(
   runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn() -> message,
+  handler handler: fn(ElementData) -> message,
 ) -> Runtime(model, message) {
-  setup_simple_event(selector, "dblclick", fn() {
-    client.send_message(runtime, handler())
+  setup_element_event(selector, "dblclick", ElementData, fn(el) {
+    client.send_message(runtime, handler(el))
   })
   runtime
 }
@@ -228,62 +274,76 @@ pub fn on_drag(
 }
 
 @target(javascript)
-/// Once when a drag operation ends (mouse released).
+/// Fires once when a drag operation ends (mouse released). The handler receives
+/// [`ElementData`](#ElementData) for the dragged element.
 pub fn on_drag_end(
   runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn() -> message,
+  handler handler: fn(ElementData) -> message,
 ) -> Runtime(model, message) {
-  setup_simple_event(selector, "dragend", fn() {
-    client.send_message(runtime, handler())
+  setup_element_event(selector, "dragend", ElementData, fn(el) {
+    client.send_message(runtime, handler(el))
   })
   runtime
 }
 
 @target(javascript)
 /// Fires repeatedly when a dragged element is over a valid drop target.
-/// Provides mouse coordinates (x, y). Note: You may need to call
-/// `event.preventDefault()` in the browser to enable dropping.
+/// Provides mouse coordinates (x, y) and [`ElementData`](#ElementData) for
+/// the drop target element. Note: call with `prevent_default: True` in options
+/// to enable dropping on the target.
 pub fn on_drag_over(
   runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(Int, Int) -> message,
+  handler handler: fn(Int, Int, ElementData) -> message,
 ) -> Runtime(model, message) {
-  setup_coordinate_event(selector, "dragover", fn(x, y) {
-    client.send_message(runtime, handler(x, y))
+  setup_coordinate_element_event(selector, "dragover", ElementData, fn(
+    x,
+    y,
+    el,
+  ) {
+    client.send_message(runtime, handler(x, y, el))
   })
   runtime
 }
 
 @target(javascript)
 /// Like `on_drag_over`, but with event modifiers. See [`EventOptions`](#EventOptions).
+/// Set `prevent_default: True` to allow dropping on the target element.
 pub fn on_drag_over_with(
   runtime: Runtime(model, message),
   selector selector: String,
   options options: EventOptions,
-  handler handler: fn(Int, Int) -> message,
+  handler handler: fn(Int, Int, ElementData) -> message,
 ) -> Runtime(model, message) {
-  setup_coordinate_event_with_options(
+  setup_coordinate_element_event_with_options(
     selector,
     "dragover",
     option.unwrap(options.debounce_ms, -1),
     option.unwrap(options.throttle_ms, -1),
     options.once,
     options.stop_propagation,
-    fn(x, y) { client.send_message(runtime, handler(x, y)) },
+    options.prevent_default,
+    ElementData,
+    fn(x, y, el) { client.send_message(runtime, handler(x, y, el)) },
   )
   runtime
 }
 
 @target(javascript)
-/// Fires once when a drag operation starts. Provides initial mouse coordinates (x, y).
+/// Fires once when a drag operation starts. Provides initial mouse coordinates
+/// (x, y) and [`ElementData`](#ElementData) for the element being dragged.
 pub fn on_drag_start(
   runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(Int, Int) -> message,
+  handler handler: fn(Int, Int, ElementData) -> message,
 ) -> Runtime(model, message) {
-  setup_coordinate_event(selector, "dragstart", fn(x, y) {
-    client.send_message(runtime, handler(x, y))
+  setup_coordinate_element_event(selector, "dragstart", ElementData, fn(
+    x,
+    y,
+    el,
+  ) {
+    client.send_message(runtime, handler(x, y, el))
   })
   runtime
 }
@@ -303,6 +363,7 @@ pub fn on_drag_with(
     option.unwrap(options.throttle_ms, -1),
     options.once,
     options.stop_propagation,
+    options.prevent_default,
     fn(x, y) { client.send_message(runtime, handler(x, y)) },
   )
   runtime
@@ -310,27 +371,29 @@ pub fn on_drag_with(
 
 @target(javascript)
 /// Fires when a dragged element is dropped on a valid drop target. Provides
-/// drop coordinates (x, y).
+/// drop coordinates (x, y) and [`ElementData`](#ElementData) for the drop
+/// target element.
 pub fn on_drop(
   runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(Int, Int) -> message,
+  handler handler: fn(Int, Int, ElementData) -> message,
 ) -> Runtime(model, message) {
-  setup_coordinate_event(selector, "drop", fn(x, y) {
-    client.send_message(runtime, handler(x, y))
+  setup_coordinate_element_event(selector, "drop", ElementData, fn(x, y, el) {
+    client.send_message(runtime, handler(x, y, el))
   })
   runtime
 }
 
 @target(javascript)
-/// Fires when an element receives focus.
+/// Fires when an element receives focus. The handler receives
+/// [`ElementData`](#ElementData) for the focused element.
 pub fn on_focus(
   runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn() -> message,
+  handler handler: fn(ElementData) -> message,
 ) -> Runtime(model, message) {
-  setup_simple_event(selector, "focus", fn() {
-    client.send_message(runtime, handler())
+  setup_element_event(selector, "focus", ElementData, fn(el) {
+    client.send_message(runtime, handler(el))
   })
   runtime
 }
@@ -430,21 +493,22 @@ pub fn on_input_with(
     option.unwrap(options.throttle_ms, -1),
     options.once,
     options.stop_propagation,
+    options.prevent_default,
     fn(value) { client.send_message(runtime, handler(value)) },
   )
   runtime
 }
 
 @target(javascript)
-/// Fires when a key is pressed down. Receives the key name (e.g., "Enter",
-/// "ArrowUp", "a").
+/// Fires when a key is pressed down. Receives a [`KeyEvent`](#KeyEvent) with
+/// the key name and modifier flags (ctrl, shift, alt, meta).
 pub fn on_key_down(
   runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(String) -> message,
+  handler handler: fn(KeyEvent) -> message,
 ) -> Runtime(model, message) {
-  setup_key_event(selector, "keydown", fn(key) {
-    client.send_message(runtime, handler(key))
+  setup_key_full_event(selector, "keydown", KeyEvent, fn(ke) {
+    client.send_message(runtime, handler(ke))
   })
   runtime
 }
@@ -455,70 +519,82 @@ pub fn on_key_down_with(
   runtime: Runtime(model, message),
   selector selector: String,
   options options: EventOptions,
-  handler handler: fn(String) -> message,
+  handler handler: fn(KeyEvent) -> message,
 ) -> Runtime(model, message) {
-  setup_key_event_with_options(
+  setup_key_full_event_with_options(
     selector,
     "keydown",
     option.unwrap(options.debounce_ms, -1),
     option.unwrap(options.throttle_ms, -1),
     options.once,
     options.stop_propagation,
-    fn(key) { client.send_message(runtime, handler(key)) },
+    options.prevent_default,
+    KeyEvent,
+    fn(ke) { client.send_message(runtime, handler(ke)) },
   )
   runtime
 }
 
 @target(javascript)
-/// Fires when a key is released. Receives the key name (e.g., "Enter",
-/// "ArrowUp", "a").
+/// Fires when a key is released. Receives a [`KeyEvent`](#KeyEvent) with
+/// the key name and modifier flags (ctrl, shift, alt, meta).
 pub fn on_key_up(
   runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(String) -> message,
+  handler handler: fn(KeyEvent) -> message,
 ) -> Runtime(model, message) {
-  setup_key_event(selector, "keyup", fn(key) {
-    client.send_message(runtime, handler(key))
+  setup_key_full_event(selector, "keyup", KeyEvent, fn(ke) {
+    client.send_message(runtime, handler(ke))
   })
   runtime
 }
 
 @target(javascript)
 /// Fires when a mouse button is pressed down. Provides mouse coordinates (x, y)
-/// relative to the viewport.
+/// relative to the viewport and [`ElementData`](#ElementData) for the matched
+/// element.
 pub fn on_mouse_down(
   runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(Int, Int) -> message,
+  handler handler: fn(Int, Int, ElementData) -> message,
 ) -> Runtime(model, message) {
-  setup_coordinate_event(selector, "mousedown", fn(x, y) {
-    client.send_message(runtime, handler(x, y))
+  setup_coordinate_element_event(selector, "mousedown", ElementData, fn(
+    x,
+    y,
+    el,
+  ) {
+    client.send_message(runtime, handler(x, y, el))
   })
   runtime
 }
 
 @target(javascript)
 /// Fires when the mouse enters an element's boundary. Does not bubble.
+/// The handler receives [`ElementData`](#ElementData) for the element being
+/// entered, giving access to its `data-*` attributes to identify which item
+/// is being hovered.
 pub fn on_mouse_enter(
   runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn() -> message,
+  handler handler: fn(ElementData) -> message,
 ) -> Runtime(model, message) {
-  setup_simple_event(selector, "mouseenter", fn() {
-    client.send_message(runtime, handler())
+  setup_element_event(selector, "mouseenter", ElementData, fn(el) {
+    client.send_message(runtime, handler(el))
   })
   runtime
 }
 
 @target(javascript)
 /// Fires when the mouse leaves an element's boundary. Does not bubble.
+/// The handler receives [`ElementData`](#ElementData) for the element being
+/// left.
 pub fn on_mouse_leave(
   runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn() -> message,
+  handler handler: fn(ElementData) -> message,
 ) -> Runtime(model, message) {
-  setup_simple_event(selector, "mouseleave", fn() {
-    client.send_message(runtime, handler())
+  setup_element_event(selector, "mouseleave", ElementData, fn(el) {
+    client.send_message(runtime, handler(el))
   })
   runtime
 }
@@ -553,6 +629,7 @@ pub fn on_mouse_move_with(
     option.unwrap(options.throttle_ms, -1),
     options.once,
     options.stop_propagation,
+    options.prevent_default,
     fn(x, y) { client.send_message(runtime, handler(x, y)) },
   )
   runtime
@@ -560,14 +637,15 @@ pub fn on_mouse_move_with(
 
 @target(javascript)
 /// Fires when a mouse button is released. Provides mouse coordinates (x, y)
-/// relative to the viewport.
+/// relative to the viewport and [`ElementData`](#ElementData) for the matched
+/// element.
 pub fn on_mouse_up(
   runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn(Int, Int) -> message,
+  handler handler: fn(Int, Int, ElementData) -> message,
 ) -> Runtime(model, message) {
-  setup_coordinate_event(selector, "mouseup", fn(x, y) {
-    client.send_message(runtime, handler(x, y))
+  setup_coordinate_element_event(selector, "mouseup", ElementData, fn(x, y, el) {
+    client.send_message(runtime, handler(x, y, el))
   })
   runtime
 }
@@ -628,6 +706,7 @@ pub fn on_pointer_move_with(
     option.unwrap(options.throttle_ms, -1),
     options.once,
     options.stop_propagation,
+    options.prevent_default,
     fn(x, y) { client.send_message(runtime, handler(x, y)) },
   )
   runtime
@@ -676,20 +755,23 @@ pub fn on_resize_with(
     option.unwrap(options.throttle_ms, -1),
     options.once,
     options.stop_propagation,
+    options.prevent_default,
     fn() { client.send_message(runtime, handler()) },
   )
   runtime
 }
 
 @target(javascript)
-/// Fires when an element's scroll position changes.
+/// Fires when an element's scroll position changes. Provides the element's
+/// current `scrollTop` and `scrollLeft` values as (scroll_top, scroll_left).
+/// Consider using `on_scroll_with` with a throttle option for expensive work.
 pub fn on_scroll(
   runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn() -> message,
+  handler handler: fn(Int, Int) -> message,
 ) -> Runtime(model, message) {
-  setup_simple_event(selector, "scroll", fn() {
-    client.send_message(runtime, handler())
+  setup_scroll_position_event(selector, fn(top, left) {
+    client.send_message(runtime, handler(top, left))
   })
   runtime
 }
@@ -701,16 +783,16 @@ pub fn on_scroll_with(
   runtime: Runtime(model, message),
   selector selector: String,
   options options: EventOptions,
-  handler handler: fn() -> message,
+  handler handler: fn(Int, Int) -> message,
 ) -> Runtime(model, message) {
-  setup_simple_event_with_options(
+  setup_scroll_position_event_with_options(
     selector,
-    "scroll",
     option.unwrap(options.debounce_ms, -1),
     option.unwrap(options.throttle_ms, -1),
     options.once,
     options.stop_propagation,
-    fn() { client.send_message(runtime, handler()) },
+    options.prevent_default,
+    fn(top, left) { client.send_message(runtime, handler(top, left)) },
   )
   runtime
 }
@@ -734,14 +816,15 @@ pub fn on_submit(
 }
 
 @target(javascript)
-/// Fires when all touches are removed from the screen.
+/// Fires when all touches are removed from the screen. The handler receives
+/// [`ElementData`](#ElementData) for the element where the touch ended.
 pub fn on_touch_end(
   runtime: Runtime(model, message),
   selector selector: String,
-  handler handler: fn() -> message,
+  handler handler: fn(ElementData) -> message,
 ) -> Runtime(model, message) {
-  setup_simple_event(selector, "touchend", fn() {
-    client.send_message(runtime, handler())
+  setup_element_event(selector, "touchend", ElementData, fn(el) {
+    client.send_message(runtime, handler(el))
   })
   runtime
 }
@@ -776,6 +859,7 @@ pub fn on_touch_move_with(
     option.unwrap(options.throttle_ms, -1),
     options.once,
     options.stop_propagation,
+    options.prevent_default,
     fn(x, y) { client.send_message(runtime, handler(x, y)) },
   )
   runtime
@@ -823,6 +907,7 @@ pub fn on_wheel_with(
     option.unwrap(options.throttle_ms, -1),
     options.once,
     options.stop_propagation,
+    options.prevent_default,
     fn(delta_x, delta_y) {
       client.send_message(runtime, handler(delta_x, delta_y))
     },
@@ -850,6 +935,7 @@ fn setup_click_event_with_options(
   _throttle_ms: Int,
   _once: Bool,
   _stop_propagation: Bool,
+  _prevent_default: Bool,
   _handler: fn(String) -> Nil,
 ) -> Nil {
   Nil
@@ -874,7 +960,46 @@ fn setup_coordinate_event_with_options(
   _throttle_ms: Int,
   _once: Bool,
   _stop_propagation: Bool,
+  _prevent_default: Bool,
   _handler: fn(Int, Int) -> Nil,
+) -> Nil {
+  Nil
+}
+
+@target(javascript)
+@external(javascript, "./event.ffi.mjs", "setupCoordinateElementEvent")
+fn setup_coordinate_element_event(
+  _selector: String,
+  _event_name: String,
+  _make_element_data: fn(List(#(String, String))) -> ElementData,
+  _handler: fn(Int, Int, ElementData) -> Nil,
+) -> Nil {
+  Nil
+}
+
+@target(javascript)
+@external(javascript, "./event.ffi.mjs", "setupCoordinateElementEventWithOptions")
+fn setup_coordinate_element_event_with_options(
+  _selector: String,
+  _event_name: String,
+  _debounce_ms: Int,
+  _throttle_ms: Int,
+  _once: Bool,
+  _stop_propagation: Bool,
+  _prevent_default: Bool,
+  _make_element_data: fn(List(#(String, String))) -> ElementData,
+  _handler: fn(Int, Int, ElementData) -> Nil,
+) -> Nil {
+  Nil
+}
+
+@target(javascript)
+@external(javascript, "./event.ffi.mjs", "setupElementEvent")
+fn setup_element_event(
+  _selector: String,
+  _event_name: String,
+  _make_element_data: fn(List(#(String, String))) -> ElementData,
+  _handler: fn(ElementData) -> Nil,
 ) -> Nil {
   Nil
 }
@@ -889,25 +1014,51 @@ fn setup_form_change_event(
 }
 
 @target(javascript)
-@external(javascript, "./event.ffi.mjs", "setupKeyEvent")
-fn setup_key_event(
+@external(javascript, "./event.ffi.mjs", "setupKeyFullEvent")
+fn setup_key_full_event(
   _selector: String,
   _event_name: String,
-  _handler: fn(String) -> Nil,
+  _make_key_event: fn(String, Bool, Bool, Bool, Bool) -> KeyEvent,
+  _handler: fn(KeyEvent) -> Nil,
 ) -> Nil {
   Nil
 }
 
 @target(javascript)
-@external(javascript, "./event.ffi.mjs", "setupKeyEventWithOptions")
-fn setup_key_event_with_options(
+@external(javascript, "./event.ffi.mjs", "setupKeyFullEventWithOptions")
+fn setup_key_full_event_with_options(
   _selector: String,
   _event_name: String,
   _debounce_ms: Int,
   _throttle_ms: Int,
   _once: Bool,
   _stop_propagation: Bool,
-  _handler: fn(String) -> Nil,
+  _prevent_default: Bool,
+  _make_key_event: fn(String, Bool, Bool, Bool, Bool) -> KeyEvent,
+  _handler: fn(KeyEvent) -> Nil,
+) -> Nil {
+  Nil
+}
+
+@target(javascript)
+@external(javascript, "./event.ffi.mjs", "setupScrollPositionEvent")
+fn setup_scroll_position_event(
+  _selector: String,
+  _handler: fn(Int, Int) -> Nil,
+) -> Nil {
+  Nil
+}
+
+@target(javascript)
+@external(javascript, "./event.ffi.mjs", "setupScrollPositionEventWithOptions")
+fn setup_scroll_position_event_with_options(
+  _selector: String,
+  _debounce_ms: Int,
+  _throttle_ms: Int,
+  _once: Bool,
+  _stop_propagation: Bool,
+  _prevent_default: Bool,
+  _handler: fn(Int, Int) -> Nil,
 ) -> Nil {
   Nil
 }
@@ -931,6 +1082,7 @@ fn setup_simple_event_with_options(
   _throttle_ms: Int,
   _once: Bool,
   _stop_propagation: Bool,
+  _prevent_default: Bool,
   _handler: fn() -> Nil,
 ) -> Nil {
   Nil
@@ -974,6 +1126,7 @@ fn setup_value_event_with_options(
   _throttle_ms: Int,
   _once: Bool,
   _stop_propagation: Bool,
+  _prevent_default: Bool,
   _handler: fn(String) -> Nil,
 ) -> Nil {
   Nil
@@ -996,6 +1149,7 @@ fn setup_wheel_event_with_options(
   _throttle_ms: Int,
   _once: Bool,
   _stop_propagation: Bool,
+  _prevent_default: Bool,
   _handler: fn(Float, Float) -> Nil,
 ) -> Nil {
   Nil

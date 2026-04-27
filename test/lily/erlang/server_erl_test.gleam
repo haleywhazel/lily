@@ -6,6 +6,8 @@ import gleam/bit_array
 @target(erlang)
 import gleam/erlang/process
 @target(erlang)
+import gleam/list
+@target(erlang)
 import gleam/string
 @target(erlang)
 import gleeunit/should
@@ -278,6 +280,101 @@ pub fn server_resync_sends_snapshot_test() {
   }
 }
 
+@target(erlang)
+/// Wrap the custom serialiser so that each call to `encode_model` sends a
+/// tick to `counter_subj`. Tests then drain the subject to count how many
+/// times the server encoded a `Snapshot`.
+///
+/// A `Subject(Nil)` is used rather than a shared mutable ref because the
+/// serialiser runs inside the actor process, so process-dictionary-based
+/// refs (like `test_ref`) aren't visible to the test process.
+fn counting_serialiser(
+  counter_subj: process.Subject(Nil),
+) -> transport.Serialiser(Model, Message) {
+  transport.custom_json(
+    encode_message: test_fixtures.encode_message,
+    decode_message: test_fixtures.message_decoder(),
+    encode_model: fn(model) {
+      process.send(counter_subj, Nil)
+      test_fixtures.encode_model(model)
+    },
+    decode_model: test_fixtures.model_decoder(),
+  )
+}
+
+@target(erlang)
+fn drain_count(subj: process.Subject(Nil)) -> Int {
+  drain_count_loop(subj, 0)
+}
+
+@target(erlang)
+fn drain_count_loop(subj: process.Subject(Nil), acc: Int) -> Int {
+  case process.receive(subj, within: 50) {
+    Ok(_) -> drain_count_loop(subj, acc + 1)
+    Error(_) -> acc
+  }
+}
+
+@target(erlang)
+pub fn server_resync_reuses_cached_snapshot_test() {
+  let counter_subj = process.new_subject()
+  let s = store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+  let assert Ok(srv) =
+    server.start(store: s, serialiser: counting_serialiser(counter_subj))
+  let s1 = connect_client(srv, "c1")
+
+  list.repeat(Nil, 100)
+  |> list.each(fn(_) {
+    server.incoming(srv, client_id: "c1", bytes: encode_resync(0))
+  })
+  // Drain all 100 snapshot frames — guarantees the actor processed them all
+  list.repeat(Nil, 100)
+  |> list.each(fn(_) {
+    let _ = recv(s1)
+    Nil
+  })
+
+  drain_count(counter_subj)
+  |> should.equal(1)
+}
+
+@target(erlang)
+pub fn server_client_message_invalidates_snapshot_cache_test() {
+  let counter_subj = process.new_subject()
+  let s = store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+  let assert Ok(srv) =
+    server.start(store: s, serialiser: counting_serialiser(counter_subj))
+  let s1 = connect_client(srv, "c1")
+
+  list.repeat(Nil, 100)
+  |> list.each(fn(_) {
+    server.incoming(srv, client_id: "c1", bytes: encode_resync(0))
+  })
+  list.repeat(Nil, 100)
+  |> list.each(fn(_) {
+    let _ = recv(s1)
+    Nil
+  })
+  drain_count(counter_subj)
+  |> should.equal(1)
+
+  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
+  // Drain the Acknowledge from the ClientMessage
+  let _ = recv(s1)
+
+  list.repeat(Nil, 100)
+  |> list.each(fn(_) {
+    server.incoming(srv, client_id: "c1", bytes: encode_resync(0))
+  })
+  list.repeat(Nil, 100)
+  |> list.each(fn(_) {
+    let _ = recv(s1)
+    Nil
+  })
+  drain_count(counter_subj)
+  |> should.equal(1)
+}
+
 // =============================================================================
 // ON-MESSAGE HOOK
 // =============================================================================
@@ -404,4 +501,23 @@ pub fn server_auto_log_messages_processes_normally_test() {
   server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
   recv(s1)
   |> should.be_ok
+}
+
+// =============================================================================
+// STOP
+// =============================================================================
+
+@target(erlang)
+pub fn server_stop_silently_drops_further_calls_test() {
+  let srv = new_server()
+  let s1 = connect_client(srv, "c1")
+  server.stop(srv)
+  // Give the actor time to process the Stop event
+  process.sleep(50)
+  // Subsequent calls do not crash the test process
+  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
+  server.disconnect(srv, client_id: "c1")
+  // c1 receives nothing after stop
+  recv(s1)
+  |> should.be_error
 }

@@ -20,6 +20,7 @@ import {
   RemoveAttribute,
 } from "./component.mjs";
 import { log as logLine } from "./logging.ffi.mjs";
+import { Local as StoreLocal } from "./store.mjs";
 
 // =============================================================================
 // EXPORT FUNCTIONS
@@ -153,6 +154,9 @@ export function createRuntime(store, apply) {
     registerComponent(id, handler) {
       componentRegistry.set(id, handler);
     },
+    unregisterComponent(id) {
+      componentRegistry.delete(id);
+    },
     resetComponentCounter() {
       componentCounter = 0;
     },
@@ -267,6 +271,12 @@ export function initialNotify(runtime) {
   runtime.initialNotify();
 }
 
+export function mergeLocalAndDispatch(runtime, incoming) {
+  const current = runtime.getModel();
+  const merged = mergeLocal(current, incoming);
+  runtime.dispatchModel(merged);
+}
+
 export function readField(prefix, key) {
   try {
     const fullKey = prefix + key;
@@ -335,3 +345,20 @@ export function setUserMessageHook(runtime, hook) {
 
 // Sequence tracking at the protocol-level
 const STORAGE_KEY_SEQUENCE = "lily_last_sequence";
+
+// =============================================================================
+// PRIVATE FUNCTIONS
+// =============================================================================
+
+/** Merges local values to the model */
+function mergeLocal(current, incoming) {
+  if (current instanceof StoreLocal) return current;
+  if (!incoming || typeof incoming !== "object" || !incoming.withFields)
+    return incoming;
+  if (!current || typeof current !== "object") return incoming;
+  const merged = Object.create(Object.getPrototypeOf(incoming));
+  for (const key of Object.keys(incoming)) {
+    merged[key] = mergeLocal(current[key], incoming[key]);
+  }
+  return merged;
+}

@@ -24,6 +24,7 @@ import { Ok, Error, NonEmpty, Empty, BitArray } from "../gleam.mjs";
 import {
   Acknowledge,
   ClientMessage,
+  Push,
   Resync,
   ServerMessage,
   Snapshot,
@@ -324,6 +325,14 @@ export function decodeMessagePackProtocol(bitArray, codec) {
       return new Ok(new ClientMessage(result[0]));
     }
 
+    if (type === "push") {
+      const payloadRaw = map["payload"];
+      if (!(payloadRaw instanceof Uint8Array)) throw new globalThis.Error("payload not bin");
+      const result = codec.decode_message(new BitArray(payloadRaw));
+      if (result instanceof Error) throw new globalThis.Error("decode payload failed");
+      return new Ok(new Push(result[0]));
+    }
+
     if (type === "server_message") {
       const sequence = map["sequence"];
       const payloadRaw = map["payload"];
@@ -373,6 +382,11 @@ export function encodeMessagePackProtocol(protocol, codec) {
     const payloadBytes = codec.encode_message(protocol.payload).rawBuffer;
     buf.push(0x82); // fixmap(2)
     messagePackEncodeString("type", buf); messagePackEncodeString("client_message", buf);
+    messagePackEncodeString("payload", buf); messagePackEncodeBin(payloadBytes, buf);
+  } else if (name === "Push") {
+    const payloadBytes = codec.encode_message(protocol.payload).rawBuffer;
+    buf.push(0x82); // fixmap(2)
+    messagePackEncodeString("type", buf); messagePackEncodeString("push", buf);
     messagePackEncodeString("payload", buf); messagePackEncodeBin(payloadBytes, buf);
   } else if (name === "ServerMessage") {
     const payloadBytes = codec.encode_message(protocol.payload).rawBuffer;

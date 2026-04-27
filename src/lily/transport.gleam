@@ -154,6 +154,11 @@ pub type Protocol(model, message) {
   /// `ClientMessage` carries any updates made by the client.
   ClientMessage(payload: message)
 
+  /// `Push` is sent by the server (or a PubSub hub) directly to subscribed
+  /// clients. Unlike `ServerMessage` it carries no sequence number and is
+  /// never replayed on resync — it is ephemeral by design.
+  Push(payload: message)
+
   /// `Resync` is used by the client to request the current model within the
   /// the server store after a full reconnect. The `after_sequence` number
   /// attached allows the server to know the last synced sequence state.
@@ -616,6 +621,12 @@ fn encode_json(
         #("payload", serialiser.encode_message(payload)),
       ])
 
+    Push(payload:) ->
+      json.object([
+        #("type", json.string("push")),
+        #("payload", serialiser.encode_message(payload)),
+      ])
+
     ServerMessage(sequence:, payload:) ->
       json.object([
         #("type", json.string("server_message")),
@@ -660,12 +671,21 @@ fn protocol_decoder(
   use protocol_type <- decode.then(decode.at(["type"], decode.string))
   case protocol_type {
     "client_message" -> client_message_decoder(serialiser)
+    "push" -> push_decoder(serialiser)
     "server_message" -> server_message_decoder(serialiser)
     "snapshot" -> snapshot_decoder(serialiser)
     "resync" -> resync_decoder()
     "acknowledge" -> acknowledge_decoder()
     _ -> decode.failure(Acknowledge(0), "Protocol")
   }
+}
+
+/// Decoder for `Push`
+fn push_decoder(
+  serialiser: Serialiser(model, message),
+) -> decode.Decoder(Protocol(model, message)) {
+  use payload <- decode.field("payload", serialiser.decode_message)
+  decode.success(Push(payload:))
 }
 
 /// Decoder for `Resync`

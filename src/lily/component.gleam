@@ -12,11 +12,84 @@
 //// 3. [`live`](#live) uses patch-based updates to prevent full re-renders
 //// 4. [`each`](#each) handles keyed lists with innerHTML rendering
 //// 5. [`each_live`](#each_live) handles keyed lists with patch-based rendering
+//// 6. [`fragment`](#fragment) is essentially a collection of other components
+////
+//// `simple` replaces the component's entire DOM on every slice change, which
+//// destroys focus, selection, and any in-progress user input. `live` applies
+//// targeted patches instead, leaving existing nodes untouched, so focus and
+//// typed text are preserved across model updates. Whenever there are elements
+//// like `<input>` and `<textarea>`, `live` is probably better.
+////
+//// The same rule applies to list components, use `each_live` instead of
+//// `each` when list items contain inputs or must not lose focus on update.
+////
+//// ## Nesting components
+////
+//// `static`, `simple`, and `live` accept a `slot` function as the first
+//// parameter of their content function. Call `slot(child_component)` wherever
+//// you want a child component to appear in the parent template. The call
+//// returns a placeholder value of your `html` type that is substituted with
+//// the rendered child after the parent template is serialised.
+////
+//// ```gleam
+//// component.live(
+////   slice: fn(m) { m.is_active },
+////   initial: fn(slot) {
+////     html.section([attribute.class("column")], [
+////       html.h2([], [html.text("Title")]),
+////       slot(component.each_live(
+////         slice: fn(m) { cards_for(m) },
+////         key: fn(c) { c.id },
+////         initial: render_card,
+////         patch: card_patches,
+////       )),
+////     ])
+////   },
+////   patch: column_patches,
+//// )
+//// ```
+////
+//// If no children are needed, ignore the parameter:
+////
+//// ```gleam
+//// component.simple(
+////   slice: fn(m) { m.count },
+////   render: fn(count, _) {
+////     html.div([], [html.text(int.to_string(count))])
+////   },
+//// )
+//// ```
 ////
 //// Components work with any HTML library - Lustre or raw strings. The
 //// `to_html` function provided at [`component.mount`](#mount) converts
 //// your chosen library's types to strings. We recommend
 //// [Lustre elements](https://hexdocs.pm/lustre/lustre/element/html.html).
+////
+//// To use nesting, also supply `to_slot` at mount — a zero-argument function
+//// that returns an `html` placeholder value that serialises to
+//// `<lily-slot></lily-slot>`. For Lustre:
+////
+//// ```gleam
+//// component.mount(
+////   runtime,
+////   selector: "#app",
+////   to_html: element.to_string,
+////   to_slot: fn() { element.element("lily-slot", [], []) },
+////   view: app,
+//// )
+//// ```
+////
+//// For raw HTML strings:
+////
+//// ```gleam
+//// component.mount(
+////   runtime,
+////   selector: "#app",
+////   to_html: fn(s) { s },
+////   to_slot: fn() { "<lily-slot></lily-slot>" },
+////   view: app,
+//// )
+//// ```
 ////
 //// Each component declares a `slice` function that extracts relevant data
 //// from the model. The runtime caches the previous slice and skips rendering
@@ -35,7 +108,7 @@
 //// fn app(_model: Model) {
 ////   component.simple(
 ////     slice: fn(m: Model) { m.count },
-////     render: fn(count) {
+////     render: fn(count, _) {
 ////       html.div([], [
 ////         html.button([attribute.data("msg", "decrement")], [html.text("-")]),
 ////         html.p([], [html.text(int.to_string(count))]),
@@ -51,7 +124,12 @@
 ////     |> client.start
 ////
 ////   runtime
-////   |> component.mount(selector: "#app", to_html: element.to_string, view: app)
+////   |> component.mount(
+////     selector: "#app",
+////     to_html: element.to_string,
+////     to_slot: fn() { element.element("lily-slot", [], []) },
+////     view: app,
+////   )
 ////   |> event.on_click(selector: "#app", decoder: parse_click)
 //// }
 //// ```
@@ -93,36 +171,27 @@ pub type CompareStrategy {
 }
 
 @target(javascript)
+/// A function that accepts a child `Component` and returns a placeholder
+/// value of your `html` type marking where that child will be rendered.
+/// Passed as the first parameter of every `static`, `simple`, and `live`
+/// content function. Call it inline wherever you want the child to appear;
+/// call order determines DOM position.
+pub type Slotter(model, message, html) =
+  fn(Component(model, message, html)) -> html
+
+@target(javascript)
 /// Component is the core type representing renderable content in Lily. The
 /// constructors for Component is kept opaque – use the associated functions to
 /// create components instead. The `html` type parameter is user-provided and
 /// can be any type that represents HTML markup.
 pub opaque type Component(model, message, html) {
-  /// Static content that renders once with no subscription to model changes
-  Static(content: html)
-
-  /// Simple dynamic component that re-renders via innerHTML when slice changes
-  Simple(
-    slice: fn(model) -> Dynamic,
-    render: fn(Dynamic) -> html,
-    compare: CompareStrategy,
-  )
-
-  /// Live component with patch-based updates for 60fps performance
-  Live(
-    slice: fn(model) -> Dynamic,
-    initial: html,
-    apply: fn(Dynamic) -> List(Patch),
-    compare: CompareStrategy,
-  )
-
   /// Keyed list with innerHTML rendering for each child. Carries the primitive
   /// slice, key, and render functions directly so the FFI can evaluate only
   /// what it needs per item.
   Each(
     slice: fn(model) -> List(Dynamic),
     key: fn(Dynamic) -> String,
-    render: fn(Dynamic) -> html,
+    render: fn(Dynamic) -> Component(model, message, html),
     compare: CompareStrategy,
   )
 
@@ -132,13 +201,21 @@ pub opaque type Component(model, message, html) {
   EachLive(
     slice: fn(model) -> List(Dynamic),
     key: fn(Dynamic) -> String,
-    initial: fn(Dynamic) -> html,
+    initial: fn(Dynamic) -> Component(model, message, html),
     patch: fn(Dynamic) -> List(Patch),
     compare: CompareStrategy,
   )
 
   /// Container for multiple components (no wrapper element created)
   Fragment(children: List(Component(model, message, html)))
+
+  /// Live component with patch-based updates for 60fps performance
+  Live(
+    slice: fn(model) -> Dynamic,
+    initial: fn(Slotter(model, message, html)) -> html,
+    apply: fn(Dynamic) -> List(Patch),
+    compare: CompareStrategy,
+  )
 
   /// Wraps a component to disable it when the connection status is `False`.
   /// The `connected` function extracts connection status from the model.
@@ -148,6 +225,16 @@ pub opaque type Component(model, message, html) {
     inner: Component(model, message, html),
     connected: fn(model) -> Bool,
   )
+
+  /// Simple dynamic component that re-renders via innerHTML when slice changes
+  Simple(
+    slice: fn(model) -> Dynamic,
+    render: fn(Dynamic, Slotter(model, message, html)) -> html,
+    compare: CompareStrategy,
+  )
+
+  /// Static content that renders once with no subscription to model changes
+  Static(content: fn(Slotter(model, message, html)) -> html)
 }
 
 @target(javascript)
@@ -179,30 +266,37 @@ pub type Patch {
 /// [`component.each_live`](#each_live) in that it does a full re-render of
 /// the HTML element instead of patches.
 ///
+/// Avoid using `each` for list items that contain `<input>`, `<textarea>`,
+/// or `<select>` elements — each changed item replaces its DOM via
+/// `innerHTML`, destroying focus and in-progress user input. Use
+/// [`each_live`](#each_live) with targeted patches instead.
+///
 /// `slice` must return a `List` rather than a single element, unlike
 /// [`component.simple`](#simple).
 ///
 /// While the type for key can be defined by the user, internally, these are
 /// converted to `String`.
 ///
-/// The `render` function is called for each item and should return HTML (in
-/// whatever type is defined on [`component.mount`](#mount)).
+/// The `render` function is called for each item and returns a `Component`.
+/// For plain HTML items, wrap with [`component.static`](#static).
 ///
 /// ```gleam
 /// component.each(
 ///   slice: fn(model) { model.counters },
 ///   key: fn(counter) { counter.id },
 ///   render: fn(counter) {
-///     html.div([class("counter")], [
-///       html.text(int.to_string(counter.value))
-///     ])
+///     component.static(fn(_) {
+///       html.div([class("counter")], [
+///         html.text(int.to_string(counter.value))
+///       ])
+///     })
 ///   }
 /// )
 /// ```
 pub fn each(
   slice slice: fn(model) -> List(item),
   key key: fn(item) -> key,
-  render render: fn(item) -> html,
+  render render: fn(item) -> Component(model, message, html),
 ) -> Component(model, message, html) {
   Each(
     slice: fn(model) { list.map(slice(model), to_dynamic) },
@@ -226,17 +320,20 @@ pub fn each(
 /// While the type for key can be defined by the user, internally, these are
 /// converted to `String`.
 ///
-/// The `initial` function renders the initial HTML for each item.
-/// The `patch` function returns patches to apply on updates.
+/// The `initial` function returns a `Component` for each item's first render.
+/// Wrap plain HTML with [`component.static`](#static). The `patch`
+/// function returns patches applied on updates (the item's root must remain).
 ///
 /// ```gleam
 /// component.each_live(
 ///   slice: fn(model) { model.series },
 ///   key: fn(series) { series.id },
 ///   initial: fn(series) {
-///     html.div([class("display-data")], [
-///       html.span([class("value")], [html.text("0")])
-///     ])
+///     component.static(fn(_) {
+///       html.div([class("display-data")], [
+///         html.span([class("value")], [html.text("0")])
+///       ])
+///     })
 ///   },
 ///   patch: fn(series) {
 ///     [SetText(".value", int.to_string(series.value))]
@@ -246,7 +343,7 @@ pub fn each(
 pub fn each_live(
   slice slice: fn(model) -> List(item),
   key key: fn(item) -> key,
-  initial initial: fn(item) -> html,
+  initial initial: fn(item) -> Component(model, message, html),
   patch patch: fn(item) -> List(Patch),
 ) -> Component(model, message, html) {
   EachLive(
@@ -266,7 +363,7 @@ pub fn each_live(
 /// ```gleam
 /// fn app(_model: Model) -> Component(Model, Message, Element(Message)) {
 ///   component.fragment([
-///     component.static(html.h1([], [html.text("My App")])),
+///     component.static(fn(_) { html.h1([], [html.text("My App")]) }),
 ///     component.simple(...),
 ///     component.each(...),
 ///   ])
@@ -280,22 +377,34 @@ pub fn fragment(
 
 @target(javascript)
 /// Live components render an initial HTML structure once, then apply DOM
-/// patches on subsequent updates. This is much faster than innerHTML,
-/// replacement for frequent updates (e.g., drag-and-drop, animations,
-/// real-time data) for 60fps rendering.
+/// patches on subsequent updates. This avoids the full innerHTML replacement
+/// of [`simple`](#simple), which means existing nodes are never destroyed
+/// between updates.
+///
+/// Use `live` whenever the component contains `<input>`, `<textarea>`, or
+/// `<select>` elements. Because the DOM nodes are preserved, focus,
+/// cursor position, and any in-progress user input survive model updates.
+/// This also makes `live` the right choice for high-frequency updates such
+/// as drag-and-drop, animations, and real-time data (60fps rendering).
 ///
 /// The `patch` function returns a list of `Patch` values. Each patch targets
 /// an element relative to the component's root using a CSS selector.
+///
+/// The first parameter of `initial` is a [`Slotter`](#Slotter) — call
+/// `slot(child_component)` wherever you want a nested component to appear.
+/// Ignore it with `_` if no children are needed.
 ///
 /// ## Example
 ///
 /// ```gleam
 /// component.live(
 ///   slice: fn(model) { model.data },
-///   initial: html.div([], [
-///     html.span([class("value")], [html.text("0")]),
-///     html.div([class("bar")], [])
-///   ]),
+///   initial: fn(_) {
+///     html.div([], [
+///       html.span([class("value")], [html.text("0")]),
+///       html.div([class("bar")], [])
+///     ])
+///   },
 ///   patch: fn(data) {
 ///     [
 ///       SetText(".value", int.to_string(data)),
@@ -306,7 +415,7 @@ pub fn fragment(
 /// ```
 pub fn live(
   slice slice: fn(model) -> a,
-  initial initial: html,
+  initial initial: fn(Slotter(model, message, html)) -> html,
   patch patch: fn(a) -> List(Patch),
 ) -> Component(model, message, html) {
   Live(
@@ -319,29 +428,39 @@ pub fn live(
 
 @target(javascript)
 /// This is the entry point for rendering, mounting a component tree to a
-/// specific DOM element.. It creates a subscription to the store and renders
+/// specific DOM element. It creates a subscription to the store and renders
 /// the entire component tree whenever the model changes.
 ///
-/// - `store`: The application store
 /// - `selector`: CSS selector for the mount point (e.g., `"#app"`)
 /// - `to_html`: Function to convert `html` type to `String` (e.g.,
 ///   `element.to_string` for Lustre or `fn(html) {html}` for raw HTML strings)
+/// - `to_slot`: Zero-argument function returning an `html` placeholder value
+///   that serialises to `<lily-slot></lily-slot>`. Used when nesting components
+///   via [`Slotter`](#Slotter). For Lustre:
+///   `fn() { element.element("lily-slot", [], []) }`. For raw HTML strings:
+///   `fn() { "<lily-slot></lily-slot>" }`.
 /// - `view`: Function that takes the model and returns the root component tree
 ///
 /// ```gleam
 /// runtime
-/// |> component.mount(selector: "#app", to_html: element.to_string, view: app)
+/// |> component.mount(
+///   selector: "#app",
+///   to_html: element.to_string,
+///   to_slot: fn() { element.element("lily-slot", [], []) },
+///   view: app,
+/// )
 /// ```
 pub fn mount(
   runtime: Runtime(model, message),
   selector selector: String,
   to_html to_html: fn(html) -> String,
+  to_slot to_slot: fn() -> html,
   view view: fn(model) -> Component(model, message, html),
 ) -> Runtime(model, message) {
   // Initial render - this sets up all component subscriptions
   let model = get_model(runtime)
   let tree = view(model)
-  render_tree(runtime, selector, tree, model, to_html, runtime, 0)
+  render_tree(runtime, selector, tree, model, to_html, to_slot, runtime, 0)
 
   runtime
 }
@@ -360,7 +479,7 @@ pub fn mount(
 /// ```gleam
 /// component.simple(
 ///   slice: fn(model) { model.transfer_amount },
-///   render: fn(amount) {
+///   render: fn(amount, _) {
 ///     html.button([], [html.text("Transfer $" <> int.to_string(amount))])
 ///   },
 /// )
@@ -377,24 +496,30 @@ pub fn require_connection(
 /// This is the most common component type. It subscribes to a slice of the
 /// model and re-renders the entire component when that slice changes.
 ///
-/// The `render` function should return HTML (in whatever type is defined on
-/// [`component.mount`](#mount)).
+/// The `render` function receives the slice value and a [`Slotter`](#Slotter).
+/// Call `slot(child_component)` wherever you want a nested component to appear,
+/// or ignore the slot parameter with `_` if no children are needed.
+///
+/// Avoid using `simple` for components that contain `<input>`, `<textarea>`,
+/// or `<select>` elements — every slice change replaces the component's
+/// entire DOM via `innerHTML`, which destroys focus and any in-progress user
+/// input. Use [`live`](#live) with targeted patches instead.
 ///
 /// ```gleam
 /// component.simple(
 ///   slice: fn(model) { model.count },
-///   render: fn(count) {
+///   render: fn(count, _) {
 ///     html.div([], [html.text("Count: " <> int.to_string(count))])
 ///   }
 /// )
 /// ```
 pub fn simple(
   slice slice: fn(model) -> a,
-  render render: fn(a) -> html,
+  render render: fn(a, Slotter(model, message, html)) -> html,
 ) -> Component(model, message, html) {
   Simple(
     slice: fn(model) { to_dynamic(slice(model)) },
-    render: fn(data) { render(from_dynamic(data)) },
+    render: fn(data, slot) { render(from_dynamic(data), slot) },
     compare: ReferenceEqual,
   )
 }
@@ -403,10 +528,16 @@ pub fn simple(
 /// Static components render once and never update. Useful for headers, static
 /// text, or any content that doesn't depend on the model.
 ///
+/// The `content` function receives a [`Slotter`](#Slotter). Call
+/// `slot(child_component)` wherever you want a nested component to appear,
+/// or ignore the slot parameter with `_` if no children are needed.
+///
 /// ```gleam
-/// component.static(html.h1([], [html.text("My App")]))
+/// component.static(fn(_) { html.h1([], [html.text("My App")]) })
 /// ```
-pub fn static(content: html) -> Component(model, message, html) {
+pub fn static(
+  content content: fn(Slotter(model, message, html)) -> html,
+) -> Component(model, message, html) {
   Static(content)
 }
 
@@ -423,7 +554,7 @@ pub fn static(content: html) -> Component(model, message, html) {
 /// ```gleam
 /// component.simple(
 ///   slice: fn(model) { #(model.x, model.y) },  // Returns new tuple each time
-///   render: fn(pos) { ... }
+///   render: fn(pos, _) { ... }
 /// )
 /// |> component.structural  // Enable deep equality check
 /// ```
@@ -491,6 +622,7 @@ fn render_tree(
   _component: Component(model, message, html),
   _model: model,
   _to_html: fn(html) -> String,
+  _to_slot: fn() -> html,
   _store: Runtime(model, message),
   _depth: Int,
 ) -> Nil {

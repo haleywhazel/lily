@@ -24,27 +24,37 @@ export function createServer(
   handleIncoming,
 ) {
   // Closure-scoped state (not module-level, allows multiple instances)
+  // Set to null on stop() — all methods short-circuit in that case.
   let state = initialState;
 
   return {
     /** Register a client connection */
     connect(clientId, send) {
+      if (state === null) return;
       state = handleConnect(state, clientId, send);
     },
 
     /** Unregister a client connection */
     disconnect(clientId) {
+      if (state === null) return;
       state = handleDisconnect(state, clientId);
     },
 
     /** Process an incoming message */
     incoming(clientId, bytes) {
+      if (state === null) return;
       state = handleIncoming(state, clientId, bytes);
     },
 
     /** Set the message hook */
     setHook(hook) {
+      if (state === null) return;
       state.on_message_hook = new Some(hook);
+    },
+
+    /** Stop the server — releases state. Further calls are no-ops. */
+    stop() {
+      state = null;
     },
   };
 }
@@ -78,4 +88,9 @@ export function incoming(handle, clientId, bytes) {
 /** Call the setHook method on the server handle */
 export function setHook(handle, hook) {
   handle.setHook(hook);
+}
+
+/** Call the stop method on the server handle */
+export function stop(handle) {
+  handle.stop();
 }

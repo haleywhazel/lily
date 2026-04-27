@@ -482,6 +482,14 @@ fn handle_incoming(
   serialiser: transport.Serialiser(model, message),
 ) -> Nil {
   case transport.decode(bytes, serialiser:) {
+    Ok(transport.Acknowledge(sequence:)) -> {
+      set_last_sequence(handle, sequence)
+    }
+
+    Ok(transport.ClientMessage(payload: _payload)) -> Nil
+
+    Ok(transport.Push(payload:)) -> apply_remote_message(handle, payload)
+
     Ok(transport.ServerMessage(sequence:, payload:)) -> {
       set_last_sequence(handle, sequence)
       apply_remote_message(handle, payload)
@@ -489,14 +497,9 @@ fn handle_incoming(
 
     Ok(transport.Snapshot(sequence:, state:)) -> {
       set_last_sequence(handle, sequence)
-      dispatch_model(handle, state)
+      merge_local_and_dispatch(handle, state)
     }
 
-    Ok(transport.Acknowledge(sequence:)) -> {
-      set_last_sequence(handle, sequence)
-    }
-
-    Ok(transport.ClientMessage(payload: _payload)) -> Nil
     Ok(transport.Resync(after_sequence: _after_sequence)) -> Nil
 
     Error(_error) -> Nil
@@ -542,13 +545,6 @@ fn create_runtime(
 }
 
 @target(javascript)
-/// Dispatch the current model to listeners
-@external(javascript, "./client.ffi.mjs", "dispatchModel")
-fn dispatch_model(_handle: RuntimeHandle, _model: model) -> Nil {
-  Nil
-}
-
-@target(javascript)
 /// Send the FFI message
 @external(javascript, "./client.ffi.mjs", "sendMessage")
 fn ffi_send_message(_handle: RuntimeHandle, _message: message) -> Nil {
@@ -574,6 +570,14 @@ fn get_model(_handle: RuntimeHandle) -> model {
 /// trigger the initial render
 @external(javascript, "./client.ffi.mjs", "initialNotify")
 fn initial_notify(_handle: RuntimeHandle) -> Nil {
+  Nil
+}
+
+@target(javascript)
+/// Apply a server snapshot to the runtime, preserving any Local fields from
+/// the current client model
+@external(javascript, "./client.ffi.mjs", "mergeLocalAndDispatch")
+fn merge_local_and_dispatch(_handle: RuntimeHandle, _state: model) -> Nil {
   Nil
 }
 

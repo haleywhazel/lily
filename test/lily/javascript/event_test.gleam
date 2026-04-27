@@ -127,8 +127,8 @@ pub fn event_on_key_down_extracts_key_test() {
   test_dom.set_inner_html("#app", "<div id=\"key-tgt\" tabindex=\"0\"></div>")
   let captured = test_ref.new("")
   let _r =
-    event.on_key_down(runtime, selector: "#key-tgt", handler: fn(key) {
-      test_ref.set(captured, key)
+    event.on_key_down(runtime, selector: "#key-tgt", handler: fn(ke) {
+      test_ref.set(captured, ke.key)
       Noop
     })
   test_dom.key_event("#key-tgt", "keydown", "Enter")
@@ -143,8 +143,8 @@ pub fn event_on_key_up_extracts_key_test() {
   test_dom.set_inner_html("#app", "<div id=\"key-up\" tabindex=\"0\"></div>")
   let captured = test_ref.new("")
   let _r =
-    event.on_key_up(runtime, selector: "#key-up", handler: fn(key) {
-      test_ref.set(captured, key)
+    event.on_key_up(runtime, selector: "#key-up", handler: fn(ke) {
+      test_ref.set(captured, ke.key)
       Noop
     })
   test_dom.key_event("#key-up", "keyup", "Escape")
@@ -162,7 +162,7 @@ pub fn event_on_blur_fires_test() {
   let runtime = new_runtime()
   test_dom.set_inner_html("#app", "<input id=\"blur-in\" />")
   let _r =
-    event.on_blur(runtime, selector: "#blur-in", handler: fn() { Increment })
+    event.on_blur(runtime, selector: "#blur-in", handler: fn(_el) { Increment })
   test_dom.simple_event("#blur-in", "blur")
   client.get_current_model(runtime).count
   |> should.equal(1)
@@ -192,7 +192,7 @@ pub fn event_on_mouse_down_extracts_coordinates_test() {
   let x_ref = test_ref.new(0)
   let y_ref = test_ref.new(0)
   let _r =
-    event.on_mouse_down(runtime, selector: "#coord-tgt", handler: fn(x, y) {
+    event.on_mouse_down(runtime, selector: "#coord-tgt", handler: fn(x, y, _el) {
       test_ref.set(x_ref, x)
       test_ref.set(y_ref, y)
       Noop

@@ -254,6 +254,66 @@ pub fn js_server_resync_sends_snapshot_test() {
   }
 }
 
+@target(javascript)
+/// Wrap the custom serialiser with a counter around `encode_model` so tests
+/// can assert how many times the server encodes a `Snapshot`.
+fn counting_serialiser(
+  counter: test_ref.Ref(Int),
+) -> transport.Serialiser(Model, Message) {
+  transport.custom_json(
+    encode_message: test_fixtures.encode_message,
+    decode_message: test_fixtures.message_decoder(),
+    encode_model: fn(model) {
+      test_ref.set(counter, test_ref.get(counter) + 1)
+      test_fixtures.encode_model(model)
+    },
+    decode_model: test_fixtures.model_decoder(),
+  )
+}
+
+@target(javascript)
+pub fn js_server_resync_reuses_cached_snapshot_test() {
+  let counter = test_ref.new(0)
+  let app_store =
+    store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+  let assert Ok(srv) =
+    server.start(store: app_store, serialiser: counting_serialiser(counter))
+  let _ = connect_client(srv, "c1")
+
+  list.repeat(Nil, 100)
+  |> list.each(fn(_) {
+    server.incoming(srv, client_id: "c1", bytes: encode_resync(0))
+  })
+  test_ref.get(counter)
+  |> should.equal(1)
+}
+
+@target(javascript)
+pub fn js_server_client_message_invalidates_snapshot_cache_test() {
+  let counter = test_ref.new(0)
+  let app_store =
+    store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+  let assert Ok(srv) =
+    server.start(store: app_store, serialiser: counting_serialiser(counter))
+  let _ = connect_client(srv, "c1")
+
+  list.repeat(Nil, 100)
+  |> list.each(fn(_) {
+    server.incoming(srv, client_id: "c1", bytes: encode_resync(0))
+  })
+  test_ref.get(counter)
+  |> should.equal(1)
+
+  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
+
+  list.repeat(Nil, 100)
+  |> list.each(fn(_) {
+    server.incoming(srv, client_id: "c1", bytes: encode_resync(0))
+  })
+  test_ref.get(counter)
+  |> should.equal(2)
+}
+
 // =============================================================================
 // ON-MESSAGE HOOK
 // =============================================================================
@@ -332,4 +392,21 @@ pub fn js_server_auto_log_messages_processes_normally_test() {
   get_c1()
   |> list.length
   |> should.equal(1)
+}
+
+// =============================================================================
+// STOP
+// =============================================================================
+
+@target(javascript)
+pub fn js_server_stop_silently_drops_further_calls_test() {
+  let srv = new_server()
+  let get_c1 = connect_client(srv, "c1")
+  server.stop(srv)
+  // Subsequent calls do not crash and produce no output
+  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
+  server.disconnect(srv, client_id: "c1")
+  get_c1()
+  |> list.length
+  |> should.equal(0)
 }
