@@ -3,7 +3,9 @@
 
 import gleam/bit_array
 import gleeunit/should
-import lily/test_fixtures.{Decrement, Increment, SetName}
+import lily/test_fixtures.{
+  type Message, type Model, Decrement, Increment, SetName,
+}
 import lily/test_ref
 import lily/transport.{
   Acknowledge, ClientMessage, Resync, ServerMessage, Snapshot,
@@ -281,4 +283,103 @@ pub fn transport_send_calls_send_function_test() {
   transport.send(t, bit_array.from_string("hello"))
   test_ref.get(ref)
   |> should.equal(bit_array.from_string("hello"))
+}
+
+// =============================================================================
+// CUSTOM BINARY SERIALISER
+// =============================================================================
+
+fn binary_serialiser() -> transport.Serialiser(Model, Message) {
+  transport.custom_binary(
+    encode_message: fn(msg: Message) {
+      case msg {
+        test_fixtures.Increment -> <<1>>
+        test_fixtures.Decrement -> <<2>>
+        test_fixtures.Reset -> <<3>>
+        test_fixtures.Noop -> <<4>>
+        test_fixtures.SetName(n) ->
+          bit_array.concat([<<5>>, bit_array.from_string(n)])
+      }
+    },
+    decode_message: fn(bytes) {
+      case bytes {
+        <<1>> -> Ok(test_fixtures.Increment)
+        <<2>> -> Ok(test_fixtures.Decrement)
+        <<3>> -> Ok(test_fixtures.Reset)
+        <<4>> -> Ok(test_fixtures.Noop)
+        <<5, rest:bytes>> ->
+          case bit_array.to_string(rest) {
+            Ok(name) -> Ok(test_fixtures.SetName(name))
+            Error(Nil) -> Error(Nil)
+          }
+        _ -> Error(Nil)
+      }
+    },
+    encode_model: fn(m: Model) { <<m.count>> },
+    decode_model: fn(bytes) {
+      case bytes {
+        <<n>> -> Ok(test_fixtures.Model(count: n, name: "", connected: False))
+        _ -> Error(Nil)
+      }
+    },
+  )
+}
+
+pub fn custom_binary_roundtrip_client_message_test() {
+  let ser = binary_serialiser()
+  transport.encode(ClientMessage(payload: Increment), serialiser: ser)
+  |> transport.decode(serialiser: ser)
+  |> should.equal(Ok(ClientMessage(payload: Increment)))
+}
+
+pub fn custom_binary_roundtrip_decrement_test() {
+  let ser = binary_serialiser()
+  transport.encode(ClientMessage(payload: Decrement), serialiser: ser)
+  |> transport.decode(serialiser: ser)
+  |> should.equal(Ok(ClientMessage(payload: Decrement)))
+}
+
+pub fn custom_binary_roundtrip_set_name_test() {
+  let ser = binary_serialiser()
+  transport.encode(ClientMessage(payload: SetName("Eve")), serialiser: ser)
+  |> transport.decode(serialiser: ser)
+  |> should.equal(Ok(ClientMessage(payload: SetName("Eve"))))
+}
+
+pub fn custom_binary_roundtrip_snapshot_test() {
+  let ser = binary_serialiser()
+  let model = test_fixtures.Model(count: 7, name: "", connected: False)
+  transport.encode(Snapshot(sequence: 3, state: model), serialiser: ser)
+  |> transport.decode(serialiser: ser)
+  |> should.equal(Ok(Snapshot(sequence: 3, state: model)))
+}
+
+pub fn custom_binary_roundtrip_acknowledge_test() {
+  let ser = binary_serialiser()
+  transport.encode(Acknowledge(sequence: 5), serialiser: ser)
+  |> transport.decode(serialiser: ser)
+  |> should.equal(Ok(Acknowledge(sequence: 5)))
+}
+
+pub fn custom_binary_roundtrip_resync_test() {
+  let ser = binary_serialiser()
+  transport.encode(Resync(after_sequence: 4), serialiser: ser)
+  |> transport.decode(serialiser: ser)
+  |> should.equal(Ok(Resync(after_sequence: 4)))
+}
+
+pub fn custom_binary_use_json_is_noop_test() {
+  let ser = binary_serialiser()
+  let ser_after = transport.use_json(ser)
+  transport.encode(Acknowledge(sequence: 9), serialiser: ser_after)
+  |> transport.decode(serialiser: ser_after)
+  |> should.equal(Ok(Acknowledge(sequence: 9)))
+}
+
+pub fn custom_binary_use_message_pack_is_noop_test() {
+  let ser = binary_serialiser()
+  let ser_after = transport.use_message_pack(ser)
+  transport.encode(Acknowledge(sequence: 9), serialiser: ser_after)
+  |> transport.decode(serialiser: ser_after)
+  |> should.equal(Ok(Acknowledge(sequence: 9)))
 }

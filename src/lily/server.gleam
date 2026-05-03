@@ -342,8 +342,7 @@ fn handle_incoming_logic(
     Ok(transport.ClientMessage(payload:)) ->
       handle_client_message_logic(state, client_id, payload)
 
-    Ok(transport.Resync(after_sequence:)) ->
-      handle_resync_logic(state, client_id, after_sequence)
+    Ok(transport.Resync(_)) -> handle_resync_logic(state, client_id)
 
     _ -> state
   }
@@ -356,7 +355,6 @@ fn handle_incoming_logic(
 fn handle_resync_logic(
   state: ServerState(model, message),
   client_id: String,
-  _after_sequence: Int,
 ) -> ServerState(model, message) {
   case dict.get(state.clients, client_id) {
     Error(Nil) -> state
@@ -385,38 +383,6 @@ fn handle_resync_logic(
 // =============================================================================
 
 @target(erlang)
-/// Handle a client connection event (Erlang actor wrapper)
-fn handle_client_connected(
-  state: ServerState(model, message),
-  client_id: String,
-  send: fn(BitArray) -> Nil,
-) -> actor.Next(ServerState(model, message), InternalEvent(model, message)) {
-  handle_client_connected_logic(state, client_id, send)
-  |> actor.continue
-}
-
-@target(erlang)
-/// Handle a client disconnection event (Erlang actor wrapper)
-fn handle_client_disconnected(
-  state: ServerState(model, message),
-  client_id: String,
-) -> actor.Next(ServerState(model, message), InternalEvent(model, message)) {
-  handle_client_disconnected_logic(state, client_id)
-  |> actor.continue
-}
-
-@target(erlang)
-/// Handle an incoming message event (Erlang actor wrapper)
-fn handle_incoming(
-  state: ServerState(model, message),
-  client_id: String,
-  bytes: BitArray,
-) -> actor.Next(ServerState(model, message), InternalEvent(model, message)) {
-  handle_incoming_logic(state, client_id, bytes)
-  |> actor.continue
-}
-
-@target(erlang)
 /// Actor message handler (Erlang)
 fn handle_message(
   state: ServerState(model, message),
@@ -424,12 +390,16 @@ fn handle_message(
 ) -> actor.Next(ServerState(model, message), InternalEvent(model, message)) {
   case message {
     ClientConnected(client_id:, send:) ->
-      handle_client_connected(state, client_id, send)
+      handle_client_connected_logic(state, client_id, send)
+      |> actor.continue
 
     ClientDisconnected(client_id:) ->
-      handle_client_disconnected(state, client_id)
+      handle_client_disconnected_logic(state, client_id)
+      |> actor.continue
 
-    Incoming(client_id:, bytes:) -> handle_incoming(state, client_id, bytes)
+    Incoming(client_id:, bytes:) ->
+      handle_incoming_logic(state, client_id, bytes)
+      |> actor.continue
 
     SetHook(hook:) ->
       ServerState(..state, on_message_hook: option.Some(hook))

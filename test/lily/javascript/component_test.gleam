@@ -98,10 +98,9 @@ pub fn component_mount_renders_to_dom_test() {
   let runtime = new_runtime()
   let _r =
     mount(runtime, fn(_model) {
-      component.simple(
-        slice: fn(m: Model) { m.count },
-        render: fn(count, _) { int.to_string(count) },
-      )
+      component.simple(slice: fn(m: Model) { m.count }, render: fn(count, _) {
+        int.to_string(count)
+      })
     })
   test_dom.inner_html("#app")
   |> should.not_equal("")
@@ -117,10 +116,9 @@ pub fn component_simple_name_renders_test() {
   let runtime = new_runtime()
   let _r =
     mount(runtime, fn(_model) {
-      component.simple(
-        slice: fn(m: Model) { m.name },
-        render: fn(name, _) { "name:" <> name },
-      )
+      component.simple(slice: fn(m: Model) { m.name }, render: fn(name, _) {
+        "name:" <> name
+      })
     })
   test_dom.inner_html("#app")
   |> string.contains("name:")
@@ -133,10 +131,9 @@ pub fn component_simple_renders_initial_slice_test() {
   let runtime = new_runtime()
   let _r =
     mount(runtime, fn(_model) {
-      component.simple(
-        slice: fn(m: Model) { m.count },
-        render: fn(count, _) { "count:" <> int.to_string(count) },
-      )
+      component.simple(slice: fn(m: Model) { m.count }, render: fn(count, _) {
+        "count:" <> int.to_string(count)
+      })
     })
   test_dom.inner_html("#app")
   |> string.contains("count:0")
@@ -149,10 +146,9 @@ pub fn component_simple_updates_on_model_change_test() {
   let runtime = new_runtime()
   let _r =
     mount(runtime, fn(_model) {
-      component.simple(
-        slice: fn(m: Model) { m.count },
-        render: fn(count, _) { "count:" <> int.to_string(count) },
-      )
+      component.simple(slice: fn(m: Model) { m.count }, render: fn(count, _) {
+        "count:" <> int.to_string(count)
+      })
     })
   client.dispatch(runtime)(Increment)
   test_dom.inner_html("#app")
@@ -282,10 +278,9 @@ pub fn component_require_connection_adds_disabled_when_disconnected_test() {
   let runtime = new_runtime()
   let _r =
     mount(runtime, fn(_model) {
-      component.simple(
-        slice: fn(m: Model) { m.count },
-        render: fn(count, _) { int.to_string(count) },
-      )
+      component.simple(slice: fn(m: Model) { m.count }, render: fn(count, _) {
+        int.to_string(count)
+      })
       |> component.require_connection(fn(m: Model) { m.connected })
     })
   test_dom.has_attribute("[data-lily-component]", "data-lily-disabled")
@@ -303,10 +298,9 @@ pub fn component_require_connection_removes_disabled_when_connected_test() {
     |> client.start
   let _r =
     mount(runtime, fn(_model) {
-      component.simple(
-        slice: fn(m: Model) { m.count },
-        render: fn(count, _) { int.to_string(count) },
-      )
+      component.simple(slice: fn(m: Model) { m.count }, render: fn(count, _) {
+        int.to_string(count)
+      })
       |> component.require_connection(fn(m: Model) { m.connected })
     })
   test_dom.has_attribute("[data-lily-component]", "data-lily-disabled")
@@ -343,8 +337,7 @@ pub fn component_structural_on_static_is_noop_test() {
   let _structural_component = component.structural(static_component)
   test_setup.reset_dom()
   let runtime = new_runtime()
-  let _r =
-    mount(runtime, fn(_model) { component.static(fn(_) { "hello" }) })
+  let _r = mount(runtime, fn(_model) { component.static(fn(_) { "hello" }) })
   test_dom.inner_html("#app")
   |> should.equal("hello")
 }

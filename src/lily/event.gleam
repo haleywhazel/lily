@@ -147,9 +147,12 @@ pub fn on_change(
   selector selector: String,
   handler handler: fn(String) -> message,
 ) -> Runtime(model, message) {
-  setup_value_event(selector, "change", fn(value) {
-    client.send_message(runtime, handler(value))
-  })
+  setup_value_event_with_options(
+    selector,
+    "change",
+    #(-1, -1, False, False, False),
+    fn(value) { client.send_message(runtime, handler(value)) },
+  )
   runtime
 }
 
@@ -163,12 +166,16 @@ pub fn on_click(
   selector selector: String,
   decoder decoder: fn(String) -> Result(message, Nil),
 ) -> Runtime(model, message) {
-  setup_click_event(selector, fn(message_name) {
-    case decoder(message_name) {
-      Ok(message) -> client.send_message(runtime, message)
-      Error(Nil) -> Nil
-    }
-  })
+  setup_click_event_with_options(
+    selector,
+    #(-1, -1, False, False, False),
+    fn(message_name) {
+      case decoder(message_name) {
+        Ok(message) -> client.send_message(runtime, message)
+        Error(Nil) -> Nil
+      }
+    },
+  )
   runtime
 }
 
@@ -183,11 +190,7 @@ pub fn on_click_with(
 ) -> Runtime(model, message) {
   setup_click_event_with_options(
     selector,
-    option.unwrap(options.debounce_ms, -1),
-    option.unwrap(options.throttle_ms, -1),
-    options.once,
-    options.stop_propagation,
-    options.prevent_default,
+    unpack_options(options),
     fn(message_name) {
       case decoder(message_name) {
         Ok(message) -> client.send_message(runtime, message)
@@ -207,13 +210,13 @@ pub fn on_context_menu(
   selector selector: String,
   handler handler: fn(Int, Int, ElementData) -> message,
 ) -> Runtime(model, message) {
-  setup_coordinate_element_event(selector, "contextmenu", ElementData, fn(
-    x,
-    y,
-    el,
-  ) {
-    client.send_message(runtime, handler(x, y, el))
-  })
+  setup_coordinate_element_event_with_options(
+    selector,
+    "contextmenu",
+    #(-1, -1, False, False, False),
+    ElementData,
+    fn(x, y, el) { client.send_message(runtime, handler(x, y, el)) },
+  )
   runtime
 }
 
@@ -224,9 +227,12 @@ pub fn on_copy(
   selector selector: String,
   handler handler: fn() -> message,
 ) -> Runtime(model, message) {
-  setup_simple_event(selector, "copy", fn() {
-    client.send_message(runtime, handler())
-  })
+  setup_simple_event_with_options(
+    selector,
+    "copy",
+    #(-1, -1, False, False, False),
+    fn() { client.send_message(runtime, handler()) },
+  )
   runtime
 }
 
@@ -237,9 +243,12 @@ pub fn on_cut(
   selector selector: String,
   handler handler: fn() -> message,
 ) -> Runtime(model, message) {
-  setup_simple_event(selector, "cut", fn() {
-    client.send_message(runtime, handler())
-  })
+  setup_simple_event_with_options(
+    selector,
+    "cut",
+    #(-1, -1, False, False, False),
+    fn() { client.send_message(runtime, handler()) },
+  )
   runtime
 }
 
@@ -267,9 +276,12 @@ pub fn on_drag(
   selector selector: String,
   handler handler: fn(Int, Int) -> message,
 ) -> Runtime(model, message) {
-  setup_coordinate_event(selector, "drag", fn(x, y) {
-    client.send_message(runtime, handler(x, y))
-  })
+  setup_coordinate_event_with_options(
+    selector,
+    "drag",
+    #(-1, -1, False, False, False),
+    fn(x, y) { client.send_message(runtime, handler(x, y)) },
+  )
   runtime
 }
 
@@ -297,13 +309,13 @@ pub fn on_drag_over(
   selector selector: String,
   handler handler: fn(Int, Int, ElementData) -> message,
 ) -> Runtime(model, message) {
-  setup_coordinate_element_event(selector, "dragover", ElementData, fn(
-    x,
-    y,
-    el,
-  ) {
-    client.send_message(runtime, handler(x, y, el))
-  })
+  setup_coordinate_element_event_with_options(
+    selector,
+    "dragover",
+    #(-1, -1, False, False, False),
+    ElementData,
+    fn(x, y, el) { client.send_message(runtime, handler(x, y, el)) },
+  )
   runtime
 }
 
@@ -319,11 +331,7 @@ pub fn on_drag_over_with(
   setup_coordinate_element_event_with_options(
     selector,
     "dragover",
-    option.unwrap(options.debounce_ms, -1),
-    option.unwrap(options.throttle_ms, -1),
-    options.once,
-    options.stop_propagation,
-    options.prevent_default,
+    unpack_options(options),
     ElementData,
     fn(x, y, el) { client.send_message(runtime, handler(x, y, el)) },
   )
@@ -338,13 +346,13 @@ pub fn on_drag_start(
   selector selector: String,
   handler handler: fn(Int, Int, ElementData) -> message,
 ) -> Runtime(model, message) {
-  setup_coordinate_element_event(selector, "dragstart", ElementData, fn(
-    x,
-    y,
-    el,
-  ) {
-    client.send_message(runtime, handler(x, y, el))
-  })
+  setup_coordinate_element_event_with_options(
+    selector,
+    "dragstart",
+    #(-1, -1, False, False, False),
+    ElementData,
+    fn(x, y, el) { client.send_message(runtime, handler(x, y, el)) },
+  )
   runtime
 }
 
@@ -359,11 +367,7 @@ pub fn on_drag_with(
   setup_coordinate_event_with_options(
     selector,
     "drag",
-    option.unwrap(options.debounce_ms, -1),
-    option.unwrap(options.throttle_ms, -1),
-    options.once,
-    options.stop_propagation,
-    options.prevent_default,
+    unpack_options(options),
     fn(x, y) { client.send_message(runtime, handler(x, y)) },
   )
   runtime
@@ -378,9 +382,13 @@ pub fn on_drop(
   selector selector: String,
   handler handler: fn(Int, Int, ElementData) -> message,
 ) -> Runtime(model, message) {
-  setup_coordinate_element_event(selector, "drop", ElementData, fn(x, y, el) {
-    client.send_message(runtime, handler(x, y, el))
-  })
+  setup_coordinate_element_event_with_options(
+    selector,
+    "drop",
+    #(-1, -1, False, False, False),
+    ElementData,
+    fn(x, y, el) { client.send_message(runtime, handler(x, y, el)) },
+  )
   runtime
 }
 
@@ -471,9 +479,12 @@ pub fn on_input(
   selector selector: String,
   handler handler: fn(String) -> message,
 ) -> Runtime(model, message) {
-  setup_value_event(selector, "input", fn(value) {
-    client.send_message(runtime, handler(value))
-  })
+  setup_value_event_with_options(
+    selector,
+    "input",
+    #(-1, -1, False, False, False),
+    fn(value) { client.send_message(runtime, handler(value)) },
+  )
   runtime
 }
 
@@ -489,11 +500,7 @@ pub fn on_input_with(
   setup_value_event_with_options(
     selector,
     "input",
-    option.unwrap(options.debounce_ms, -1),
-    option.unwrap(options.throttle_ms, -1),
-    options.once,
-    options.stop_propagation,
-    options.prevent_default,
+    unpack_options(options),
     fn(value) { client.send_message(runtime, handler(value)) },
   )
   runtime
@@ -507,9 +514,13 @@ pub fn on_key_down(
   selector selector: String,
   handler handler: fn(KeyEvent) -> message,
 ) -> Runtime(model, message) {
-  setup_key_full_event(selector, "keydown", KeyEvent, fn(ke) {
-    client.send_message(runtime, handler(ke))
-  })
+  setup_key_full_event_with_options(
+    selector,
+    "keydown",
+    #(-1, -1, False, False, False),
+    KeyEvent,
+    fn(ke) { client.send_message(runtime, handler(ke)) },
+  )
   runtime
 }
 
@@ -524,11 +535,7 @@ pub fn on_key_down_with(
   setup_key_full_event_with_options(
     selector,
     "keydown",
-    option.unwrap(options.debounce_ms, -1),
-    option.unwrap(options.throttle_ms, -1),
-    options.once,
-    options.stop_propagation,
-    options.prevent_default,
+    unpack_options(options),
     KeyEvent,
     fn(ke) { client.send_message(runtime, handler(ke)) },
   )
@@ -543,9 +550,13 @@ pub fn on_key_up(
   selector selector: String,
   handler handler: fn(KeyEvent) -> message,
 ) -> Runtime(model, message) {
-  setup_key_full_event(selector, "keyup", KeyEvent, fn(ke) {
-    client.send_message(runtime, handler(ke))
-  })
+  setup_key_full_event_with_options(
+    selector,
+    "keyup",
+    #(-1, -1, False, False, False),
+    KeyEvent,
+    fn(ke) { client.send_message(runtime, handler(ke)) },
+  )
   runtime
 }
 
@@ -558,13 +569,13 @@ pub fn on_mouse_down(
   selector selector: String,
   handler handler: fn(Int, Int, ElementData) -> message,
 ) -> Runtime(model, message) {
-  setup_coordinate_element_event(selector, "mousedown", ElementData, fn(
-    x,
-    y,
-    el,
-  ) {
-    client.send_message(runtime, handler(x, y, el))
-  })
+  setup_coordinate_element_event_with_options(
+    selector,
+    "mousedown",
+    #(-1, -1, False, False, False),
+    ElementData,
+    fn(x, y, el) { client.send_message(runtime, handler(x, y, el)) },
+  )
   runtime
 }
 
@@ -608,9 +619,12 @@ pub fn on_mouse_move(
   selector selector: String,
   handler handler: fn(Int, Int) -> message,
 ) -> Runtime(model, message) {
-  setup_coordinate_event(selector, "mousemove", fn(x, y) {
-    client.send_message(runtime, handler(x, y))
-  })
+  setup_coordinate_event_with_options(
+    selector,
+    "mousemove",
+    #(-1, -1, False, False, False),
+    fn(x, y) { client.send_message(runtime, handler(x, y)) },
+  )
   runtime
 }
 
@@ -625,11 +639,7 @@ pub fn on_mouse_move_with(
   setup_coordinate_event_with_options(
     selector,
     "mousemove",
-    option.unwrap(options.debounce_ms, -1),
-    option.unwrap(options.throttle_ms, -1),
-    options.once,
-    options.stop_propagation,
-    options.prevent_default,
+    unpack_options(options),
     fn(x, y) { client.send_message(runtime, handler(x, y)) },
   )
   runtime
@@ -644,9 +654,13 @@ pub fn on_mouse_up(
   selector selector: String,
   handler handler: fn(Int, Int, ElementData) -> message,
 ) -> Runtime(model, message) {
-  setup_coordinate_element_event(selector, "mouseup", ElementData, fn(x, y, el) {
-    client.send_message(runtime, handler(x, y, el))
-  })
+  setup_coordinate_element_event_with_options(
+    selector,
+    "mouseup",
+    #(-1, -1, False, False, False),
+    ElementData,
+    fn(x, y, el) { client.send_message(runtime, handler(x, y, el)) },
+  )
   runtime
 }
 
@@ -657,9 +671,12 @@ pub fn on_paste(
   selector selector: String,
   handler handler: fn() -> message,
 ) -> Runtime(model, message) {
-  setup_simple_event(selector, "paste", fn() {
-    client.send_message(runtime, handler())
-  })
+  setup_simple_event_with_options(
+    selector,
+    "paste",
+    #(-1, -1, False, False, False),
+    fn() { client.send_message(runtime, handler()) },
+  )
   runtime
 }
 
@@ -671,9 +688,12 @@ pub fn on_pointer_down(
   selector selector: String,
   handler handler: fn(Int, Int) -> message,
 ) -> Runtime(model, message) {
-  setup_coordinate_event(selector, "pointerdown", fn(x, y) {
-    client.send_message(runtime, handler(x, y))
-  })
+  setup_coordinate_event_with_options(
+    selector,
+    "pointerdown",
+    #(-1, -1, False, False, False),
+    fn(x, y) { client.send_message(runtime, handler(x, y)) },
+  )
   runtime
 }
 
@@ -685,9 +705,12 @@ pub fn on_pointer_move(
   selector selector: String,
   handler handler: fn(Int, Int) -> message,
 ) -> Runtime(model, message) {
-  setup_coordinate_event(selector, "pointermove", fn(x, y) {
-    client.send_message(runtime, handler(x, y))
-  })
+  setup_coordinate_event_with_options(
+    selector,
+    "pointermove",
+    #(-1, -1, False, False, False),
+    fn(x, y) { client.send_message(runtime, handler(x, y)) },
+  )
   runtime
 }
 
@@ -702,11 +725,7 @@ pub fn on_pointer_move_with(
   setup_coordinate_event_with_options(
     selector,
     "pointermove",
-    option.unwrap(options.debounce_ms, -1),
-    option.unwrap(options.throttle_ms, -1),
-    options.once,
-    options.stop_propagation,
-    options.prevent_default,
+    unpack_options(options),
     fn(x, y) { client.send_message(runtime, handler(x, y)) },
   )
   runtime
@@ -720,9 +739,12 @@ pub fn on_pointer_up(
   selector selector: String,
   handler handler: fn(Int, Int) -> message,
 ) -> Runtime(model, message) {
-  setup_coordinate_event(selector, "pointerup", fn(x, y) {
-    client.send_message(runtime, handler(x, y))
-  })
+  setup_coordinate_event_with_options(
+    selector,
+    "pointerup",
+    #(-1, -1, False, False, False),
+    fn(x, y) { client.send_message(runtime, handler(x, y)) },
+  )
   runtime
 }
 
@@ -734,9 +756,12 @@ pub fn on_resize(
   selector selector: String,
   handler handler: fn() -> message,
 ) -> Runtime(model, message) {
-  setup_simple_event(selector, "resize", fn() {
-    client.send_message(runtime, handler())
-  })
+  setup_simple_event_with_options(
+    selector,
+    "resize",
+    #(-1, -1, False, False, False),
+    fn() { client.send_message(runtime, handler()) },
+  )
   runtime
 }
 
@@ -751,11 +776,7 @@ pub fn on_resize_with(
   setup_simple_event_with_options(
     selector,
     "resize",
-    option.unwrap(options.debounce_ms, -1),
-    option.unwrap(options.throttle_ms, -1),
-    options.once,
-    options.stop_propagation,
-    options.prevent_default,
+    unpack_options(options),
     fn() { client.send_message(runtime, handler()) },
   )
   runtime
@@ -770,9 +791,11 @@ pub fn on_scroll(
   selector selector: String,
   handler handler: fn(Int, Int) -> message,
 ) -> Runtime(model, message) {
-  setup_scroll_position_event(selector, fn(top, left) {
-    client.send_message(runtime, handler(top, left))
-  })
+  setup_scroll_position_event_with_options(
+    selector,
+    #(-1, -1, False, False, False),
+    fn(top, left) { client.send_message(runtime, handler(top, left)) },
+  )
   runtime
 }
 
@@ -787,11 +810,7 @@ pub fn on_scroll_with(
 ) -> Runtime(model, message) {
   setup_scroll_position_event_with_options(
     selector,
-    option.unwrap(options.debounce_ms, -1),
-    option.unwrap(options.throttle_ms, -1),
-    options.once,
-    options.stop_propagation,
-    options.prevent_default,
+    unpack_options(options),
     fn(top, left) { client.send_message(runtime, handler(top, left)) },
   )
   runtime
@@ -838,9 +857,12 @@ pub fn on_touch_move(
   selector selector: String,
   handler handler: fn(Int, Int) -> message,
 ) -> Runtime(model, message) {
-  setup_coordinate_event(selector, "touchmove", fn(x, y) {
-    client.send_message(runtime, handler(x, y))
-  })
+  setup_coordinate_event_with_options(
+    selector,
+    "touchmove",
+    #(-1, -1, False, False, False),
+    fn(x, y) { client.send_message(runtime, handler(x, y)) },
+  )
   runtime
 }
 
@@ -855,11 +877,7 @@ pub fn on_touch_move_with(
   setup_coordinate_event_with_options(
     selector,
     "touchmove",
-    option.unwrap(options.debounce_ms, -1),
-    option.unwrap(options.throttle_ms, -1),
-    options.once,
-    options.stop_propagation,
-    options.prevent_default,
+    unpack_options(options),
     fn(x, y) { client.send_message(runtime, handler(x, y)) },
   )
   runtime
@@ -873,9 +891,12 @@ pub fn on_touch_start(
   selector selector: String,
   handler handler: fn(Int, Int) -> message,
 ) -> Runtime(model, message) {
-  setup_coordinate_event(selector, "touchstart", fn(x, y) {
-    client.send_message(runtime, handler(x, y))
-  })
+  setup_coordinate_event_with_options(
+    selector,
+    "touchstart",
+    #(-1, -1, False, False, False),
+    fn(x, y) { client.send_message(runtime, handler(x, y)) },
+  )
   runtime
 }
 
@@ -887,9 +908,13 @@ pub fn on_wheel(
   selector selector: String,
   handler handler: fn(Float, Float) -> message,
 ) -> Runtime(model, message) {
-  setup_wheel_event(selector, fn(delta_x, delta_y) {
-    client.send_message(runtime, handler(delta_x, delta_y))
-  })
+  setup_wheel_event_with_options(
+    selector,
+    #(-1, -1, False, False, False),
+    fn(delta_x, delta_y) {
+      client.send_message(runtime, handler(delta_x, delta_y))
+    },
+  )
   runtime
 }
 
@@ -903,16 +928,27 @@ pub fn on_wheel_with(
 ) -> Runtime(model, message) {
   setup_wheel_event_with_options(
     selector,
-    option.unwrap(options.debounce_ms, -1),
-    option.unwrap(options.throttle_ms, -1),
-    options.once,
-    options.stop_propagation,
-    options.prevent_default,
+    unpack_options(options),
     fn(delta_x, delta_y) {
       client.send_message(runtime, handler(delta_x, delta_y))
     },
   )
   runtime
+}
+
+// =============================================================================
+// PRIVATE FUNCTIONS
+// =============================================================================
+
+@target(javascript)
+fn unpack_options(options: EventOptions) -> #(Int, Int, Bool, Bool, Bool) {
+  #(
+    option.unwrap(options.debounce_ms, -1),
+    option.unwrap(options.throttle_ms, -1),
+    options.once,
+    options.stop_propagation,
+    options.prevent_default,
+  )
 }
 
 // =============================================================================
@@ -922,57 +958,11 @@ pub fn on_wheel_with(
 // See event.ffi.mjs for explanations for each function.
 
 @target(javascript)
-@external(javascript, "./event.ffi.mjs", "setupClickEvent")
-fn setup_click_event(_selector: String, _handler: fn(String) -> Nil) -> Nil {
-  Nil
-}
-
-@target(javascript)
 @external(javascript, "./event.ffi.mjs", "setupClickEventWithOptions")
 fn setup_click_event_with_options(
   _selector: String,
-  _debounce_ms: Int,
-  _throttle_ms: Int,
-  _once: Bool,
-  _stop_propagation: Bool,
-  _prevent_default: Bool,
+  _options: #(Int, Int, Bool, Bool, Bool),
   _handler: fn(String) -> Nil,
-) -> Nil {
-  Nil
-}
-
-@target(javascript)
-@external(javascript, "./event.ffi.mjs", "setupCoordinateEvent")
-fn setup_coordinate_event(
-  _selector: String,
-  _event_name: String,
-  _handler: fn(Int, Int) -> Nil,
-) -> Nil {
-  Nil
-}
-
-@target(javascript)
-@external(javascript, "./event.ffi.mjs", "setupCoordinateEventWithOptions")
-fn setup_coordinate_event_with_options(
-  _selector: String,
-  _event_name: String,
-  _debounce_ms: Int,
-  _throttle_ms: Int,
-  _once: Bool,
-  _stop_propagation: Bool,
-  _prevent_default: Bool,
-  _handler: fn(Int, Int) -> Nil,
-) -> Nil {
-  Nil
-}
-
-@target(javascript)
-@external(javascript, "./event.ffi.mjs", "setupCoordinateElementEvent")
-fn setup_coordinate_element_event(
-  _selector: String,
-  _event_name: String,
-  _make_element_data: fn(List(#(String, String))) -> ElementData,
-  _handler: fn(Int, Int, ElementData) -> Nil,
 ) -> Nil {
   Nil
 }
@@ -982,13 +972,20 @@ fn setup_coordinate_element_event(
 fn setup_coordinate_element_event_with_options(
   _selector: String,
   _event_name: String,
-  _debounce_ms: Int,
-  _throttle_ms: Int,
-  _once: Bool,
-  _stop_propagation: Bool,
-  _prevent_default: Bool,
+  _options: #(Int, Int, Bool, Bool, Bool),
   _make_element_data: fn(List(#(String, String))) -> ElementData,
   _handler: fn(Int, Int, ElementData) -> Nil,
+) -> Nil {
+  Nil
+}
+
+@target(javascript)
+@external(javascript, "./event.ffi.mjs", "setupCoordinateEventWithOptions")
+fn setup_coordinate_event_with_options(
+  _selector: String,
+  _event_name: String,
+  _options: #(Int, Int, Bool, Bool, Bool),
+  _handler: fn(Int, Int) -> Nil,
 ) -> Nil {
   Nil
 }
@@ -1014,37 +1011,13 @@ fn setup_form_change_event(
 }
 
 @target(javascript)
-@external(javascript, "./event.ffi.mjs", "setupKeyFullEvent")
-fn setup_key_full_event(
-  _selector: String,
-  _event_name: String,
-  _make_key_event: fn(String, Bool, Bool, Bool, Bool) -> KeyEvent,
-  _handler: fn(KeyEvent) -> Nil,
-) -> Nil {
-  Nil
-}
-
-@target(javascript)
 @external(javascript, "./event.ffi.mjs", "setupKeyFullEventWithOptions")
 fn setup_key_full_event_with_options(
   _selector: String,
   _event_name: String,
-  _debounce_ms: Int,
-  _throttle_ms: Int,
-  _once: Bool,
-  _stop_propagation: Bool,
-  _prevent_default: Bool,
+  _options: #(Int, Int, Bool, Bool, Bool),
   _make_key_event: fn(String, Bool, Bool, Bool, Bool) -> KeyEvent,
   _handler: fn(KeyEvent) -> Nil,
-) -> Nil {
-  Nil
-}
-
-@target(javascript)
-@external(javascript, "./event.ffi.mjs", "setupScrollPositionEvent")
-fn setup_scroll_position_event(
-  _selector: String,
-  _handler: fn(Int, Int) -> Nil,
 ) -> Nil {
   Nil
 }
@@ -1053,37 +1026,8 @@ fn setup_scroll_position_event(
 @external(javascript, "./event.ffi.mjs", "setupScrollPositionEventWithOptions")
 fn setup_scroll_position_event_with_options(
   _selector: String,
-  _debounce_ms: Int,
-  _throttle_ms: Int,
-  _once: Bool,
-  _stop_propagation: Bool,
-  _prevent_default: Bool,
+  _options: #(Int, Int, Bool, Bool, Bool),
   _handler: fn(Int, Int) -> Nil,
-) -> Nil {
-  Nil
-}
-
-@target(javascript)
-@external(javascript, "./event.ffi.mjs", "setupSimpleEvent")
-fn setup_simple_event(
-  _selector: String,
-  _event_name: String,
-  _handler: fn() -> Nil,
-) -> Nil {
-  Nil
-}
-
-@target(javascript)
-@external(javascript, "./event.ffi.mjs", "setupSimpleEventWithOptions")
-fn setup_simple_event_with_options(
-  _selector: String,
-  _event_name: String,
-  _debounce_ms: Int,
-  _throttle_ms: Int,
-  _once: Bool,
-  _stop_propagation: Bool,
-  _prevent_default: Bool,
-  _handler: fn() -> Nil,
 ) -> Nil {
   Nil
 }
@@ -1099,6 +1043,17 @@ fn setup_simple_event_prevent_default(
 }
 
 @target(javascript)
+@external(javascript, "./event.ffi.mjs", "setupSimpleEventWithOptions")
+fn setup_simple_event_with_options(
+  _selector: String,
+  _event_name: String,
+  _options: #(Int, Int, Bool, Bool, Bool),
+  _handler: fn() -> Nil,
+) -> Nil {
+  Nil
+}
+
+@target(javascript)
 @external(javascript, "./event.ffi.mjs", "setupSubmitFormEvent")
 fn setup_submit_form_event(
   _selector: String,
@@ -1108,35 +1063,12 @@ fn setup_submit_form_event(
 }
 
 @target(javascript)
-@external(javascript, "./event.ffi.mjs", "setupValueEvent")
-fn setup_value_event(
-  _selector: String,
-  _event_name: String,
-  _handler: fn(String) -> Nil,
-) -> Nil {
-  Nil
-}
-
-@target(javascript)
 @external(javascript, "./event.ffi.mjs", "setupValueEventWithOptions")
 fn setup_value_event_with_options(
   _selector: String,
   _event_name: String,
-  _debounce_ms: Int,
-  _throttle_ms: Int,
-  _once: Bool,
-  _stop_propagation: Bool,
-  _prevent_default: Bool,
+  _options: #(Int, Int, Bool, Bool, Bool),
   _handler: fn(String) -> Nil,
-) -> Nil {
-  Nil
-}
-
-@target(javascript)
-@external(javascript, "./event.ffi.mjs", "setupWheelEvent")
-fn setup_wheel_event(
-  _selector: String,
-  _handler: fn(Float, Float) -> Nil,
 ) -> Nil {
   Nil
 }
@@ -1145,11 +1077,7 @@ fn setup_wheel_event(
 @external(javascript, "./event.ffi.mjs", "setupWheelEventWithOptions")
 fn setup_wheel_event_with_options(
   _selector: String,
-  _debounce_ms: Int,
-  _throttle_ms: Int,
-  _once: Bool,
-  _stop_propagation: Bool,
-  _prevent_default: Bool,
+  _options: #(Int, Int, Bool, Bool, Bool),
   _handler: fn(Float, Float) -> Nil,
 ) -> Nil {
   Nil

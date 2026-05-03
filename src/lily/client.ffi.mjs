@@ -62,6 +62,7 @@ export function createRuntime(store, apply) {
   let sessionConfig = null;
   const previousFieldValues = new Map();
   let connectionStatusConfig = null;
+  let snapshotHook = null;
 
   function flushNotify() {
     const model = currentStore.model;
@@ -134,6 +135,9 @@ export function createRuntime(store, apply) {
     },
     getComponentRegistry() {
       return componentRegistry;
+    },
+    getSnapshotHook() {
+      return snapshotHook;
     },
     getLastSequence() {
       const raw = localStorage.getItem(STORAGE_KEY_SEQUENCE);
@@ -226,6 +230,9 @@ export function createRuntime(store, apply) {
     setUserMessageHook(hook) {
       userMessageHook = hook;
     },
+    setSnapshotHook(hook) {
+      snapshotHook = hook;
+    },
   };
 }
 
@@ -273,8 +280,17 @@ export function initialNotify(runtime) {
 
 export function mergeLocalAndDispatch(runtime, incoming) {
   const current = runtime.getModel();
-  const merged = mergeLocal(current, incoming);
+  const hook = runtime.getSnapshotHook();
+  const merged = hook ? hook(incoming, current) : mergeLocal(current, incoming);
   runtime.dispatchModel(merged);
+}
+
+export function mergeLocals(incoming, current) {
+  return mergeLocal(current, incoming);
+}
+
+export function setSnapshotHook(runtime, hook) {
+  runtime.setSnapshotHook(hook);
 }
 
 export function readField(prefix, key) {

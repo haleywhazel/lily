@@ -3,12 +3,12 @@
  * once and persist for the lifetime of the page. Handlers call back into Gleam
  * code which sends messages to the store.
  *
- * The *WithOptions variants accept debounce_ms, throttle_ms, once,
- * stop_propagation, and prevent_default parameters (debounce_ms and
- * throttle_ms are -1 when disabled). applyOptions wraps a raw DOM event
- * listener with these behaviours. preventDefaultFirst wraps the listener so
- * that preventDefault fires on every event even when debounce/throttle would
- * skip the inner handler.
+ * The *WithOptions variants accept an options array [debounceMs, throttleMs,
+ * once, stopPropagation, preventDefault] (debounceMs and throttleMs are -1
+ * when disabled). applyOptions wraps a raw DOM event listener with these
+ * behaviours. preventDefaultFirst wraps the listener so that preventDefault
+ * fires on every event even when debounce/throttle would skip the inner
+ * handler.
  *
  * setupElementEvent / setupCoordinateElementEvent use event delegation and
  * attach to document rather than a single queried element, so they work
@@ -147,28 +147,9 @@ function preventDefaultFirst(listener) {
 // EXPORT FUNCTIONS — CLICK
 // =============================================================================
 
-/** Attaches a click event handler with data-msg attribute delegation */
-export function setupClickEvent(selector, handler) {
-  const target = resolveTarget(selector);
-  if (!target) return;
-  target.addEventListener("click", (event) => {
-    if (event.target.closest("[data-lily-disabled]")) return;
-    const matched = event.target.closest("[data-msg]");
-    if (!matched) return;
-    handler(matched.getAttribute("data-msg"));
-  });
-}
-
-/** Like setupClickEvent but with debounce/throttle/once/stopPropagation/preventDefault */
-export function setupClickEventWithOptions(
-  selector,
-  debounceMs,
-  throttleMs,
-  once,
-  stopPropagation,
-  preventDefault,
-  handler,
-) {
+/** Attaches a click event handler with data-msg attribute delegation and options */
+export function setupClickEventWithOptions(selector, options, handler) {
+  const [debounceMs, throttleMs, once, stopPropagation, preventDefault] = options;
   const target = resolveTarget(selector);
   if (!target) return;
   let listener = (event) => {
@@ -186,27 +167,9 @@ export function setupClickEventWithOptions(
 // EXPORT FUNCTIONS — COORDINATE (coords only, no element data)
 // =============================================================================
 
-/** Attaches a coordinate event (mouse/touch/pointer) with x,y position */
-export function setupCoordinateEvent(selector, eventName, handler) {
-  const target = resolveTarget(selector);
-  if (!target) return;
-  target.addEventListener(eventName, (event) => {
-    if (event.target.closest("[data-lily-disabled]")) return;
-    handler(event.clientX, event.clientY);
-  });
-}
-
-/** Like setupCoordinateEvent but with debounce/throttle/once/stopPropagation/preventDefault */
-export function setupCoordinateEventWithOptions(
-  selector,
-  eventName,
-  debounceMs,
-  throttleMs,
-  once,
-  stopPropagation,
-  preventDefault,
-  handler,
-) {
+/** Attaches a coordinate event (mouse/touch/pointer) with x,y position and options */
+export function setupCoordinateEventWithOptions(selector, eventName, options, handler) {
+  const [debounceMs, throttleMs, once, stopPropagation, preventDefault] = options;
   const target = resolveTarget(selector);
   if (!target) return;
   let listener = (event) => {
@@ -223,40 +186,20 @@ export function setupCoordinateEventWithOptions(
 // =============================================================================
 
 /**
- * Attaches a coordinate event with x,y position and the matched element's
- * data-* attributes. Uses event delegation via document so it works on
+ * Attaches a coordinate event with x,y position, the matched element's
+ * data-* attributes, and options. preventDefault is hoisted outside
+ * debounce/throttle so drop targets stay receptive even when the inner
+ * handler is suppressed. Uses event delegation via document so it works on
  * dynamically-rendered lists.
- */
-export function setupCoordinateElementEvent(
-  selector,
-  eventName,
-  makeElementData,
-  handler,
-) {
-  document.addEventListener(eventName, (event) => {
-    if (event.target.closest("[data-lily-disabled]")) return;
-    const matched = event.target.closest(selector);
-    if (!matched) return;
-    handler(event.clientX, event.clientY, makeElementData(datasetToList(matched)));
-  });
-}
-
-/**
- * Like setupCoordinateElementEvent but with options. preventDefault is hoisted
- * outside debounce/throttle so drop targets stay receptive even when the
- * inner handler is suppressed.
  */
 export function setupCoordinateElementEventWithOptions(
   selector,
   eventName,
-  debounceMs,
-  throttleMs,
-  once,
-  stopPropagation,
-  preventDefault,
+  options,
   makeElementData,
   handler,
 ) {
+  const [debounceMs, throttleMs, once, stopPropagation, preventDefault] = options;
   let listener = (event) => {
     if (event.target.closest("[data-lily-disabled]")) return;
     const matched = event.target.closest(selector);
@@ -287,31 +230,6 @@ export function setupElementEvent(selector, eventName, makeElementData, handler)
     if (shouldSkipDelegatedEvent(eventName, matched, event.relatedTarget)) return;
     handler(makeElementData(datasetToList(matched)));
   });
-}
-
-/** Like setupElementEvent but with options. */
-export function setupElementEventWithOptions(
-  selector,
-  eventName,
-  debounceMs,
-  throttleMs,
-  once,
-  stopPropagation,
-  preventDefault,
-  makeElementData,
-  handler,
-) {
-  const domEvent = delegatedEventName(eventName);
-  let listener = (event) => {
-    if (event.target.closest("[data-lily-disabled]")) return;
-    const matched = event.target.closest(selector);
-    if (!matched) return;
-    if (shouldSkipDelegatedEvent(eventName, matched, event.relatedTarget)) return;
-    handler(makeElementData(datasetToList(matched)));
-  };
-  listener = applyOptions(listener, debounceMs, throttleMs, once, stopPropagation);
-  if (preventDefault) listener = preventDefaultFirst(listener);
-  document.addEventListener(domEvent, listener);
 }
 
 // =============================================================================
@@ -347,31 +265,15 @@ export function setupFormChangeEvent(selector, handler) {
 // EXPORT FUNCTIONS — KEY (with modifiers)
 // =============================================================================
 
-/**
- * Attaches a keyboard event that passes key name and modifier flags (ctrl,
- * shift, alt, meta) to the handler via the makeKeyEvent constructor.
- */
-export function setupKeyFullEvent(selector, eventName, makeKeyEvent, handler) {
-  document.addEventListener(eventName, (event) => {
-    if (event.target.closest("[data-lily-disabled]")) return;
-    const matched = event.target.closest(selector);
-    if (!matched) return;
-    handler(makeKeyEvent(event.key, event.ctrlKey, event.shiftKey, event.altKey, event.metaKey));
-  });
-}
-
-/** Like setupKeyFullEvent but with options. */
+/** Attaches a keyboard event that passes key name and modifier flags, with options. */
 export function setupKeyFullEventWithOptions(
   selector,
   eventName,
-  debounceMs,
-  throttleMs,
-  once,
-  stopPropagation,
-  preventDefault,
+  options,
   makeKeyEvent,
   handler,
 ) {
+  const [debounceMs, throttleMs, once, stopPropagation, preventDefault] = options;
   let listener = (event) => {
     if (event.target.closest("[data-lily-disabled]")) return;
     const matched = event.target.closest(selector);
@@ -389,28 +291,10 @@ export function setupKeyFullEventWithOptions(
 
 /**
  * Attaches a scroll event that passes the element's scrollTop and scrollLeft
- * values (not delta — absolute position).
+ * values (not delta — absolute position), with options.
  */
-export function setupScrollPositionEvent(selector, handler) {
-  const target = resolveTarget(selector);
-  if (!target) return;
-  target.addEventListener("scroll", (event) => {
-    if (event.target.closest?.("[data-lily-disabled]")) return;
-    const el = event.target;
-    handler(el.scrollTop ?? 0, el.scrollLeft ?? 0);
-  });
-}
-
-/** Like setupScrollPositionEvent but with options. */
-export function setupScrollPositionEventWithOptions(
-  selector,
-  debounceMs,
-  throttleMs,
-  once,
-  stopPropagation,
-  preventDefault,
-  handler,
-) {
+export function setupScrollPositionEventWithOptions(selector, options, handler) {
+  const [debounceMs, throttleMs, once, stopPropagation, preventDefault] = options;
   const target = resolveTarget(selector);
   if (!target) return;
   let listener = (event) => {
@@ -427,27 +311,9 @@ export function setupScrollPositionEventWithOptions(
 // EXPORT FUNCTIONS — SIMPLE (no data)
 // =============================================================================
 
-/** Attaches a simple event with no event data */
-export function setupSimpleEvent(selector, eventName, handler) {
-  const target = resolveTarget(selector);
-  if (!target) return;
-  target.addEventListener(eventName, (event) => {
-    if (event.target.closest("[data-lily-disabled]")) return;
-    handler();
-  });
-}
-
-/** Like setupSimpleEvent but with debounce/throttle/once/stopPropagation/preventDefault */
-export function setupSimpleEventWithOptions(
-  selector,
-  eventName,
-  debounceMs,
-  throttleMs,
-  once,
-  stopPropagation,
-  preventDefault,
-  handler,
-) {
+/** Attaches a simple event with no event data, with options */
+export function setupSimpleEventWithOptions(selector, eventName, options, handler) {
+  const [debounceMs, throttleMs, once, stopPropagation, preventDefault] = options;
   const target = resolveTarget(selector);
   if (!target) return;
   let listener = (event) => {
@@ -460,11 +326,7 @@ export function setupSimpleEventWithOptions(
 }
 
 /** Attaches a simple event with preventDefault called */
-export function setupSimpleEventWithPreventDefault(
-  selector,
-  eventName,
-  handler,
-) {
+export function setupSimpleEventWithPreventDefault(selector, eventName, handler) {
   const target = resolveTarget(selector);
   if (!target) return;
   target.addEventListener(eventName, (event) => {
@@ -508,27 +370,9 @@ export function setupSubmitFormEvent(selector, handler) {
 // EXPORT FUNCTIONS — VALUE
 // =============================================================================
 
-/** Attaches an input/change event with input value */
-export function setupValueEvent(selector, eventName, handler) {
-  const target = resolveTarget(selector);
-  if (!target) return;
-  target.addEventListener(eventName, (event) => {
-    if (event.target.closest("[data-lily-disabled]")) return;
-    handler(event.target.value || "");
-  });
-}
-
-/** Like setupValueEvent but with debounce/throttle/once/stopPropagation/preventDefault */
-export function setupValueEventWithOptions(
-  selector,
-  eventName,
-  debounceMs,
-  throttleMs,
-  once,
-  stopPropagation,
-  preventDefault,
-  handler,
-) {
+/** Attaches an input/change event with input value, with options */
+export function setupValueEventWithOptions(selector, eventName, options, handler) {
+  const [debounceMs, throttleMs, once, stopPropagation, preventDefault] = options;
   const target = resolveTarget(selector);
   if (!target) return;
   let listener = (event) => {
@@ -544,26 +388,9 @@ export function setupValueEventWithOptions(
 // EXPORT FUNCTIONS — WHEEL
 // =============================================================================
 
-/** Attaches a wheel event with deltaX and deltaY values */
-export function setupWheelEvent(selector, handler) {
-  const target = resolveTarget(selector);
-  if (!target) return;
-  target.addEventListener("wheel", (event) => {
-    if (event.target.closest("[data-lily-disabled]")) return;
-    handler(event.deltaX, event.deltaY);
-  });
-}
-
-/** Like setupWheelEvent but with debounce/throttle/once/stopPropagation/preventDefault */
-export function setupWheelEventWithOptions(
-  selector,
-  debounceMs,
-  throttleMs,
-  once,
-  stopPropagation,
-  preventDefault,
-  handler,
-) {
+/** Attaches a wheel event with deltaX and deltaY values, with options */
+export function setupWheelEventWithOptions(selector, options, handler) {
+  const [debounceMs, throttleMs, once, stopPropagation, preventDefault] = options;
   const target = resolveTarget(selector);
   if (!target) return;
   let listener = (event) => {

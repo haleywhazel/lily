@@ -99,12 +99,7 @@ pub fn pub_sub_broadcast_only_to_topic_subscribers_test() {
   let s2 = register_client(bus, "c2")
   pub_sub.subscribe(bus, client_id: "c1", topic: "room:a")
   pub_sub.subscribe(bus, client_id: "c2", topic: "room:b")
-  pub_sub.broadcast(
-    bus,
-    topic: "room:a",
-    message: Increment,
-    serialiser: ser(),
-  )
+  pub_sub.broadcast(bus, topic: "room:a", message: Increment, serialiser: ser())
   recv(s1)
   |> should.be_ok
   recv(s2)
@@ -159,12 +154,7 @@ pub fn pub_sub_unregister_stops_delivery_test() {
   let s1 = register_client(bus, "c1")
   pub_sub.subscribe(bus, client_id: "c1", topic: "room:a")
   pub_sub.unregister(bus, client_id: "c1")
-  pub_sub.broadcast(
-    bus,
-    topic: "room:a",
-    message: Increment,
-    serialiser: ser(),
-  )
+  pub_sub.broadcast(bus, topic: "room:a", message: Increment, serialiser: ser())
   recv(s1)
   |> should.be_error
 }
@@ -179,12 +169,7 @@ pub fn pub_sub_unsubscribe_stops_delivery_test() {
   let s1 = register_client(bus, "c1")
   pub_sub.subscribe(bus, client_id: "c1", topic: "room:a")
   pub_sub.unsubscribe(bus, client_id: "c1", topic: "room:a")
-  pub_sub.broadcast(
-    bus,
-    topic: "room:a",
-    message: Increment,
-    serialiser: ser(),
-  )
+  pub_sub.broadcast(bus, topic: "room:a", message: Increment, serialiser: ser())
   recv(s1)
   |> should.be_error
 }

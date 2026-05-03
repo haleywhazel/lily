@@ -12,9 +12,7 @@ import gleeunit/should
 @target(javascript)
 import lily/pub_sub
 @target(javascript)
-import lily/test_fixtures.{
-  type Message, type Model, Increment, Reset, SetName,
-}
+import lily/test_fixtures.{type Message, type Model, Increment, Reset, SetName}
 @target(javascript)
 import lily/test_ref
 @target(javascript)
@@ -109,12 +107,7 @@ pub fn js_pub_sub_broadcast_only_to_topic_subscribers_test() {
   let drain_b = register_client(bus, "c2")
   pub_sub.subscribe(bus, client_id: "c1", topic: "room:a")
   pub_sub.subscribe(bus, client_id: "c2", topic: "room:b")
-  pub_sub.broadcast(
-    bus,
-    topic: "room:a",
-    message: Increment,
-    serialiser: ser(),
-  )
+  pub_sub.broadcast(bus, topic: "room:a", message: Increment, serialiser: ser())
   drain_a()
   |> list.length
   |> should.equal(1)
@@ -191,12 +184,7 @@ pub fn js_pub_sub_unregister_stops_delivery_test() {
   let drain = register_client(bus, "c1")
   pub_sub.subscribe(bus, client_id: "c1", topic: "room:a")
   pub_sub.unregister(bus, client_id: "c1")
-  pub_sub.broadcast(
-    bus,
-    topic: "room:a",
-    message: Increment,
-    serialiser: ser(),
-  )
+  pub_sub.broadcast(bus, topic: "room:a", message: Increment, serialiser: ser())
   drain()
   |> list.length
   |> should.equal(0)
@@ -214,18 +202,8 @@ pub fn js_pub_sub_unregister_auto_unsubscribes_all_topics_test() {
   // Re-register with a fresh capture — if unregister didn't clear subs,
   // the broadcast would still target "c1" and land here.
   let drain_new = register_client(bus, "c1")
-  pub_sub.broadcast(
-    bus,
-    topic: "room:a",
-    message: Increment,
-    serialiser: ser(),
-  )
-  pub_sub.broadcast(
-    bus,
-    topic: "room:b",
-    message: Increment,
-    serialiser: ser(),
-  )
+  pub_sub.broadcast(bus, topic: "room:a", message: Increment, serialiser: ser())
+  pub_sub.broadcast(bus, topic: "room:b", message: Increment, serialiser: ser())
   drain_new()
   |> list.length
   |> should.equal(0)
@@ -241,12 +219,7 @@ pub fn js_pub_sub_unsubscribe_stops_delivery_test() {
   let drain = register_client(bus, "c1")
   pub_sub.subscribe(bus, client_id: "c1", topic: "room:a")
   pub_sub.unsubscribe(bus, client_id: "c1", topic: "room:a")
-  pub_sub.broadcast(
-    bus,
-    topic: "room:a",
-    message: Increment,
-    serialiser: ser(),
-  )
+  pub_sub.broadcast(bus, topic: "room:a", message: Increment, serialiser: ser())
   drain()
   |> list.length
   |> should.equal(0)
@@ -271,18 +244,8 @@ pub fn js_pub_sub_client_receives_from_multiple_subscribed_topics_test() {
   let drain = register_client(bus, "c1")
   pub_sub.subscribe(bus, client_id: "c1", topic: "room:a")
   pub_sub.subscribe(bus, client_id: "c1", topic: "room:b")
-  pub_sub.broadcast(
-    bus,
-    topic: "room:a",
-    message: Increment,
-    serialiser: ser(),
-  )
-  pub_sub.broadcast(
-    bus,
-    topic: "room:b",
-    message: Reset,
-    serialiser: ser(),
-  )
+  pub_sub.broadcast(bus, topic: "room:a", message: Increment, serialiser: ser())
+  pub_sub.broadcast(bus, topic: "room:b", message: Reset, serialiser: ser())
   drain()
   |> list.length
   |> should.equal(2)
@@ -295,10 +258,7 @@ pub fn js_pub_sub_client_receives_from_multiple_subscribed_topics_test() {
 @target(javascript)
 pub fn js_pub_sub_push_roundtrip_json_test() {
   let bytes =
-    transport.encode(
-      transport.Push(payload: SetName("bob")),
-      serialiser: ser(),
-    )
+    transport.encode(transport.Push(payload: SetName("bob")), serialiser: ser())
   transport.decode(bytes, serialiser: ser())
   |> should.equal(Ok(transport.Push(payload: SetName("bob"))))
 }
@@ -308,10 +268,7 @@ pub fn js_pub_sub_push_wire_has_no_sequence_field_test() {
   // Critical invariant: Push frames carry no sequence number, so clients
   // cannot accidentally advance their resync cursor on receipt.
   let bytes =
-    transport.encode(
-      transport.Push(payload: Increment),
-      serialiser: ser(),
-    )
+    transport.encode(transport.Push(payload: Increment), serialiser: ser())
   let assert Ok(text) = bit_array.to_string(bytes)
   string.contains(text, "sequence")
   |> should.be_false

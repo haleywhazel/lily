@@ -8,8 +8,8 @@
  *   - HTTP transport: SSE (server→client) + fetch POST (client→server)
  *   - WebSocket transport: binary frames with exponential-backoff reconnect
  *
- * Both transports persist offline queues to localStorage (base64-encoded frames)
- * and flush them on reconnection before sending Resync.
+ * Both transports persist offline queues to localStorage and flush them on
+ * reconnection before sending Resync.
  */
 
 // =============================================================================
@@ -66,7 +66,11 @@ export function autoDecode(json) {
  */
 export function autoDecodeMessagePack(bitArray) {
   try {
-    const view = new DataView(bitArray.rawBuffer.buffer, bitArray.rawBuffer.byteOffset, bitArray.rawBuffer.byteLength);
+    const view = new DataView(
+      bitArray.rawBuffer.buffer,
+      bitArray.rawBuffer.byteOffset,
+      bitArray.rawBuffer.byteLength,
+    );
     const [jsValue] = messagePackDecodeAt(view, 0);
     return new Ok(autoDecodeInner(jsValue));
   } catch (_e) {
@@ -86,7 +90,12 @@ export function autoEncode(value) {
   if (typeof value === "number") return value;
 
   // List (Gleam lists are built as nested objects with `head` and `tail`)
-  if (value && typeof value === "object" && "head" in value && "tail" in value) {
+  if (
+    value &&
+    typeof value === "object" &&
+    "head" in value &&
+    "tail" in value
+  ) {
     const result = [];
     let current = value;
     while (current && current.head !== undefined) {
@@ -158,60 +167,24 @@ export function registerModule(moduleNamespace) {
  */
 export function httpConnect(postUrl, eventsUrl, flushBatchSize, handler) {
   // Closure-scoped state (not module-level, allows multiple instances)
+  const queue = createOfflineQueue(STORAGE_KEY_HTTP_PENDING);
   let eventSource = null;
-  let pending = [];
   let isConnected = false;
-  let persistScheduled = false;
   let isFlushing = false;
-
-  function getPending() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY_HTTP_PENDING);
-      if (raw) return JSON.parse(raw).map(base64ToFrame);
-    } catch (_error) {
-      // Corrupted data, reset to empty queue
-    }
-    return [];
-  }
-
-  function queuePending(frame) {
-    const wasEmpty = pending.length === 0;
-    pending.push(frame);
-    if (wasEmpty) {
-      try {
-        localStorage.setItem(STORAGE_KEY_HTTP_PENDING, JSON.stringify(pending.map(frameToBase64)));
-      } catch (_error) {
-        // Quota exceeded — frame remains in-memory, sent on reconnect
-      }
-    } else if (!persistScheduled) {
-      // Subsequent frames are coalesced — avoids O(n²) writes in rapid batches.
-      persistScheduled = true;
-      queueMicrotask(function () {
-        persistScheduled = false;
-        try {
-          localStorage.setItem(STORAGE_KEY_HTTP_PENDING, JSON.stringify(pending.map(frameToBase64)));
-        } catch (_error) {
-          // Quota exceeded — frames remain in-memory, sent on reconnect
-        }
-      });
-    }
-  }
 
   async function flushPending() {
     // Guard against a second concurrent flush if onopen fires again mid-flush
     if (isFlushing) return;
     // Use in-memory queue; load from storage only on first flush after page load
-    if (pending.length === 0) {
-      pending = getPending();
-    }
-    if (pending.length === 0) return;
+    queue.loadIfEmpty();
+    if (queue.size === 0) return;
 
     isFlushing = true;
     let totalSent = 0;
 
-    for (let i = 0; i < pending.length; i += flushBatchSize) {
+    for (let i = 0; i < queue.size; i += flushBatchSize) {
       if (!isConnected) break;
-      const batch = pending.slice(i, i + flushBatchSize);
+      const batch = queue.slice(i, i + flushBatchSize);
       const results = await Promise.allSettled(
         batch.map(function (frame) {
           return fetch(postUrl, {
@@ -228,14 +201,7 @@ export function httpConnect(postUrl, eventsUrl, flushBatchSize, handler) {
       if (sent < batch.length) break;
     }
 
-    if (totalSent === pending.length) {
-      localStorage.removeItem(STORAGE_KEY_HTTP_PENDING);
-      pending = [];
-    } else if (totalSent > 0) {
-      pending = pending.slice(totalSent);
-      localStorage.setItem(STORAGE_KEY_HTTP_PENDING, JSON.stringify(pending.map(frameToBase64)));
-    }
-
+    queue.drainSent(totalSent);
     isFlushing = false;
   }
 
@@ -277,10 +243,10 @@ export function httpConnect(postUrl, eventsUrl, flushBatchSize, handler) {
           .then(function () {})
           .catch(function (error) {
             console.error("Failed to POST message:", error);
-            queuePending(frame);
+            queue.queuePending(frame);
           });
       } else {
-        queuePending(frame);
+        queue.queuePending(frame);
       }
     },
     close() {
@@ -306,56 +272,73 @@ export function httpConnect(postUrl, eventsUrl, flushBatchSize, handler) {
  */
 export function decodeMessagePackProtocol(bitArray, codec) {
   try {
-    const view = new DataView(bitArray.rawBuffer.buffer, bitArray.rawBuffer.byteOffset, bitArray.rawBuffer.byteLength);
+    const view = new DataView(
+      bitArray.rawBuffer.buffer,
+      bitArray.rawBuffer.byteOffset,
+      bitArray.rawBuffer.byteLength,
+    );
     const [map] = messagePackDecodeAt(view, 0);
-    if (typeof map !== "object" || map === null) throw new globalThis.Error("not a map");
+    if (typeof map !== "object" || map === null)
+      throw new globalThis.Error("not a map");
     const type = map["type"];
 
     if (type === "acknowledge") {
       const sequence = map["sequence"];
-      if (typeof sequence !== "number") throw new globalThis.Error("missing sequence");
+      if (typeof sequence !== "number")
+        throw new globalThis.Error("missing sequence");
       return new Ok(new Acknowledge(sequence));
     }
 
     if (type === "client_message") {
       const payloadRaw = map["payload"];
-      if (!(payloadRaw instanceof Uint8Array)) throw new globalThis.Error("payload not bin");
+      if (!(payloadRaw instanceof Uint8Array))
+        throw new globalThis.Error("payload not bin");
       const result = codec.decode_message(new BitArray(payloadRaw));
-      if (result instanceof Error) throw new globalThis.Error("decode payload failed");
+      if (result instanceof Error)
+        throw new globalThis.Error("decode payload failed");
       return new Ok(new ClientMessage(result[0]));
     }
 
     if (type === "push") {
       const payloadRaw = map["payload"];
-      if (!(payloadRaw instanceof Uint8Array)) throw new globalThis.Error("payload not bin");
+      if (!(payloadRaw instanceof Uint8Array))
+        throw new globalThis.Error("payload not bin");
       const result = codec.decode_message(new BitArray(payloadRaw));
-      if (result instanceof Error) throw new globalThis.Error("decode payload failed");
+      if (result instanceof Error)
+        throw new globalThis.Error("decode payload failed");
       return new Ok(new Push(result[0]));
     }
 
     if (type === "server_message") {
       const sequence = map["sequence"];
       const payloadRaw = map["payload"];
-      if (typeof sequence !== "number") throw new globalThis.Error("missing sequence");
-      if (!(payloadRaw instanceof Uint8Array)) throw new globalThis.Error("payload not bin");
+      if (typeof sequence !== "number")
+        throw new globalThis.Error("missing sequence");
+      if (!(payloadRaw instanceof Uint8Array))
+        throw new globalThis.Error("payload not bin");
       const result = codec.decode_message(new BitArray(payloadRaw));
-      if (result instanceof Error) throw new globalThis.Error("decode payload failed");
+      if (result instanceof Error)
+        throw new globalThis.Error("decode payload failed");
       return new Ok(new ServerMessage(sequence, result[0]));
     }
 
     if (type === "snapshot") {
       const sequence = map["sequence"];
       const stateRaw = map["state"];
-      if (typeof sequence !== "number") throw new globalThis.Error("missing sequence");
-      if (!(stateRaw instanceof Uint8Array)) throw new globalThis.Error("state not bin");
+      if (typeof sequence !== "number")
+        throw new globalThis.Error("missing sequence");
+      if (!(stateRaw instanceof Uint8Array))
+        throw new globalThis.Error("state not bin");
       const result = codec.decode_model(new BitArray(stateRaw));
-      if (result instanceof Error) throw new globalThis.Error("decode state failed");
+      if (result instanceof Error)
+        throw new globalThis.Error("decode state failed");
       return new Ok(new Snapshot(sequence, result[0]));
     }
 
     if (type === "resync") {
       const after_sequence = map["after_sequence"];
-      if (typeof after_sequence !== "number") throw new globalThis.Error("missing after_sequence");
+      if (typeof after_sequence !== "number")
+        throw new globalThis.Error("missing after_sequence");
       return new Ok(new Resync(after_sequence));
     }
 
@@ -376,34 +359,48 @@ export function encodeMessagePackProtocol(protocol, codec) {
 
   if (name === "Acknowledge") {
     buf.push(0x82); // fixmap(2)
-    messagePackEncodeString("type", buf); messagePackEncodeString("acknowledge", buf);
-    messagePackEncodeString("sequence", buf); messagePackEncodeInt(protocol.sequence, buf);
+    messagePackEncodeString("type", buf);
+    messagePackEncodeString("acknowledge", buf);
+    messagePackEncodeString("sequence", buf);
+    messagePackEncodeInt(protocol.sequence, buf);
   } else if (name === "ClientMessage") {
     const payloadBytes = codec.encode_message(protocol.payload).rawBuffer;
     buf.push(0x82); // fixmap(2)
-    messagePackEncodeString("type", buf); messagePackEncodeString("client_message", buf);
-    messagePackEncodeString("payload", buf); messagePackEncodeBin(payloadBytes, buf);
+    messagePackEncodeString("type", buf);
+    messagePackEncodeString("client_message", buf);
+    messagePackEncodeString("payload", buf);
+    messagePackEncodeBin(payloadBytes, buf);
   } else if (name === "Push") {
     const payloadBytes = codec.encode_message(protocol.payload).rawBuffer;
     buf.push(0x82); // fixmap(2)
-    messagePackEncodeString("type", buf); messagePackEncodeString("push", buf);
-    messagePackEncodeString("payload", buf); messagePackEncodeBin(payloadBytes, buf);
+    messagePackEncodeString("type", buf);
+    messagePackEncodeString("push", buf);
+    messagePackEncodeString("payload", buf);
+    messagePackEncodeBin(payloadBytes, buf);
   } else if (name === "ServerMessage") {
     const payloadBytes = codec.encode_message(protocol.payload).rawBuffer;
     buf.push(0x83); // fixmap(3)
-    messagePackEncodeString("type", buf); messagePackEncodeString("server_message", buf);
-    messagePackEncodeString("sequence", buf); messagePackEncodeInt(protocol.sequence, buf);
-    messagePackEncodeString("payload", buf); messagePackEncodeBin(payloadBytes, buf);
+    messagePackEncodeString("type", buf);
+    messagePackEncodeString("server_message", buf);
+    messagePackEncodeString("sequence", buf);
+    messagePackEncodeInt(protocol.sequence, buf);
+    messagePackEncodeString("payload", buf);
+    messagePackEncodeBin(payloadBytes, buf);
   } else if (name === "Snapshot") {
     const stateBytes = codec.encode_model(protocol.state).rawBuffer;
     buf.push(0x83); // fixmap(3)
-    messagePackEncodeString("type", buf); messagePackEncodeString("snapshot", buf);
-    messagePackEncodeString("sequence", buf); messagePackEncodeInt(protocol.sequence, buf);
-    messagePackEncodeString("state", buf); messagePackEncodeBin(stateBytes, buf);
+    messagePackEncodeString("type", buf);
+    messagePackEncodeString("snapshot", buf);
+    messagePackEncodeString("sequence", buf);
+    messagePackEncodeInt(protocol.sequence, buf);
+    messagePackEncodeString("state", buf);
+    messagePackEncodeBin(stateBytes, buf);
   } else if (name === "Resync") {
     buf.push(0x82); // fixmap(2)
-    messagePackEncodeString("type", buf); messagePackEncodeString("resync", buf);
-    messagePackEncodeString("after_sequence", buf); messagePackEncodeInt(protocol.after_sequence, buf);
+    messagePackEncodeString("type", buf);
+    messagePackEncodeString("resync", buf);
+    messagePackEncodeString("after_sequence", buf);
+    messagePackEncodeInt(protocol.after_sequence, buf);
   } else {
     // Unknown protocol type — encode as empty map
     buf.push(0x80);
@@ -421,13 +418,19 @@ export function encodeMessagePackProtocol(protocol, codec) {
  * offline queueing. Binary frames (ArrayBuffer) are used exclusively.
  * Offline queue is base64-encoded and persisted to localStorage.
  */
-export function wsConnect(url, reconnectBaseMs, reconnectMaxMs, jitterRatio, multiplier, handler) {
+export function wsConnect(
+  url,
+  reconnectBaseMs,
+  reconnectMaxMs,
+  jitterRatio,
+  multiplier,
+  handler,
+) {
   // Closure-scoped state (not module-level, allows multiple instances)
   let ws = null;
   let reconnectDelay = null;
   let reconnectTimer = null;
-  let pending = [];
-  let persistScheduled = false;
+  const queue = createOfflineQueue(STORAGE_KEY_WS_PENDING);
 
   function openConnection() {
     if (reconnectTimer) {
@@ -476,7 +479,8 @@ export function wsConnect(url, reconnectBaseMs, reconnectMaxMs, jitterRatio, mul
     }
 
     // Jitter spreads reconnects after a mass disconnect (thundering herd)
-    const jitteredDelay = reconnectDelay * (1 - jitterRatio + Math.random() * jitterRatio * 2);
+    const jitteredDelay =
+      reconnectDelay * (1 - jitterRatio + Math.random() * jitterRatio * 2);
     reconnectTimer = setTimeout(function () {
       reconnectTimer = null;
       openConnection();
@@ -489,64 +493,19 @@ export function wsConnect(url, reconnectBaseMs, reconnectMaxMs, jitterRatio, mul
 
   function flushPending() {
     // Use in-memory queue; load from storage only on first flush after page load
-    if (pending.length === 0) {
-      pending = getPending();
-    }
-    if (pending.length === 0) return;
+    queue.loadIfEmpty();
+    if (queue.size === 0) return;
 
-    const sent = [];
-    for (const frame of pending) {
+    let sent = 0;
+    for (const frame of queue.all()) {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(frame);
-        sent.push(frame);
+        sent++;
       } else {
         break;
       }
     }
-
-    if (sent.length === pending.length) {
-      // Everything went out — wipe the queue
-      localStorage.removeItem(STORAGE_KEY_WS_PENDING);
-      pending = [];
-    } else if (sent.length > 0) {
-      // Partial flush — keep whatever didn't make it
-      const remaining = pending.slice(sent.length);
-      localStorage.setItem(STORAGE_KEY_WS_PENDING, JSON.stringify(remaining.map(frameToBase64)));
-      pending = remaining;
-    }
-  }
-
-  function getPending() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY_WS_PENDING);
-      if (raw) return JSON.parse(raw).map(base64ToFrame);
-    } catch (_error) {
-      // Corrupted data, reset to empty queue
-    }
-    return [];
-  }
-
-  function queuePending(frame) {
-    const wasEmpty = pending.length === 0;
-    pending.push(frame);
-    if (wasEmpty) {
-      try {
-        localStorage.setItem(STORAGE_KEY_WS_PENDING, JSON.stringify(pending.map(frameToBase64)));
-      } catch (_error) {
-        // Quota exceeded — frame remains in-memory, sent on reconnect
-      }
-    } else if (!persistScheduled) {
-      // Subsequent frames are coalesced — avoids O(n²) writes in rapid batches.
-      persistScheduled = true;
-      queueMicrotask(function () {
-        persistScheduled = false;
-        try {
-          localStorage.setItem(STORAGE_KEY_WS_PENDING, JSON.stringify(pending.map(frameToBase64)));
-        } catch (_error) {
-          // Quota exceeded — frames remain in-memory, sent on reconnect
-        }
-      });
-    }
+    queue.drainSent(sent);
   }
 
   openConnection();
@@ -557,7 +516,7 @@ export function wsConnect(url, reconnectBaseMs, reconnectMaxMs, jitterRatio, mul
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(frame);
       } else {
-        queuePending(frame);
+        queue.queuePending(frame);
       }
     },
     close() {
@@ -652,6 +611,67 @@ function base64ToFrame(b64) {
   return bytes;
 }
 
+/** Factory that returns a closure-scoped offline queue backed by localStorage. */
+function createOfflineQueue(storageKey) {
+  let pending = [];
+  let persistScheduled = false;
+
+  function persist() {
+    try {
+      localStorage.setItem(
+        storageKey,
+        JSON.stringify(pending.map(frameToBase64)),
+      );
+    } catch (_error) {
+      // Quota exceeded — frames remain in-memory, sent on reconnect
+    }
+  }
+
+  return {
+    all() {
+      return [...pending];
+    },
+    get size() {
+      return pending.length;
+    },
+    slice(start, end) {
+      return pending.slice(start, end);
+    },
+    loadIfEmpty() {
+      if (pending.length > 0) return;
+      try {
+        const raw = localStorage.getItem(storageKey);
+        if (raw) pending = JSON.parse(raw).map(base64ToFrame);
+      } catch (_error) {
+        pending = [];
+      }
+    },
+    queuePending(frame) {
+      const wasEmpty = pending.length === 0;
+      pending.push(frame);
+      if (wasEmpty) {
+        persist();
+      } else if (!persistScheduled) {
+        // Coalesce subsequent writes — avoids O(n²) localStorage writes in rapid bursts.
+        persistScheduled = true;
+        queueMicrotask(function () {
+          persistScheduled = false;
+          persist();
+        });
+      }
+    },
+    drainSent(count) {
+      if (count === pending.length) {
+        localStorage.removeItem(storageKey);
+        pending = [];
+      } else if (count > 0) {
+        pending = pending.slice(count);
+        persist();
+      }
+    },
+  };
+}
+
 /** Encode a Uint8Array to a base64 string for localStorage persistence. */
 function frameToBase64(frame) {
   let binary = "";
@@ -664,7 +684,8 @@ function frameToBase64(frame) {
 function isCustomTypeClass(fn) {
   let proto = fn.prototype;
   while (proto) {
-    if (proto.constructor && proto.constructor.name === "CustomType") return true;
+    if (proto.constructor && proto.constructor.name === "CustomType")
+      return true;
     proto = Object.getPrototypeOf(proto);
   }
   return false;
@@ -695,52 +716,78 @@ function messagePackDecodeAt(view, pos) {
   // fixstr
   if ((byte & 0xe0) === 0xa0) {
     const len = byte & 0x1f;
-    const str = messagePackTextDecoder.decode(new Uint8Array(view.buffer, view.byteOffset + pos, len));
+    const str = messagePackTextDecoder.decode(
+      new Uint8Array(view.buffer, view.byteOffset + pos, len),
+    );
     return [str, pos + len];
   }
   // fixarray
-  if ((byte & 0xf0) === 0x90) return messagePackDecodeArray(view, pos, byte & 0x0f);
+  if ((byte & 0xf0) === 0x90)
+    return messagePackDecodeArray(view, pos, byte & 0x0f);
   // fixmap
-  if ((byte & 0xf0) === 0x80) return messagePackDecodeMap(view, pos, byte & 0x0f);
+  if ((byte & 0xf0) === 0x80)
+    return messagePackDecodeMap(view, pos, byte & 0x0f);
 
   switch (byte) {
-    case 0xc0: return [null, pos];
-    case 0xc2: return [false, pos];
-    case 0xc3: return [true, pos];
+    case 0xc0:
+      return [null, pos];
+    case 0xc2:
+      return [false, pos];
+    case 0xc3:
+      return [true, pos];
 
-    case 0xcc: return [view.getUint8(pos), pos + 1];
-    case 0xcd: return [view.getUint16(pos), pos + 2];
-    case 0xce: return [view.getUint32(pos), pos + 4];
-    case 0xcf: return [Number(view.getBigUint64(pos)), pos + 8];
+    case 0xcc:
+      return [view.getUint8(pos), pos + 1];
+    case 0xcd:
+      return [view.getUint16(pos), pos + 2];
+    case 0xce:
+      return [view.getUint32(pos), pos + 4];
+    case 0xcf:
+      return [Number(view.getBigUint64(pos)), pos + 8];
 
-    case 0xd0: return [view.getInt8(pos), pos + 1];
-    case 0xd1: return [view.getInt16(pos), pos + 2];
-    case 0xd2: return [view.getInt32(pos), pos + 4];
-    case 0xd3: return [Number(view.getBigInt64(pos)), pos + 8];
+    case 0xd0:
+      return [view.getInt8(pos), pos + 1];
+    case 0xd1:
+      return [view.getInt16(pos), pos + 2];
+    case 0xd2:
+      return [view.getInt32(pos), pos + 4];
+    case 0xd3:
+      return [Number(view.getBigInt64(pos)), pos + 8];
 
-    case 0xcb: return [view.getFloat64(pos), pos + 8];
+    case 0xcb:
+      return [view.getFloat64(pos), pos + 8];
 
     case 0xd9: {
       const len = view.getUint8(pos);
-      const str = messagePackTextDecoder.decode(new Uint8Array(view.buffer, view.byteOffset + pos + 1, len));
+      const str = messagePackTextDecoder.decode(
+        new Uint8Array(view.buffer, view.byteOffset + pos + 1, len),
+      );
       return [str, pos + 1 + len];
     }
     case 0xda: {
       const len = view.getUint16(pos);
-      const str = messagePackTextDecoder.decode(new Uint8Array(view.buffer, view.byteOffset + pos + 2, len));
+      const str = messagePackTextDecoder.decode(
+        new Uint8Array(view.buffer, view.byteOffset + pos + 2, len),
+      );
       return [str, pos + 2 + len];
     }
     case 0xdb: {
       const len = view.getUint32(pos);
-      const str = messagePackTextDecoder.decode(new Uint8Array(view.buffer, view.byteOffset + pos + 4, len));
+      const str = messagePackTextDecoder.decode(
+        new Uint8Array(view.buffer, view.byteOffset + pos + 4, len),
+      );
       return [str, pos + 4 + len];
     }
 
-    case 0xdc: return messagePackDecodeArray(view, pos + 2, view.getUint16(pos));
-    case 0xdd: return messagePackDecodeArray(view, pos + 4, view.getUint32(pos));
+    case 0xdc:
+      return messagePackDecodeArray(view, pos + 2, view.getUint16(pos));
+    case 0xdd:
+      return messagePackDecodeArray(view, pos + 4, view.getUint32(pos));
 
-    case 0xde: return messagePackDecodeMap(view, pos + 2, view.getUint16(pos));
-    case 0xdf: return messagePackDecodeMap(view, pos + 4, view.getUint32(pos));
+    case 0xde:
+      return messagePackDecodeMap(view, pos + 2, view.getUint16(pos));
+    case 0xdf:
+      return messagePackDecodeMap(view, pos + 4, view.getUint32(pos));
 
     case 0xc4: {
       const len = view.getUint8(pos);
@@ -759,7 +806,9 @@ function messagePackDecodeAt(view, pos) {
     }
 
     default:
-      throw new globalThis.Error(`Unknown MessagePack byte: 0x${byte.toString(16)}`);
+      throw new globalThis.Error(
+        `Unknown MessagePack byte: 0x${byte.toString(16)}`,
+      );
   }
 }
 
@@ -781,7 +830,13 @@ function messagePackEncodeBin(uint8arr, buf) {
   } else if (len <= 65535) {
     buf.push(0xc5, len >> 8, len & 0xff);
   } else {
-    buf.push(0xc6, (len >>> 24) & 0xff, (len >>> 16) & 0xff, (len >>> 8) & 0xff, len & 0xff);
+    buf.push(
+      0xc6,
+      (len >>> 24) & 0xff,
+      (len >>> 16) & 0xff,
+      (len >>> 8) & 0xff,
+      len & 0xff,
+    );
   }
   for (const b of uint8arr) buf.push(b);
 }
@@ -795,7 +850,13 @@ function messagePackEncodeInt(n, buf) {
     } else if (n <= 0xffff) {
       buf.push(0xcd, n >> 8, n & 0xff);
     } else if (n <= 0xffffffff) {
-      buf.push(0xce, (n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff);
+      buf.push(
+        0xce,
+        (n >>> 24) & 0xff,
+        (n >>> 16) & 0xff,
+        (n >>> 8) & 0xff,
+        n & 0xff,
+      );
     } else {
       buf.push(0xcf);
       const dv = new DataView(new ArrayBuffer(8));
@@ -810,7 +871,13 @@ function messagePackEncodeInt(n, buf) {
     } else if (n >= -32768) {
       buf.push(0xd1, (n >> 8) & 0xff, n & 0xff);
     } else if (n >= -2147483648) {
-      buf.push(0xd2, (n >> 24) & 0xff, (n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff);
+      buf.push(
+        0xd2,
+        (n >> 24) & 0xff,
+        (n >> 16) & 0xff,
+        (n >> 8) & 0xff,
+        n & 0xff,
+      );
     } else {
       buf.push(0xd3);
       const dv = new DataView(new ArrayBuffer(8));
@@ -830,7 +897,13 @@ function messagePackEncodeString(str, buf) {
   } else if (len <= 65535) {
     buf.push(0xda, len >> 8, len & 0xff);
   } else {
-    buf.push(0xdb, (len >>> 24) & 0xff, (len >>> 16) & 0xff, (len >>> 8) & 0xff, len & 0xff);
+    buf.push(
+      0xdb,
+      (len >>> 24) & 0xff,
+      (len >>> 16) & 0xff,
+      (len >>> 8) & 0xff,
+      len & 0xff,
+    );
   }
   for (const b of bytes) buf.push(b);
 }
@@ -868,7 +941,13 @@ function messagePackEncodeValue(value, buf) {
     } else if (len <= 65535) {
       buf.push(0xdc, len >> 8, len & 0xff);
     } else {
-      buf.push(0xdd, (len >>> 24) & 0xff, (len >>> 16) & 0xff, (len >>> 8) & 0xff, len & 0xff);
+      buf.push(
+        0xdd,
+        (len >>> 24) & 0xff,
+        (len >>> 16) & 0xff,
+        (len >>> 8) & 0xff,
+        len & 0xff,
+      );
     }
     for (const item of value) messagePackEncodeValue(item, buf);
     return;
@@ -881,7 +960,13 @@ function messagePackEncodeValue(value, buf) {
     } else if (len <= 65535) {
       buf.push(0xde, len >> 8, len & 0xff);
     } else {
-      buf.push(0xdf, (len >>> 24) & 0xff, (len >>> 16) & 0xff, (len >>> 8) & 0xff, len & 0xff);
+      buf.push(
+        0xdf,
+        (len >>> 24) & 0xff,
+        (len >>> 16) & 0xff,
+        (len >>> 8) & 0xff,
+        len & 0xff,
+      );
     }
     for (const key of keys) {
       messagePackEncodeString(key, buf);

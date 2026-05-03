@@ -174,9 +174,8 @@ pub type Protocol(model, message) {
 }
 
 /// Serialises and deserialises `Protocol` values to and from bytes. Carries
-/// both a JSON path (always present, used in development or when no binary
-/// codec is set) and an optional binary path (MessagePack or any custom binary
-/// codec).
+/// JSON encode/decode functions (always present, used when format is JSON) and
+/// an optional binary codec (MessagePack or any custom binary format).
 ///
 /// Construct via [`automatic`](#automatic), [`custom_json`](#custom_json), or
 /// [`custom_binary`](#custom_binary). Toggle between formats using
@@ -187,8 +186,8 @@ pub opaque type Serialiser(model, message) {
     decode_message: decode.Decoder(message),
     encode_model: fn(model) -> Json,
     decode_model: decode.Decoder(model),
-    binary: Option(BinaryCodec(model, message)),
-    auto_binary: Option(BinaryCodec(model, message)),
+    codec: Option(BinaryCodec(model, message)),
+    format: SerialiserFormat,
   )
 }
 
@@ -221,6 +220,16 @@ pub opaque type HttpConfig {
 // =============================================================================
 // PRIVATE TYPES
 // =============================================================================
+
+/// Active serialisation format. `Auto*` variants are toggled by
+/// [`use_json`](#use_json) and [`use_message_pack`](#use_message_pack).
+/// `Custom*` variants ignore toggles — the format is fixed at construction.
+type SerialiserFormat {
+  AutoJson
+  AutoMessagePack
+  CustomBinary
+  CustomJson
+}
 
 type BinaryCodec(model, message) {
   BinaryCodec(
@@ -264,8 +273,12 @@ type WsHandle
 /// `registerModule` once per file. See the module documentation for the
 /// full pattern.
 pub fn automatic() -> Serialiser(model, message) {
-  let auto_binary =
-    option.Some(
+  Serialiser(
+    encode_message: ffi_auto_encode,
+    decode_message: decode.new_primitive_decoder("Auto", ffi_auto_decode),
+    encode_model: ffi_auto_encode,
+    decode_model: decode.new_primitive_decoder("Auto", ffi_auto_decode),
+    codec: option.Some(
       BinaryCodec(
         encode_message: ffi_auto_encode_message_pack,
         decode_message: fn(bytes) {
@@ -282,14 +295,8 @@ pub fn automatic() -> Serialiser(model, message) {
           }
         },
       ),
-    )
-  Serialiser(
-    encode_message: ffi_auto_encode,
-    decode_message: decode.new_primitive_decoder("Auto", ffi_auto_decode),
-    encode_model: ffi_auto_encode,
-    decode_model: decode.new_primitive_decoder("Auto", ffi_auto_decode),
-    binary: option.None,
-    auto_binary: auto_binary,
+    ),
+    format: AutoJson,
   )
 }
 
@@ -314,13 +321,13 @@ pub fn custom_binary(
     decode_message: decode.new_primitive_decoder("Auto", ffi_auto_decode),
     encode_model: ffi_auto_encode,
     decode_model: decode.new_primitive_decoder("Auto", ffi_auto_decode),
-    binary: option.Some(BinaryCodec(
+    codec: option.Some(BinaryCodec(
       encode_message: encode_message,
       decode_message: decode_message,
       encode_model: encode_model,
       decode_model: decode_model,
     )),
-    auto_binary: option.None,
+    format: CustomBinary,
   )
 }
 
@@ -340,8 +347,8 @@ pub fn custom_json(
     decode_message: decode_message,
     encode_model: encode_model,
     decode_model: decode_model,
-    binary: option.None,
-    auto_binary: option.None,
+    codec: option.None,
+    format: CustomJson,
   )
 }
 
@@ -350,21 +357,29 @@ pub fn decode(
   bytes: BitArray,
   serialiser serialiser: Serialiser(model, message),
 ) -> Result(Protocol(model, message), Nil) {
-  case serialiser.binary {
-    option.None -> decode_json(bytes, serialiser)
-    option.Some(codec) -> decode_message_pack(bytes, codec)
+  case serialiser.format {
+    AutoJson | CustomJson -> decode_json(bytes, serialiser)
+    AutoMessagePack | CustomBinary ->
+      case serialiser.codec {
+        option.Some(codec) -> decode_message_pack(bytes, codec)
+        option.None -> decode_json(bytes, serialiser)
+      }
   }
 }
 
 /// Encodes a `Protocol` into bytes. Uses MessagePack when a binary codec is
-/// set (the default for [`automatic`](#automatic)), or JSON otherwise.
+/// active (the default for [`automatic`](#automatic)), or JSON otherwise.
 pub fn encode(
   protocol: Protocol(model, message),
   serialiser serialiser: Serialiser(model, message),
 ) -> BitArray {
-  case serialiser.binary {
-    option.None -> encode_json(protocol, serialiser)
-    option.Some(codec) -> encode_message_pack(protocol, codec)
+  case serialiser.format {
+    AutoJson | CustomJson -> encode_json(protocol, serialiser)
+    AutoMessagePack | CustomBinary ->
+      case serialiser.codec {
+        option.Some(codec) -> encode_message_pack(protocol, codec)
+        option.None -> encode_json(protocol, serialiser)
+      }
   }
 }
 
@@ -500,9 +515,9 @@ pub fn send(transport: Transport, bytes: BitArray) -> Nil {
 pub fn use_json(
   serialiser: Serialiser(model, message),
 ) -> Serialiser(model, message) {
-  case serialiser.auto_binary {
-    option.None -> serialiser
-    option.Some(_) -> Serialiser(..serialiser, binary: option.None)
+  case serialiser.format {
+    AutoMessagePack -> Serialiser(..serialiser, format: AutoJson)
+    AutoJson | CustomBinary | CustomJson -> serialiser
   }
 }
 
@@ -513,7 +528,10 @@ pub fn use_json(
 pub fn use_message_pack(
   serialiser: Serialiser(model, message),
 ) -> Serialiser(model, message) {
-  Serialiser(..serialiser, binary: serialiser.auto_binary)
+  case serialiser.format {
+    AutoJson -> Serialiser(..serialiser, format: AutoMessagePack)
+    AutoMessagePack | CustomBinary | CustomJson -> serialiser
+  }
 }
 
 @target(javascript)

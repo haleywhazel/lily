@@ -65,6 +65,8 @@ auto_encode_message_pack(Value) ->
 %%% ============================================================================
 
 encode_message_pack_protocol(Protocol, Codec) ->
+    EncodeMessage = element(2, Codec),
+    EncodeModel = element(4, Codec),
     case Protocol of
         {acknowledge, Sequence} ->
             %% fixmap(2): type + sequence
@@ -74,21 +76,21 @@ encode_message_pack_protocol(Protocol, Codec) ->
             ]);
 
         {client_message, Payload} ->
-            PayloadBytes = (element(2, Codec))(Payload),
+            PayloadBytes = EncodeMessage(Payload),
             encode_message_pack_map([
                 {<<"type">>, <<"client_message">>},
                 {<<"payload">>, {bin, PayloadBytes}}
             ]);
 
         {push, Payload} ->
-            PayloadBytes = (element(2, Codec))(Payload),
+            PayloadBytes = EncodeMessage(Payload),
             encode_message_pack_map([
                 {<<"type">>, <<"push">>},
                 {<<"payload">>, {bin, PayloadBytes}}
             ]);
 
         {server_message, Sequence, Payload} ->
-            PayloadBytes = (element(2, Codec))(Payload),
+            PayloadBytes = EncodeMessage(Payload),
             encode_message_pack_map([
                 {<<"type">>, <<"server_message">>},
                 {<<"sequence">>, Sequence},
@@ -96,7 +98,7 @@ encode_message_pack_protocol(Protocol, Codec) ->
             ]);
 
         {snapshot, Sequence, State} ->
-            StateBytes = (element(4, Codec))(State),
+            StateBytes = EncodeModel(State),
             encode_message_pack_map([
                 {<<"type">>, <<"snapshot">>},
                 {<<"sequence">>, Sequence},
@@ -121,6 +123,8 @@ encode_message_pack_protocol(Protocol, Codec) ->
 %%% ============================================================================
 
 decode_message_pack_protocol(Bytes, Codec) ->
+    DecodeMessage = element(3, Codec),
+    DecodeModel = element(5, Codec),
     try
         {Map, _Rest} = decode_message_pack(Bytes),
         case Map of
@@ -129,14 +133,14 @@ decode_message_pack_protocol(Bytes, Codec) ->
 
             #{<<"type">> := <<"client_message">>, <<"payload">> := PayloadBin}
                 when is_binary(PayloadBin) ->
-                case (element(3, Codec))(PayloadBin) of
+                case DecodeMessage(PayloadBin) of
                     {ok, Payload} -> {ok, {client_message, Payload}};
                     _ -> {error, nil}
                 end;
 
             #{<<"type">> := <<"push">>, <<"payload">> := PayloadBin}
                 when is_binary(PayloadBin) ->
-                case (element(3, Codec))(PayloadBin) of
+                case DecodeMessage(PayloadBin) of
                     {ok, Payload} -> {ok, {push, Payload}};
                     _ -> {error, nil}
                 end;
@@ -145,7 +149,7 @@ decode_message_pack_protocol(Bytes, Codec) ->
               <<"sequence">> := Sequence,
               <<"payload">> := PayloadBin}
                 when is_binary(PayloadBin) ->
-                case (element(3, Codec))(PayloadBin) of
+                case DecodeMessage(PayloadBin) of
                     {ok, Payload} -> {ok, {server_message, Sequence, Payload}};
                     _ -> {error, nil}
                 end;
@@ -154,7 +158,7 @@ decode_message_pack_protocol(Bytes, Codec) ->
               <<"sequence">> := Sequence,
               <<"state">> := StateBin}
                 when is_binary(StateBin) ->
-                case (element(5, Codec))(StateBin) of
+                case DecodeModel(StateBin) of
                     {ok, State} -> {ok, {snapshot, Sequence, State}};
                     _ -> {error, nil}
                 end;

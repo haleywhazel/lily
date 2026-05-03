@@ -282,6 +282,19 @@ pub fn dispatch(runtime: Runtime(model, message)) -> fn(message) -> Nil {
 }
 
 @target(javascript)
+/// The default snapshot reconciliation: recursively walk the incoming
+/// model, preserving any field whose current value is
+/// [`store.Local`](./store.html#Local) and otherwise taking the incoming
+/// value. Compose with [`on_snapshot`](#on_snapshot) when you want the
+/// default plus per-field overrides.
+///
+/// Note the argument order matches the [`on_snapshot`](#on_snapshot) hook
+/// signature: `(incoming, current)`.
+pub fn merge_locals(incoming: model, current: model) -> model {
+  ffi_merge_locals(incoming, current)
+}
+
+@target(javascript)
 /// Register a hook that runs after each locally-dispatched message. Does not
 /// fire for remote messages from other clients.
 ///
@@ -305,6 +318,34 @@ pub fn on_message(
 ) -> Runtime(model, message) {
   let Runtime(handle) = runtime
   set_user_message_hook(handle, hook)
+  runtime
+}
+
+@target(javascript)
+/// Register a hook that runs when a server snapshot arrives on reconnect.
+/// The hook receives `(incoming, current)` and returns the merged model
+/// to dispatch into the runtime.
+///
+/// Without a hook, the runtime preserves any field whose current value is
+/// wrapped in [`store.Local`](./store.html#Local) and otherwise adopts the
+/// incoming snapshot. Compose with [`merge_locals`](#merge_locals) to keep
+/// that behaviour and add per-field overrides on top.
+///
+/// ## Example
+///
+/// ```gleam
+/// runtime
+/// |> client.on_snapshot(fn(incoming, current) {
+///   let merged = client.merge_locals(incoming, current)
+///   Model(..merged, doc: crdt.merge(incoming.doc, current.doc))
+/// })
+/// ```
+pub fn on_snapshot(
+  runtime: Runtime(model, message),
+  hook: fn(model, model) -> model,
+) -> Runtime(model, message) {
+  let Runtime(handle) = runtime
+  set_snapshot_hook(handle, hook)
   runtime
 }
 
@@ -652,6 +693,17 @@ fn set_user_message_hook(
 }
 
 @target(javascript)
+/// Set the user snapshot hook that runs when a server snapshot arrives on
+/// reconnect, replacing the default `Local`-preserving merge
+@external(javascript, "./client.ffi.mjs", "setSnapshotHook")
+fn set_snapshot_hook(
+  _handle: RuntimeHandle,
+  _hook: fn(model, model) -> model,
+) -> Nil {
+  Nil
+}
+
+@target(javascript)
 /// Clear all session keys from localStorage
 @external(javascript, "./client.ffi.mjs", "clearSession")
 fn ffi_clear_session(_prefix: String) -> Nil {
@@ -663,6 +715,14 @@ fn ffi_clear_session(_prefix: String) -> Nil {
 @external(javascript, "./client.ffi.mjs", "readField")
 fn ffi_read_field(_prefix: String, _key: String) -> Result(Dynamic, Nil) {
   Error(Nil)
+}
+
+@target(javascript)
+/// Public binding for the default reconciliation merge. Flips argument
+/// order to match the `on_snapshot` hook signature.
+@external(javascript, "./client.ffi.mjs", "mergeLocals")
+fn ffi_merge_locals(_incoming: model, _current: model) -> model {
+  panic as "mergeLocals is only available in JavaScript"
 }
 
 @target(javascript)
