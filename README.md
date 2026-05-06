@@ -1,9 +1,6 @@
 # Lily
 
-Lily is a reactive web framework for Gleam. The same store runs on both the
-server (Erlang/BEAM) and the client (JavaScript), synchronised over WebSocket
-or HTTP/SSE. Both transports queue messages to localStorage when offline and
-flush on reconnect.
+Lily is a reactive web framework for Gleam. The same store runs on both the server and the client , synchronised over WebSocket or HTTP/SSE. Both transports queue messages to localStorage when offline and flush on reconnect.
 
 ## Example
 

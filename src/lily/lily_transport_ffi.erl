@@ -34,9 +34,17 @@
 %%% ============================================================================
 
 %% Automatically decode JSON to a Gleam value
-%% Returns {ok, Value} as expected by new_primitive_decoder
+%% Returns {ok, Value} as expected by new_primitive_decoder.
+%% Wraps decode_value in try/catch so messages with unknown constructors
+%% (e.g. from a different project that previously held this localhost port)
+%% surface as decode errors rather than crashing the actor — see
+%% binary_to_existing_atom in decode_custom_type below.
 auto_decode(Json) ->
-    {ok, decode_value(Json)}.
+    try
+        {ok, decode_value(Json)}
+    catch
+        _:_ -> {error, undefined}
+    end.
 
 %% Automatically decode MessagePack bytes to a Gleam value
 %% Returns {ok, Value} or {error, nil}
@@ -230,9 +238,16 @@ encode_value(_Value) ->
 decode_custom_type(TagBinary, Map) ->
     %% Wire format uses PascalCase (e.g., "RefreshStats"),
     %% but Gleam compiles constructors to snake_case atoms on Erlang
-    %% (e.g., refresh_stats). Convert before creating the atom.
+    %% (e.g., refresh_stats). Convert before resolving the atom.
+    %%
+    %% Use binary_to_existing_atom so that unknown constructor names from
+    %% an unrelated client (different project on the same localhost port,
+    %% old client after a deploy) raise badarg instead of leaking a fresh
+    %% atom into the table and producing a tagged tuple that would later
+    %% crash the user's update function. The auto_decode wrappers catch
+    %% the badarg and surface it as a decode error.
     SnakeName = pascal_to_snake(TagBinary),
-    Tag = binary_to_atom(SnakeName, utf8),
+    Tag = binary_to_existing_atom(SnakeName, utf8),
 
     %% Extract positional fields
     Fields = extract_fields(Map, 0, []),

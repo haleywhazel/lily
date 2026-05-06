@@ -29,6 +29,7 @@ import {
   ServerMessage,
   Snapshot,
 } from "./transport.mjs";
+import { Local } from "./store.mjs";
 
 // =============================================================================
 // PRIVATE CONSTANTS
@@ -36,6 +37,16 @@ import {
 
 /** Maps constructor name → constructor function, built during encode and model walk. */
 const constructorRegistry = new Map();
+
+// Pre-register lily's own custom types. Server snapshots arrive with Local
+// fields encoded as `{"_": "Local", "0": ...}`, but the client never encodes
+// Local itself (messages are user-defined and don't carry Local), so it would
+// otherwise be missing from the registry and the decoder would throw on every
+// snapshot — silently failing the catch in decodeMessagePackProtocol and
+// leaving the model un-hydrated.
+//
+// Might change this, could just let it fail?
+constructorRegistry.set("Local", Local);
 
 const STORAGE_KEY_HTTP_PENDING = "lily_http_pending";
 const STORAGE_KEY_WS_PENDING = "lily_ws_pending";
