@@ -1,24 +1,20 @@
-// Tests for lily/server on Erlang — uses OTP actor with process.Subject.
-// All functions are @target(erlang) — skipped on JavaScript.
+// Tests for lily/server on Erlang, uses OTP actor with process.Subject.
+// All functions are @target(erlang), skipped on JavaScript.
 
 @target(erlang)
 import gleam/bit_array
 @target(erlang)
 import gleam/erlang/process
 @target(erlang)
-import gleam/list
-@target(erlang)
 import gleam/string
 @target(erlang)
 import gleeunit/should
-@target(erlang)
-import lily/logging
 @target(erlang)
 import lily/server
 @target(erlang)
 import lily/store
 @target(erlang)
-import lily/test_fixtures.{type Message, type Model, Increment, SetName}
+import lily/test_fixtures.{type Message, type Model, Increment}
 @target(erlang)
 import lily/transport
 
@@ -33,19 +29,33 @@ fn ser() {
 
 @target(erlang)
 fn new_server() -> server.Server(Model, Message) {
-  let s = store.new(test_fixtures.initial_model(), with: test_fixtures.update)
-  let assert Ok(srv) = server.start(store: s, serialiser: ser())
+  let assert Ok(srv) =
+    server.new(
+      initial: test_fixtures.initial_model(),
+      serialiser: ser(),
+      wiring: store.wiring()
+        |> store.session(
+          extract: fn(message) { Ok(message) },
+          update: test_fixtures.update,
+          field_get: fn(model) { model },
+          field_set: fn(_, model) { model },
+        ),
+    )
+    |> server.start
   srv
 }
 
 @target(erlang)
 /// Connect a mock client that captures received messages in a Subject.
+/// Drains the `Connected` frame sent immediately on connect so tests
+/// that check for other frames don't have to skip it.
 fn connect_client(
   srv: server.Server(Model, Message),
   client_id: String,
 ) -> process.Subject(BitArray) {
   let subj = process.new_subject()
   server.connect(srv, client_id: client_id, send: process.send(subj, _))
+  let _ = process.receive(subj, within: 200)
   subj
 }
 
@@ -56,15 +66,21 @@ fn recv(subj: process.Subject(BitArray)) -> Result(BitArray, Nil) {
 }
 
 @target(erlang)
-/// Encode a client protocol message.
-fn encode_client(msg: Message) -> BitArray {
-  transport.encode(transport.ClientMessage(payload: msg), serialiser: ser())
+/// Encode a session message (client to server).
+fn encode_session(message: Message) -> BitArray {
+  transport.encode(
+    transport.SessionMessage(payload: message),
+    serialiser: ser(),
+  )
 }
 
 @target(erlang)
-/// Encode a resync request.
-fn encode_resync(seq: Int) -> BitArray {
-  transport.encode(transport.Resync(after_sequence: seq), serialiser: ser())
+/// Encode a resync request for the session target.
+fn encode_resync_session(_seq: Int) -> BitArray {
+  transport.encode(
+    transport.Resync(cursors: [transport.Session]),
+    serialiser: ser(),
+  )
 }
 
 // =============================================================================
@@ -73,8 +89,18 @@ fn encode_resync(seq: Int) -> BitArray {
 
 @target(erlang)
 pub fn server_start_returns_ok_test() {
-  let s = store.new(test_fixtures.initial_model(), with: test_fixtures.update)
-  server.start(store: s, serialiser: ser())
+  server.new(
+    initial: test_fixtures.initial_model(),
+    serialiser: ser(),
+    wiring: store.wiring()
+      |> store.session(
+        extract: fn(message) { Ok(message) },
+        update: test_fixtures.update,
+        field_get: fn(model) { model },
+        field_set: fn(_, model) { model },
+      ),
+  )
+  |> server.start
   |> should.be_ok
 }
 
@@ -96,123 +122,140 @@ pub fn server_connect_multiple_clients_test() {
 pub fn server_connect_single_client_test() {
   let srv = new_server()
   let subj = connect_client(srv, "c1")
-  // No crash — actor accepted the connect message
   True
   |> should.be_true
   let _ = subj
 }
 
 @target(erlang)
+pub fn server_connect_sends_connected_frame_test() {
+  let srv = new_server()
+  let subj = process.new_subject()
+  server.connect(srv, client_id: "c1", send: process.send(subj, _))
+  case recv(subj) {
+    Ok(bytes) ->
+      transport.decode(bytes, serialiser: ser())
+      |> should.equal(Ok(transport.Connected(client_id: "c1")))
+    Error(_) -> should.fail()
+  }
+}
+
+@target(erlang)
 pub fn server_disconnect_nonexistent_test() {
   let srv = new_server()
-  // Should not crash
   server.disconnect(srv, client_id: "ghost")
   True
   |> should.be_true
 }
 
 @target(erlang)
-pub fn server_disconnect_stops_broadcast_test() {
+pub fn server_disconnect_prevents_acknowledgement_test() {
+  let srv = new_server()
+  let s1 = connect_client(srv, "c1")
+  server.disconnect(srv, client_id: "c1")
+  // Give the actor time to process Disconnect before Incoming
+  process.sleep(50)
+  server.incoming(srv, client_id: "c1", bytes: encode_session(Increment))
+  // c1 is disconnected, no Acknowledge sent
+  recv(s1)
+  |> should.be_error
+}
+
+// =============================================================================
+// SESSION MESSAGE PROCESSING
+// =============================================================================
+
+@target(erlang)
+pub fn server_session_message_acknowledges_sender_test() {
+  let srv = new_server()
+  let s1 = connect_client(srv, "c1")
+  server.incoming(srv, client_id: "c1", bytes: encode_session(Increment))
+  case recv(s1) {
+    Ok(bytes) ->
+      transport.decode(bytes, serialiser: ser())
+      |> should.equal(
+        Ok(transport.Acknowledge(target: transport.Session, sequence: 1)),
+      )
+    Error(_) -> should.fail()
+  }
+}
+
+@target(erlang)
+pub fn server_session_message_does_not_broadcast_test() {
+  // Session messages are per-connection, c2 receives nothing when c1 sends.
   let srv = new_server()
   let s1 = connect_client(srv, "c1")
   let s2 = connect_client(srv, "c2")
-  // Disconnect c2, then c1 sends — c2 should not receive
-  server.disconnect(srv, client_id: "c2")
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
-  // c1 gets an Acknowledge
+  server.incoming(srv, client_id: "c1", bytes: encode_session(Increment))
+  // Consume c1's Acknowledge
   let _ = recv(s1)
-  // c2 gets nothing — timeout expected
+  // c2 must receive nothing
   recv(s2)
   |> should.be_error
 }
 
-// =============================================================================
-// MESSAGE PROCESSING
-// =============================================================================
-
 @target(erlang)
-pub fn server_incoming_acknowledges_sender_test() {
+pub fn server_session_sequence_increments_test() {
   let srv = new_server()
   let s1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
+  server.incoming(srv, client_id: "c1", bytes: encode_session(Increment))
+  let _ = recv(s1)
+  server.incoming(srv, client_id: "c1", bytes: encode_session(Increment))
   case recv(s1) {
-    Ok(msg) -> {
-      transport.decode(msg, serialiser: ser())
-      |> should.equal(Ok(transport.Acknowledge(sequence: 1)))
-    }
-    Error(_) -> should.fail()
-  }
-}
-
-@target(erlang)
-pub fn server_incoming_broadcasts_to_others_test() {
-  let srv = new_server()
-  let s1 = connect_client(srv, "c1")
-  let s2 = connect_client(srv, "c2")
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
-  // c2 receives a ServerMessage
-  case recv(s2) {
-    Ok(msg) -> {
-      transport.decode(msg, serialiser: ser())
+    Ok(bytes) ->
+      transport.decode(bytes, serialiser: ser())
       |> should.equal(
-        Ok(transport.ServerMessage(sequence: 1, payload: Increment)),
+        Ok(transport.Acknowledge(target: transport.Session, sequence: 2)),
       )
-    }
     Error(_) -> should.fail()
   }
-  // Consume c1's Acknowledge
-  let _ = recv(s1)
 }
 
 @target(erlang)
-pub fn server_incoming_does_not_broadcast_to_sender_test() {
-  let srv = new_server()
-  let s1 = connect_client(srv, "c1")
-  let _s2 = connect_client(srv, "c2")
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
-  // Consume the Acknowledge on c1
-  let ack = recv(s1)
-  ack
-  |> should.be_ok
-  // c1 should not receive a ServerMessage (only Acknowledge)
-  recv(s1)
-  |> should.be_error
-}
-
-@target(erlang)
-pub fn server_multiple_clients_broadcast_test() {
+pub fn server_session_sequence_is_per_connection_test() {
+  // Each client has its own sequence counter starting at 0.
   let srv = new_server()
   let s1 = connect_client(srv, "c1")
   let s2 = connect_client(srv, "c2")
-  let s3 = connect_client(srv, "c3")
-  server.incoming(srv, client_id: "c2", bytes: encode_client(SetName("Alice")))
-  // c1 and c3 get ServerMessage
-  recv(s1)
-  |> should.be_ok
-  recv(s3)
-  |> should.be_ok
-  // c2 gets Acknowledge, not ServerMessage
+  server.incoming(srv, client_id: "c1", bytes: encode_session(Increment))
+  server.incoming(srv, client_id: "c2", bytes: encode_session(Increment))
+  case recv(s1) {
+    Ok(bytes) ->
+      transport.decode(bytes, serialiser: ser())
+      |> should.equal(
+        Ok(transport.Acknowledge(target: transport.Session, sequence: 1)),
+      )
+    Error(_) -> should.fail()
+  }
   case recv(s2) {
-    Ok(msg) -> {
-      transport.decode(msg, serialiser: ser())
-      |> should.equal(Ok(transport.Acknowledge(sequence: 1)))
-    }
+    Ok(bytes) ->
+      transport.decode(bytes, serialiser: ser())
+      |> should.equal(
+        Ok(transport.Acknowledge(target: transport.Session, sequence: 1)),
+      )
     Error(_) -> should.fail()
   }
 }
 
 @target(erlang)
-pub fn server_sequence_increments_test() {
+pub fn server_session_state_is_per_connection_test() {
+  // c1 sending Increment does not affect c2's session snapshot.
   let srv = new_server()
   let s1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
+  let s2 = connect_client(srv, "c2")
+  server.incoming(srv, client_id: "c1", bytes: encode_session(Increment))
   let _ = recv(s1)
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
-  case recv(s1) {
-    Ok(msg) -> {
-      transport.decode(msg, serialiser: ser())
-      |> should.equal(Ok(transport.Acknowledge(sequence: 2)))
-    }
+  server.incoming(srv, client_id: "c2", bytes: encode_resync_session(0))
+  case recv(s2) {
+    Ok(bytes) ->
+      transport.decode(bytes, serialiser: ser())
+      |> should.equal(
+        Ok(transport.Snapshot(
+          target: transport.Session,
+          sequence: 0,
+          state: test_fixtures.initial_model(),
+        )),
+      )
     Error(_) -> should.fail()
   }
 }
@@ -222,58 +265,42 @@ pub fn server_sequence_increments_test() {
 // =============================================================================
 
 @target(erlang)
-pub fn server_resync_after_messages_test() {
-  let srv = new_server()
-  let s1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
-  let _ = recv(s1)
-  server.incoming(srv, client_id: "c1", bytes: encode_resync(1))
-  case recv(s1) {
-    Ok(msg) -> {
-      let expected_model =
-        test_fixtures.Model(count: 1, name: "", connected: False)
-      transport.decode(msg, serialiser: ser())
-      |> should.equal(
-        Ok(transport.Snapshot(sequence: 1, state: expected_model)),
-      )
-    }
-    Error(_) -> should.fail()
-  }
-}
-
-@target(erlang)
-pub fn server_resync_from_new_client_test() {
-  let srv = new_server()
-  let s1 = connect_client(srv, "c1")
-  // Apply some updates via c1
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
-  let _ = recv(s1)
-  // c2 connects later and resyncs
-  let s2 = connect_client(srv, "c2")
-  server.incoming(srv, client_id: "c2", bytes: encode_resync(0))
-  case recv(s2) {
-    Ok(msg) -> {
-      let expected_model =
-        test_fixtures.Model(count: 1, name: "", connected: False)
-      transport.decode(msg, serialiser: ser())
-      |> should.equal(
-        Ok(transport.Snapshot(sequence: 1, state: expected_model)),
-      )
-    }
-    Error(_) -> should.fail()
-  }
-}
-
-@target(erlang)
 pub fn server_resync_sends_snapshot_test() {
   let srv = new_server()
   let s1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", bytes: encode_resync(0))
+  server.incoming(srv, client_id: "c1", bytes: encode_resync_session(0))
   case recv(s1) {
-    Ok(msg) -> {
-      transport.decode(msg, serialiser: ser())
+    Ok(bytes) ->
+      transport.decode(bytes, serialiser: ser())
       |> should.equal(
-        Ok(transport.Snapshot(sequence: 0, state: test_fixtures.initial_model())),
+        Ok(transport.Snapshot(
+          target: transport.Session,
+          sequence: 0,
+          state: test_fixtures.initial_model(),
+        )),
+      )
+    Error(_) -> should.fail()
+  }
+}
+
+@target(erlang)
+pub fn server_resync_after_session_messages_test() {
+  let srv = new_server()
+  let s1 = connect_client(srv, "c1")
+  server.incoming(srv, client_id: "c1", bytes: encode_session(Increment))
+  let _ = recv(s1)
+  server.incoming(srv, client_id: "c1", bytes: encode_resync_session(1))
+  case recv(s1) {
+    Ok(bytes) -> {
+      let expected_model =
+        test_fixtures.Model(count: 1, name: "", connected: False)
+      transport.decode(bytes, serialiser: ser())
+      |> should.equal(
+        Ok(transport.Snapshot(
+          target: transport.Session,
+          sequence: 1,
+          state: expected_model,
+        )),
       )
     }
     Error(_) -> should.fail()
@@ -281,98 +308,26 @@ pub fn server_resync_sends_snapshot_test() {
 }
 
 @target(erlang)
-/// Wrap the custom serialiser so that each call to `encode_model` sends a
-/// tick to `counter_subj`. Tests then drain the subject to count how many
-/// times the server encoded a `Snapshot`.
-///
-/// A `Subject(Nil)` is used rather than a shared mutable ref because the
-/// serialiser runs inside the actor process, so process-dictionary-based
-/// refs (like `test_ref`) aren't visible to the test process.
-fn counting_serialiser(
-  counter_subj: process.Subject(Nil),
-) -> transport.Serialiser(Model, Message) {
-  transport.custom_json(
-    encode_message: test_fixtures.encode_message,
-    decode_message: test_fixtures.message_decoder(),
-    encode_model: fn(model) {
-      process.send(counter_subj, Nil)
-      test_fixtures.encode_model(model)
-    },
-    decode_model: test_fixtures.model_decoder(),
-  )
-}
-
-@target(erlang)
-fn drain_count(subj: process.Subject(Nil)) -> Int {
-  drain_count_loop(subj, 0)
-}
-
-@target(erlang)
-fn drain_count_loop(subj: process.Subject(Nil), acc: Int) -> Int {
-  case process.receive(subj, within: 50) {
-    Ok(_) -> drain_count_loop(subj, acc + 1)
-    Error(_) -> acc
-  }
-}
-
-@target(erlang)
-pub fn server_resync_reuses_cached_snapshot_test() {
-  let counter_subj = process.new_subject()
-  let s = store.new(test_fixtures.initial_model(), with: test_fixtures.update)
-  let assert Ok(srv) =
-    server.start(store: s, serialiser: counting_serialiser(counter_subj))
+pub fn server_resync_reflects_own_session_only_test() {
+  // c2's resync snapshot reflects c2's state, not c1's.
+  let srv = new_server()
   let s1 = connect_client(srv, "c1")
-
-  list.repeat(Nil, 100)
-  |> list.each(fn(_) {
-    server.incoming(srv, client_id: "c1", bytes: encode_resync(0))
-  })
-  // Drain all 100 snapshot frames — guarantees the actor processed them all
-  list.repeat(Nil, 100)
-  |> list.each(fn(_) {
-    let _ = recv(s1)
-    Nil
-  })
-
-  drain_count(counter_subj)
-  |> should.equal(1)
-}
-
-@target(erlang)
-pub fn server_client_message_invalidates_snapshot_cache_test() {
-  let counter_subj = process.new_subject()
-  let s = store.new(test_fixtures.initial_model(), with: test_fixtures.update)
-  let assert Ok(srv) =
-    server.start(store: s, serialiser: counting_serialiser(counter_subj))
-  let s1 = connect_client(srv, "c1")
-
-  list.repeat(Nil, 100)
-  |> list.each(fn(_) {
-    server.incoming(srv, client_id: "c1", bytes: encode_resync(0))
-  })
-  list.repeat(Nil, 100)
-  |> list.each(fn(_) {
-    let _ = recv(s1)
-    Nil
-  })
-  drain_count(counter_subj)
-  |> should.equal(1)
-
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
-  // Drain the Acknowledge from the ClientMessage
+  server.incoming(srv, client_id: "c1", bytes: encode_session(Increment))
   let _ = recv(s1)
-
-  list.repeat(Nil, 100)
-  |> list.each(fn(_) {
-    server.incoming(srv, client_id: "c1", bytes: encode_resync(0))
-  })
-  list.repeat(Nil, 100)
-  |> list.each(fn(_) {
-    let _ = recv(s1)
-    Nil
-  })
-  drain_count(counter_subj)
-  |> should.equal(1)
+  let s2 = connect_client(srv, "c2")
+  server.incoming(srv, client_id: "c2", bytes: encode_resync_session(0))
+  case recv(s2) {
+    Ok(bytes) ->
+      transport.decode(bytes, serialiser: ser())
+      |> should.equal(
+        Ok(transport.Snapshot(
+          target: transport.Session,
+          sequence: 0,
+          state: test_fixtures.initial_model(),
+        )),
+      )
+    Error(_) -> should.fail()
+  }
 }
 
 // =============================================================================
@@ -383,7 +338,7 @@ pub fn server_client_message_invalidates_snapshot_cache_test() {
 pub fn server_no_hook_does_not_crash_test() {
   let srv = new_server()
   let s1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
+  server.incoming(srv, client_id: "c1", bytes: encode_session(Increment))
   recv(s1)
   |> should.be_ok
 }
@@ -392,11 +347,11 @@ pub fn server_no_hook_does_not_crash_test() {
 pub fn server_on_message_hook_called_test() {
   let srv = new_server()
   let hook_subj = process.new_subject()
-  server.on_message(srv, fn(msg, _model, _client_id) {
-    process.send(hook_subj, msg)
+  server.on_message(srv, fn(message, _model, _client_id) {
+    process.send(hook_subj, message)
   })
   let s1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
+  server.incoming(srv, client_id: "c1", bytes: encode_session(Increment))
   let _ = recv(s1)
   process.receive(hook_subj, within: 200)
   |> should.equal(Ok(Increment))
@@ -406,11 +361,11 @@ pub fn server_on_message_hook_called_test() {
 pub fn server_on_message_hook_receives_updated_model_test() {
   let srv = new_server()
   let model_subj: process.Subject(Model) = process.new_subject()
-  server.on_message(srv, fn(_msg, model, _client_id) {
+  server.on_message(srv, fn(_message, model, _client_id) {
     process.send(model_subj, model)
   })
   let s1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
+  server.incoming(srv, client_id: "c1", bytes: encode_session(Increment))
   let _ = recv(s1)
   process.receive(model_subj, within: 200)
   |> should.equal(Ok(test_fixtures.Model(count: 1, name: "", connected: False)))
@@ -423,8 +378,8 @@ pub fn server_on_message_hook_receives_updated_model_test() {
 @target(erlang)
 pub fn server_incoming_from_unknown_client_test() {
   let srv = new_server()
-  // c1 is not connected — Acknowledge goes nowhere, but server does not crash
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
+  // c1 is not connected, Acknowledge goes nowhere, but server does not crash
+  server.incoming(srv, client_id: "c1", bytes: encode_session(Increment))
   True
   |> should.be_true
 }
@@ -438,7 +393,6 @@ pub fn server_incoming_invalid_json_test() {
     client_id: "c1",
     bytes: bit_array.from_string("not json at all"),
   )
-  // Server ignores invalid JSON — no message sent
   recv(s1)
   |> should.be_error
 }
@@ -454,22 +408,6 @@ pub fn server_incoming_unknown_protocol_type_test() {
   )
   recv(s1)
   |> should.be_error
-}
-
-@target(erlang)
-pub fn server_sequence_starts_at_zero_test() {
-  let srv = new_server()
-  let s1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", bytes: encode_resync(0))
-  case recv(s1) {
-    Ok(msg) -> {
-      transport.decode(msg, serialiser: ser())
-      |> should.equal(
-        Ok(transport.Snapshot(sequence: 0, state: test_fixtures.initial_model())),
-      )
-    }
-    Error(_) -> should.fail()
-  }
 }
 
 // =============================================================================
@@ -490,20 +428,6 @@ pub fn server_generate_client_id_returns_32_char_hex_test() {
 }
 
 // =============================================================================
-// AUTO LOG MESSAGES
-// =============================================================================
-
-@target(erlang)
-pub fn server_auto_log_messages_processes_normally_test() {
-  let srv = new_server()
-  let _srv2 = server.auto_log_messages(srv, level: logging.Info)
-  let s1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
-  recv(s1)
-  |> should.be_ok
-}
-
-// =============================================================================
 // STOP
 // =============================================================================
 
@@ -512,12 +436,9 @@ pub fn server_stop_silently_drops_further_calls_test() {
   let srv = new_server()
   let s1 = connect_client(srv, "c1")
   server.stop(srv)
-  // Give the actor time to process the Stop event
   process.sleep(50)
-  // Subsequent calls do not crash the test process
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
+  server.incoming(srv, client_id: "c1", bytes: encode_session(Increment))
   server.disconnect(srv, client_id: "c1")
-  // c1 receives nothing after stop
   recv(s1)
   |> should.be_error
 }

@@ -1,5 +1,5 @@
-// Tests for transport.websocket — WebSocket transport lifecycle.
-// All functions are @target(javascript) — skipped on Erlang.
+// Tests for transport.websocket, WebSocket transport lifecycle.
+// All functions are @target(javascript), skipped on Erlang.
 
 @target(javascript)
 import gleam/dynamic
@@ -29,7 +29,15 @@ import lily/transport
 @target(javascript)
 fn new_runtime() -> client.Runtime(Model, Message) {
   store.new(test_fixtures.initial_model(), with: test_fixtures.update)
-  |> client.start
+  |> client.start(
+    store.wiring()
+    |> store.session(
+      extract: fn(m) { Ok(m) },
+      update: test_fixtures.update,
+      field_get: fn(model) { model },
+      field_set: fn(_, model) { model },
+    ),
+  )
 }
 
 // =============================================================================
@@ -91,11 +99,12 @@ pub fn websocket_connect_calls_on_reconnect_test() {
   test_setup.reset_mocks()
   let runtime = new_runtime()
   let reconnect_ref = test_ref.new(False)
-  let connector = fn(handler: transport.Handler) {
-    handler.on_reconnect()
-    test_ref.set(reconnect_ref, True)
-    transport.new(send: fn(_) { Nil }, close: fn() { Nil })
-  }
+  let connector =
+    transport.make_connector(fn(handler: transport.Handler) {
+      handler.on_reconnect()
+      test_ref.set(reconnect_ref, True)
+      transport.new(send: fn(_) { Nil }, close: fn() { Nil })
+    })
   let _r =
     client.connect(
       runtime,
@@ -112,11 +121,12 @@ pub fn websocket_connect_calls_on_disconnect_test() {
   test_setup.reset_mocks()
   let runtime = new_runtime()
   let disconnect_ref = test_ref.new(False)
-  let connector = fn(handler: transport.Handler) {
-    handler.on_disconnect()
-    test_ref.set(disconnect_ref, True)
-    transport.new(send: fn(_) { Nil }, close: fn() { Nil })
-  }
+  let connector =
+    transport.make_connector(fn(handler: transport.Handler) {
+      handler.on_disconnect()
+      test_ref.set(disconnect_ref, True)
+      transport.new(send: fn(_) { Nil }, close: fn() { Nil })
+    })
   let _r =
     client.connect(
       runtime,
@@ -144,7 +154,7 @@ pub fn websocket_connect_receives_messages_test() {
   let ws = test_setup.get_last_websocket()
   test_setup.trigger_websocket_open(ws)
   let snapshot_json =
-    "{\"type\":\"snapshot\",\"sequence\":0,\"state\":{\"count\":5,\"name\":\"Bob\",\"connected\":false}}"
+    "{\"type\":\"snapshot\",\"target\":{\"kind\":\"session\"},\"sequence\":0,\"state\":{\"count\":5,\"name\":\"Bob\",\"connected\":false}}"
   test_setup.trigger_websocket_message(ws, snapshot_json)
   client.get_current_model(runtime).count
   |> should.equal(5)
@@ -171,7 +181,7 @@ pub fn websocket_send_when_open_sends_directly_test() {
   test_setup.trigger_websocket_open(ws)
   client.dispatch(runtime)(test_fixtures.Increment)
   let sent = test_setup.get_websocket_sent(ws)
-  list.any(sent, fn(msg) { string.contains(msg, "client_message") })
+  list.any(sent, fn(frame) { string.contains(frame, "session_message") })
   |> should.be_true
 }
 
@@ -188,8 +198,8 @@ pub fn websocket_send_when_closed_queues_to_localstorage_test() {
       with: connector,
       serialiser: test_fixtures.custom_serialiser(),
     )
-  // Do NOT open the WS — remains in CONNECTING state
-  // Dispatch a message — should be queued in localStorage
+  // Do NOT open the WS, remains in CONNECTING state
+  // Dispatch a message, should be queued in localStorage
   client.dispatch(runtime)(test_fixtures.Increment)
   let queued = read_local_storage("lily_ws_pending")
   queued

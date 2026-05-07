@@ -1,69 +1,43 @@
-//// The [`Server`](#Server) holds authoritative (with an asterisk) state and
-//// broadcasts updates to connected clients. It works on both Erlang and
-//// JavaScript targets, though we recommend Erlang for production use to make
-//// full use of the BEAM.
+//// The [`Server`](#Server) holds authoritative state and routes client
+//// messages to the right store: a per-connection session store or a
+//// named topic store. It works on both Erlang and JavaScript targets,
+//// though Erlang is recommended for production.
 ////
-//// The asterisk on the authoritative state comes from client disconnections
-//// and reconnections, which allows for local modifications and editing to
-//// update the server store on reconnect. This is done by assigning sequence
-//// numbers.
-////
-//// On Erlang, the server uses an OTP actor with sequential message
-//// processing, and on JavaScript, it uses closure-scoped mutable state (JS is
-//// single-threaded). Both expose identical APIs - the same
-//// [`Server`](#Server) opaque type and public functions work on both
-//// targets.
-////
+//// Build a server with [`server.new`](#new), passing the shared `Wiring`
+//// configuration, then start it with [`server.start`](#start) and register
+//// topics with [`topic.new`](./topic.html#new):
 ////
 //// ```gleam
 //// import lily/server
-//// import lily/store
-//// import lily/transport
+//// import lily/topic
 ////
-//// pub fn main() {
-////   // Create your store
-////   let app_store = store.new(initial_model, with: update)
-////
-////   // Start the server
-////   let assert Ok(srv) = server.start(
-////     store: app_store,
-////     serialiser: transport.automatic(),
+//// let assert Ok(srv) =
+////   server.new(
+////     initial: shared.initial_model(),
+////     serialiser: shared.serialiser(),
+////     wiring: shared.wiring(),
 ////   )
+////   |> server.start
 ////
-////   // Register side-effect hook (optional)
-////   server.on_message(srv, fn(msg, model, client_id) {
-////     case msg {
-////       SaveDocument(doc) -> db.write(doc)
-////       _ -> Nil
-////     }
-////   })
-////
-////   // Wire into your transport (mist/wisp WebSocket handler)
-//// }
+//// let assert Ok(chat) =
+////   topic.new(srv, id: "chat")
+////   |> topic.with_store
 //// ```
 ////
-//// The server is transport-agnostic. It doesn't depend on mist or wisp —
-//// those are your backend dependencies, and you can just as easily switch
-//// to using a Node server if you so wish (although at this point just use
-//// the TypeScript with fp-ts to prevent having to deal with Gleam/JS ffi).
-////
-//// Use [`server.connect`](#connect), [`server.disconnect`](#disconnect), and
-//// [`server.incoming`](#incoming) to wire the server into your WebSocket or
-//// HTTP handlers.
-////
-//// Note: within this module, "message" often refers to internal events, not
-//// your user-defined message type for model updates.
-////
+//// Wire the server into your WebSocket handler using
+//// [`server.connect`](#connect), [`server.disconnect`](#disconnect), and
+//// [`server.incoming`](#incoming).
 
 // =============================================================================
 // IMPORTS
 // =============================================================================
 
 import gleam/dict.{type Dict}
+import gleam/list
 import gleam/option.{type Option}
 import gleam/result
-import lily/logging
-import lily/store.{type Store}
+import gleam/string
+import lily/store
 import lily/transport.{type Serialiser}
 
 @target(erlang)
@@ -71,53 +45,63 @@ import gleam/erlang/process.{type Subject}
 @target(erlang)
 import gleam/otp/actor
 
+@target(javascript)
+import lily/internal/reference.{type Reference}
+
 // =============================================================================
 // PUBLIC TYPES
 // =============================================================================
 
-/// This is a handle to a running Lily server instance. Wraps platform-specific
-/// internals (OTP actor on Erlang, closure-scoped state on JavaScript).
+/// Builder returned by [`server.new`](#new). Pipe through
+/// [`server.start`](#start).
+@internal
+pub opaque type Builder(model, message) {
+  Builder(
+    initial_model: model,
+    serialiser: Serialiser(model, message),
+    wiring: store.Wiring(model, message),
+  )
+}
+
+/// Handle to a running Lily server. Wraps platform-specific internals
+/// (OTP actor on Erlang, [`Reference`](./internal/reference.html#Reference)
+/// cell on JavaScript). Also carries `serialiser` and `initial_model` for
+/// zero-copy access by `topic.new`.
 pub opaque type Server(model, message) {
-  Server(handle: ServerHandle(model, message))
+  Server(
+    handle: ServerHandle(model, message),
+    serialiser: Serialiser(model, message),
+    initial_model: model,
+    wiring: store.Wiring(model, message),
+  )
+}
+
+// =============================================================================
+// INTERNAL TYPES
+// =============================================================================
+
+/// Callbacks registered by a topic actor so the server can route frames to it.
+/// Created inside `topic.gleam`; stored in the server's topic registry.
+@internal
+pub type ServerTopicEntry(model, message) {
+  ServerTopicEntry(
+    handle_incoming: fn(String, message) -> Nil,
+    subscribe: fn(String, fn(BitArray) -> Nil) -> Nil,
+    unsubscribe: fn(String) -> Nil,
+    send_snapshot: fn(fn(BitArray) -> Nil) -> Nil,
+    stop: fn() -> Nil,
+  )
 }
 
 // =============================================================================
 // PUBLIC FUNCTIONS
 // =============================================================================
 
-/// Install a hook that logs every incoming message using
-/// [`logging.auto_log`](./logging.html#auto_log). Equivalent to:
+/// Register a client connection. The `send` callback is how the server pushes
+/// frames back to this specific client.
 ///
 /// ```gleam
-/// server.on_message(srv, fn(msg, _model, _client_id) {
-///   logging.auto_log(level, msg)
-/// })
-/// ```
-///
-/// Returns the server so it can be chained.
-pub fn auto_log_messages(
-  server: Server(model, message),
-  level level: logging.Level,
-) -> Server(model, message) {
-  on_message(server, fn(msg, _model, _client_id) {
-    logging.auto_log(level, msg)
-  })
-  server
-}
-
-/// Register a client connection with the server. The `send` callback is how
-/// the server pushes messages back to this specific client.
-///
-/// On Erlang, if you have a `Subject(BitArray)` from mist's WebSocket handler,
-/// wrap it: `send: process.send(outgoing_subject, _)`.
-///
-/// ```gleam
-/// // Erlang with mist WebSocket
-/// let outgoing_subject = process.new_subject()
-/// server.connect(srv, client_id: "abc123", send: process.send(outgoing_subject, _))
-///
-/// // JavaScript with Node.js WebSocket
-/// server.connect(srv, client_id: "abc123", send: fn(bytes) { ws.send(bytes) })
+/// server.connect(srv, client_id: id, send: process.send(outgoing_subject, _))
 /// ```
 pub fn connect(
   server: Server(model, message),
@@ -127,8 +111,7 @@ pub fn connect(
   platform_connect(server.handle, client_id, send)
 }
 
-/// Unregister a client connection from the server. Called when a client
-/// disconnects.
+/// Unregister a client connection from the server and all subscribed topics.
 pub fn disconnect(
   server: Server(model, message),
   client_id client_id: String,
@@ -136,20 +119,22 @@ pub fn disconnect(
   platform_disconnect(server.handle, client_id)
 }
 
-/// Generate a cryptographically random client identifier (16 bytes, hex-encoded
-/// to a 32-character string). Use this to create unique client IDs when wiring
-/// up WebSocket connections.
+/// Generate a cryptographically random 32-character hex client identifier.
+/// Pair with [`connect`](#connect) so every connection carries a stable,
+/// server-issued id.
 ///
 /// ```gleam
 /// let client_id = server.generate_client_id()
-/// server.connect(srv, client_id: client_id, send: fn(bytes) { ... })
+/// server.connect(srv, client_id:, send:)
 /// ```
 pub fn generate_client_id() -> String {
   ffi_generate_client_id()
 }
 
-/// Process an incoming message from a client. The bytes should be a
-/// serialised [`transport.Protocol`](./transport.html#Protocol) message.
+/// Process an incoming frame from a client. Decodes the frame and routes
+/// it: `SessionMessage` to the session store; `TopicMessage`,
+/// `Subscribe`, and `Unsubscribe` to the topic actor; `Resync` to a
+/// per-target snapshot fan-out.
 pub fn incoming(
   server: Server(model, message),
   client_id client_id: String,
@@ -158,16 +143,33 @@ pub fn incoming(
   platform_incoming(server.handle, client_id, bytes)
 }
 
-/// Register a hook that runs after each client message is processed on the
-/// server. Receives the decoded message, updated model, and client id.
-///
-/// ## Example
+/// Start building a server. Provide the shared initial model (used as
+/// the zero-state for per-connection session stores and for topic
+/// snapshot construction) and the serialiser.
 ///
 /// ```gleam
-/// server.on_message(server, fn(message, model, client_id) {
+/// server.new(
+///   initial: shared.initial_model(),
+///   serialiser: shared.serialiser(),
+///   wiring: shared.wiring(),
+/// )
+/// ```
+pub fn new(
+  initial initial: model,
+  serialiser serialiser: Serialiser(model, message),
+  wiring wiring: store.Wiring(model, message),
+) -> Builder(model, message) {
+  Builder(initial_model: initial, serialiser:, wiring:)
+}
+
+/// Register a hook that runs after each session message is applied. Receives
+/// the decoded message, the updated session model (projected from the outer
+/// model), and the originating client id.
+///
+/// ```gleam
+/// server.on_message(srv, fn(message, model, client_id) {
 ///   case message {
-///     SaveDocument(doc) -> db.write(doc)
-///     SendEmail(to, body) -> email.send(to, body)
+///     Session(SaveDocument(doc)) -> db.write(doc)
 ///     _ -> Nil
 ///   }
 /// })
@@ -179,49 +181,128 @@ pub fn on_message(
   platform_set_hook(server.handle, hook)
 }
 
-/// Start a new server instance with the given store and serialiser. Returns
-/// `Ok(server)` on success, or `Error(Nil)` if the server fails to start
-/// (Erlang actor init failure, though this is rare with simple init logic).
-///
-/// On JavaScript, this always returns `Ok`.
-///
-/// ## Example
+/// Register a hook that runs for each client-incoming topic message. Receives
+/// the decoded message, the topic id, and the originating client id. Fires
+/// before the topic actor processes the message, regardless of whether the
+/// topic is stateful, ephemeral, or unknown. Does not fire for
+/// server-initiated `topic.dispatch` / `topic.broadcast` calls.
 ///
 /// ```gleam
-/// import lily/server
-/// import lily/store
-///
-/// let app_store = store.new(initial_model, with: update)
-/// let assert Ok(srv) = server.start(store: app_store, serialiser: my_serialiser)
+/// server.on_topic_message(srv, fn(message, topic_id, _client_id) {
+///   logging.auto_log(logging.Info, #(topic_id, message))
+/// })
 /// ```
-/// Stop a running server. Terminates the underlying actor on Erlang and
-/// releases the state box on JavaScript. Further calls to
-/// [`connect`](#connect), [`incoming`](#incoming), [`disconnect`](#disconnect),
-/// or [`on_message`](#on_message) on the stopped server are silently dropped.
+pub fn on_topic_message(
+  server: Server(model, message),
+  hook: fn(message, String, String) -> Nil,
+) -> Nil {
+  platform_set_topic_message_hook(server.handle, hook)
+}
+
+/// Materialise the configured server. Topics are added afterwards via
+/// `topic.new(server, ...)`.
 ///
-/// This does not notify connected clients — closing their transports is the
-/// app's responsibility. See [`disconnect`](#disconnect) for per-client
-/// teardown.
+/// ```gleam
+/// let assert Ok(srv) =
+///   server.new(
+///     initial: shared.initial_model(),
+///     serialiser: shared.serialiser(),
+///     wiring: shared.wiring(),
+///   )
+///   |> server.start
+/// ```
+pub fn start(
+  builder: Builder(model, message),
+) -> Result(Server(model, message), Nil) {
+  let initial_state =
+    ServerState(
+      initial_model: builder.initial_model,
+      serialiser: builder.serialiser,
+      session_apply: store.session_apply(builder.wiring),
+      clients: dict.new(),
+      sessions: dict.new(),
+      topics: dict.new(),
+      topic_kinds: [],
+      on_message_hook: fn(_, _, _) { Nil },
+      on_topic_message_hook: fn(_, _, _) { Nil },
+    )
+
+  platform_start(initial_state)
+  |> result.map(fn(handle) {
+    Server(
+      handle:,
+      serialiser: builder.serialiser,
+      initial_model: builder.initial_model,
+      wiring: builder.wiring,
+    )
+  })
+}
+
+/// Stop a running server. Every registered topic actor is asked to stop
+/// first; each subscriber receives a final `Acknowledge(Topic(id), seq)`
+/// so client slices reset cleanly. The underlying server actor then
+/// terminates (Erlang) or its `Reference` state cell is cleared
+/// (JavaScript). Connected session clients receive no extra frame.
 pub fn stop(server: Server(model, message)) -> Nil {
   platform_stop(server.handle)
 }
 
-pub fn start(
-  store store: Store(model, message),
-  serialiser serialiser: Serialiser(model, message),
-) -> Result(Server(model, message), Nil) {
-  let initial_state =
-    ServerState(
-      store:,
-      clients: dict.new(),
-      sequence: 0,
-      serialiser:,
-      on_message_hook: option.None,
-      cached_snapshot: option.None,
-    )
+// =============================================================================
+// INTERNAL FUNCTIONS
+// =============================================================================
 
-  platform_start(initial_state)
-  |> result.map(Server)
+/// Subscribe a client to a topic by routing through the server (so the server
+/// can look up the client's send function). Idempotent.
+@internal
+pub fn do_subscribe(
+  server: Server(model, message),
+  client_id: String,
+  topic_id: String,
+) -> Nil {
+  platform_do_subscribe(server.handle, client_id, topic_id)
+}
+
+/// Return the configuration values `topic.gleam` needs to build a topic actor:
+/// the initial model (used to construct full-outer-model snapshots), the
+/// serialiser (used to encode topic frames), and the wiring (used to look up
+/// the apply function for a topic's id).
+@internal
+pub fn internals(
+  server: Server(model, message),
+) -> #(model, Serialiser(model, message), store.Wiring(model, message)) {
+  #(server.initial_model, server.serialiser, server.wiring)
+}
+
+/// Register a topic entry under `id`. Returns `Error(Nil)` if `id` already
+/// exists or collides with a registered kind prefix.
+@internal
+pub fn register_topic(
+  server: Server(model, message),
+  id: String,
+  entry: ServerTopicEntry(model, message),
+) -> Result(Nil, Nil) {
+  platform_register_topic(server.handle, id, entry)
+}
+
+/// Register a parametric topic kind. When a client subscribes to a topic
+/// id that starts with `prefix` and no fixed topic with that id exists,
+/// `create` is called with the full topic id and must return a
+/// `ServerTopicEntry` on success or `None` to reject. The entry is
+/// inserted directly into the server state by `find_or_create_topic`; no
+/// server callback is needed.
+@internal
+pub fn register_topic_kind(
+  server: Server(model, message),
+  prefix: String,
+  create: fn(String) -> Option(ServerTopicEntry(model, message)),
+) -> Result(Nil, Nil) {
+  platform_register_topic_kind(server.handle, prefix, create)
+}
+
+/// Remove a topic entry from the server registry.
+@internal
+pub fn unregister_topic(server: Server(model, message), id: String) -> Nil {
+  platform_unregister_topic(server.handle, id)
 }
 
 // =============================================================================
@@ -229,188 +310,414 @@ pub fn start(
 // =============================================================================
 
 @target(erlang)
-/// Platform-specific server handle (Subject on Erlang, FFI handle on JavaScript)
 type ServerHandle(model, message) =
   Subject(InternalEvent(model, message))
 
 @target(javascript)
-type ServerHandle(model, message)
+type ServerHandle(model, message) =
+  Reference(Option(ServerState(model, message)))
 
 @target(erlang)
-/// Internal events for Erlang actor message passing
 type InternalEvent(model, message) {
   ClientConnected(client_id: String, send: fn(BitArray) -> Nil)
   ClientDisconnected(client_id: String)
   Incoming(client_id: String, bytes: BitArray)
   SetHook(hook: fn(message, model, String) -> Nil)
+  SetTopicMessageHook(hook: fn(message, String, String) -> Nil)
+  RegisterTopic(
+    id: String,
+    entry: ServerTopicEntry(model, message),
+    reply: Subject(Result(Nil, Nil)),
+  )
+  RegisterTopicKind(
+    prefix: String,
+    create: fn(String) -> Option(ServerTopicEntry(model, message)),
+    reply: Subject(Result(Nil, Nil)),
+  )
+  UnregisterTopic(id: String)
+  DoSubscribe(client_id: String, topic_id: String)
   Stop
 }
 
-/// Stores the current server state: model, clients, sequence, serialiser,
-/// optional message hook, and a cached encoded snapshot. The snapshot cache
-/// holds the bytes produced by the most recent `Resync` so that subsequent
-/// resyncs arriving before the next `ClientMessage` can skip re-encoding.
+type ConnectionState(model, message) {
+  ConnectionState(model: model, sequence: Int)
+}
+
+type TopicKindEntry(model, message) {
+  TopicKindEntry(
+    prefix: String,
+    create: fn(String) -> Option(ServerTopicEntry(model, message)),
+  )
+}
+
 type ServerState(model, message) {
   ServerState(
-    store: Store(model, message),
-    clients: Dict(String, fn(BitArray) -> Nil),
-    sequence: Int,
+    initial_model: model,
     serialiser: Serialiser(model, message),
-    on_message_hook: Option(fn(message, model, String) -> Nil),
-    cached_snapshot: Option(BitArray),
+    session_apply: Option(fn(model, message) -> model),
+    clients: Dict(String, fn(BitArray) -> Nil),
+    sessions: Dict(String, ConnectionState(model, message)),
+    topics: Dict(String, ServerTopicEntry(model, message)),
+    topic_kinds: List(TopicKindEntry(model, message)),
+    on_message_hook: fn(message, model, String) -> Nil,
+    on_topic_message_hook: fn(message, String, String) -> Nil,
   )
 }
 
 // =============================================================================
-// PRIVATE FUNCTIONS — SHARED LOGIC
+// PRIVATE FUNCTIONS
 // =============================================================================
 
-/// Broadcast to all clients except the excluded one
-fn broadcast_except(
-  clients: Dict(String, fn(BitArray) -> Nil),
-  bytes: BitArray,
-  except excluded_id: String,
-) -> Nil {
-  dict.each(clients, fn(id, send) {
-    case id == excluded_id {
-      True -> Nil
-      False -> send(bytes)
-    }
-  })
-}
-
-/// Handle a client connection by inserting into clients dict
-fn handle_client_connected_logic(
+fn handle_connect_logic(
   state: ServerState(model, message),
   client_id: String,
   send: fn(BitArray) -> Nil,
 ) -> ServerState(model, message) {
   let clients = dict.insert(state.clients, client_id, send)
-  ServerState(..state, clients:)
+  let connection = ConnectionState(model: state.initial_model, sequence: 0)
+  let sessions = dict.insert(state.sessions, client_id, connection)
+  send(transport.encode(
+    transport.Connected(client_id:),
+    serialiser: state.serialiser,
+  ))
+  ServerState(..state, clients:, sessions:)
 }
 
-/// Handle a client disconnection by removing from clients dict
-fn handle_client_disconnected_logic(
+fn handle_disconnect_logic(
   state: ServerState(model, message),
   client_id: String,
 ) -> ServerState(model, message) {
+  dict.each(state.topics, fn(_id, entry) { entry.unsubscribe(client_id) })
   let clients = dict.delete(state.clients, client_id)
-  ServerState(..state, clients:)
+  let sessions = dict.delete(state.sessions, client_id)
+  ServerState(..state, clients:, sessions:)
 }
 
-/// Handle an incoming ClientMessage
-fn handle_client_message_logic(
-  state: ServerState(model, message),
-  client_id: String,
-  payload: message,
-) -> ServerState(model, message) {
-  let updated_store = store.apply(state.store, message: payload)
-  let new_sequence = state.sequence + 1
-
-  let server_message = transport.ServerMessage(sequence: new_sequence, payload:)
-  let encoded = transport.encode(server_message, serialiser: state.serialiser)
-  broadcast_except(state.clients, encoded, except: client_id)
-
-  let acknowledge = transport.Acknowledge(sequence: new_sequence)
-  let acknowledge_encoded =
-    transport.encode(acknowledge, serialiser: state.serialiser)
-  case dict.get(state.clients, client_id) {
-    Ok(send) -> send(acknowledge_encoded)
-    Error(Nil) -> Nil
-  }
-
-  case state.on_message_hook {
-    option.Some(hook) -> hook(payload, updated_store.model, client_id)
-    option.None -> Nil
-  }
-
-  ServerState(
-    ..state,
-    store: updated_store,
-    sequence: new_sequence,
-    cached_snapshot: option.None,
-  )
-}
-
-/// For an incoming payload, handle if it's a Resync or a ClientMessage
 fn handle_incoming_logic(
   state: ServerState(model, message),
   client_id: String,
   bytes: BitArray,
 ) -> ServerState(model, message) {
   case transport.decode(bytes, serialiser: state.serialiser) {
-    Ok(transport.ClientMessage(payload:)) ->
-      handle_client_message_logic(state, client_id, payload)
+    Ok(transport.SessionMessage(payload:)) ->
+      handle_session_message_logic(state, client_id, payload)
 
-    Ok(transport.Resync(_)) -> handle_resync_logic(state, client_id)
+    Ok(transport.TopicMessage(topic_id:, payload:)) ->
+      handle_topic_message_logic(state, client_id, topic_id, payload)
 
-    _ -> state
+    Ok(transport.Subscribe(topic_id:)) ->
+      handle_subscribe_logic(state, client_id, topic_id)
+
+    Ok(transport.Unsubscribe(topic_id:)) ->
+      handle_unsubscribe_logic(state, client_id, topic_id)
+
+    Ok(transport.Resync(cursors:)) ->
+      handle_resync_logic(state, client_id, cursors)
+
+    // Server-to-client variants, never legitimately arrive on the server.
+    Ok(transport.Acknowledge(_, _))
+    | Ok(transport.Connected(_))
+    | Ok(transport.Push(_, _))
+    | Ok(transport.Rejected(_, _))
+    | Ok(transport.Snapshot(_, _, _))
+    | Ok(transport.TopicUpdate(_, _, _)) -> state
+
+    Error(_) -> state
   }
 }
 
-/// Handle a resync request by sending a snapshot of the current model.
-/// Reuses `state.cached_snapshot` when populated — the cache is invalidated
-/// on every `ClientMessage`, so a `Some(bytes)` here is guaranteed to match
-/// the current model.
-fn handle_resync_logic(
+fn handle_session_message_logic(
   state: ServerState(model, message),
   client_id: String,
+  message: message,
+) -> ServerState(model, message) {
+  case dict.get(state.sessions, client_id) {
+    Error(_) -> state
+    Ok(connection) -> {
+      let new_model = case state.session_apply {
+        option.None -> connection.model
+        option.Some(apply) -> apply(connection.model, message)
+      }
+      let new_seq = connection.sequence + 1
+      case dict.get(state.clients, client_id) {
+        Ok(send) -> {
+          let ack_frame =
+            transport.encode(
+              transport.Acknowledge(
+                target: transport.Session,
+                sequence: new_seq,
+              ),
+              serialiser: state.serialiser,
+            )
+          send(ack_frame)
+        }
+        Error(_) -> Nil
+      }
+      state.on_message_hook(message, new_model, client_id)
+      let sessions =
+        dict.insert(
+          state.sessions,
+          client_id,
+          ConnectionState(model: new_model, sequence: new_seq),
+        )
+      ServerState(..state, sessions:)
+    }
+  }
+}
+
+fn handle_topic_message_logic(
+  state: ServerState(model, message),
+  client_id: String,
+  topic_id: String,
+  message: message,
+) -> ServerState(model, message) {
+  state.on_topic_message_hook(message, topic_id, client_id)
+  case find_or_create_topic(state, topic_id) {
+    #(state, option.Some(entry)) -> {
+      entry.handle_incoming(client_id, message)
+      state
+    }
+    #(state, option.None) -> state
+  }
+}
+
+fn handle_subscribe_logic(
+  state: ServerState(model, message),
+  client_id: String,
+  topic_id: String,
 ) -> ServerState(model, message) {
   case dict.get(state.clients, client_id) {
-    Error(Nil) -> state
+    Error(_) -> state
     Ok(send) ->
-      case state.cached_snapshot {
-        option.Some(bytes) -> {
-          send(bytes)
+      case find_or_create_topic(state, topic_id) {
+        #(state, option.Some(entry)) -> {
+          entry.subscribe(client_id, send)
           state
         }
-        option.None -> {
-          let snapshot =
-            transport.Snapshot(
-              sequence: state.sequence,
-              state: state.store.model,
+        #(state, option.None) -> {
+          let rejected_frame =
+            transport.encode(
+              transport.Rejected(topic_id:, reason: "not found"),
+              serialiser: state.serialiser,
             )
-          let bytes = transport.encode(snapshot, serialiser: state.serialiser)
-          send(bytes)
-          ServerState(..state, cached_snapshot: option.Some(bytes))
+          send(rejected_frame)
+          state
         }
       }
   }
 }
 
-// =============================================================================
-// PRIVATE FUNCTIONS — ERLANG
-// =============================================================================
-
-@target(erlang)
-/// Actor message handler (Erlang)
-fn handle_message(
+fn handle_unsubscribe_logic(
   state: ServerState(model, message),
-  message: InternalEvent(model, message),
-) -> actor.Next(ServerState(model, message), InternalEvent(model, message)) {
-  case message {
-    ClientConnected(client_id:, send:) ->
-      handle_client_connected_logic(state, client_id, send)
-      |> actor.continue
+  client_id: String,
+  topic_id: String,
+) -> ServerState(model, message) {
+  case dict.get(state.topics, topic_id) {
+    Ok(entry) -> entry.unsubscribe(client_id)
+    Error(_) -> Nil
+  }
+  state
+}
 
-    ClientDisconnected(client_id:) ->
-      handle_client_disconnected_logic(state, client_id)
-      |> actor.continue
+fn handle_resync_logic(
+  state: ServerState(model, message),
+  client_id: String,
+  cursors: List(transport.Target),
+) -> ServerState(model, message) {
+  case dict.get(state.clients, client_id) {
+    Error(_) -> state
+    Ok(send) -> {
+      list.each(cursors, fn(target) {
+        case target {
+          transport.Session ->
+            case dict.get(state.sessions, client_id) {
+              Ok(connection) -> {
+                let snapshot_frame =
+                  transport.encode(
+                    transport.Snapshot(
+                      target: transport.Session,
+                      sequence: connection.sequence,
+                      state: connection.model,
+                    ),
+                    serialiser: state.serialiser,
+                  )
+                send(snapshot_frame)
+              }
+              Error(_) -> Nil
+            }
 
-    Incoming(client_id:, bytes:) ->
-      handle_incoming_logic(state, client_id, bytes)
-      |> actor.continue
+          transport.Topic(id) ->
+            case dict.get(state.topics, id) {
+              Ok(entry) -> entry.send_snapshot(send)
+              Error(_) -> Nil
+            }
+        }
+      })
+      state
+    }
+  }
+}
 
-    SetHook(hook:) ->
-      ServerState(..state, on_message_hook: option.Some(hook))
-      |> actor.continue
+fn handle_do_subscribe_logic(
+  state: ServerState(model, message),
+  client_id: String,
+  topic_id: String,
+) -> ServerState(model, message) {
+  case dict.get(state.clients, client_id), dict.get(state.topics, topic_id) {
+    Ok(send), Ok(entry) -> {
+      entry.subscribe(client_id, send)
+      state
+    }
+    _, _ -> state
+  }
+}
 
-    Stop -> actor.stop()
+fn handle_register_topic_logic(
+  state: ServerState(model, message),
+  id: String,
+  entry: ServerTopicEntry(model, message),
+) -> #(ServerState(model, message), Result(Nil, Nil)) {
+  let already_exists = case dict.get(state.topics, id) {
+    Ok(_) -> True
+    Error(_) -> False
+  }
+  // Both directions matter, `id="room:1"` collides with kind prefix
+  // `"room:"`, and a fixed `id="room"` would shadow that prefix's first
+  // character.
+  let kind_collision =
+    list.any(state.topic_kinds, fn(kind) {
+      string.starts_with(id, kind.prefix) || string.starts_with(kind.prefix, id)
+    })
+  case already_exists || kind_collision {
+    True -> #(state, Error(Nil))
+    False -> {
+      let topics = dict.insert(state.topics, id, entry)
+      #(ServerState(..state, topics:), Ok(Nil))
+    }
+  }
+}
+
+fn handle_register_kind_logic(
+  state: ServerState(model, message),
+  prefix: String,
+  create: fn(String) -> Option(ServerTopicEntry(model, message)),
+) -> #(ServerState(model, message), Result(Nil, Nil)) {
+  let topic_collision =
+    list.any(dict.keys(state.topics), string.starts_with(_, prefix))
+  let kind_collision = list.any(state.topic_kinds, fn(k) { k.prefix == prefix })
+  case topic_collision || kind_collision {
+    True -> #(state, Error(Nil))
+    False -> {
+      let kind = TopicKindEntry(prefix:, create:)
+      let topic_kinds = [kind, ..state.topic_kinds]
+      #(ServerState(..state, topic_kinds:), Ok(Nil))
+    }
+  }
+}
+
+fn handle_unregister_topic_logic(
+  state: ServerState(model, message),
+  id: String,
+) -> ServerState(model, message) {
+  let topics = dict.delete(state.topics, id)
+  ServerState(..state, topics:)
+}
+
+fn handle_set_hook_logic(
+  state: ServerState(model, message),
+  hook: fn(message, model, String) -> Nil,
+) -> ServerState(model, message) {
+  ServerState(..state, on_message_hook: hook)
+}
+
+fn handle_set_topic_message_hook_logic(
+  state: ServerState(model, message),
+  hook: fn(message, String, String) -> Nil,
+) -> ServerState(model, message) {
+  ServerState(..state, on_topic_message_hook: hook)
+}
+
+/// Stop every registered topic actor (which sends a final
+/// `Acknowledge(Topic(id), seq)` to each subscriber) before the server itself
+/// goes away. Called from both the Erlang `Stop` arm and the JavaScript
+/// `stop()` method.
+fn handle_stop_logic(state: ServerState(model, message)) -> Nil {
+  dict.each(state.topics, fn(_id, entry) { entry.stop() })
+}
+
+fn find_or_create_topic(
+  state: ServerState(model, message),
+  topic_id: String,
+) -> #(ServerState(model, message), Option(ServerTopicEntry(model, message))) {
+  case dict.get(state.topics, topic_id) {
+    Ok(entry) -> #(state, option.Some(entry))
+    Error(_) -> {
+      let kind =
+        list.find(state.topic_kinds, fn(k) {
+          string.starts_with(topic_id, k.prefix)
+        })
+      case kind {
+        Error(_) -> #(state, option.None)
+        Ok(k) ->
+          case k.create(topic_id) {
+            option.None -> #(state, option.None)
+            option.Some(entry) -> {
+              let topics = dict.insert(state.topics, topic_id, entry)
+              #(ServerState(..state, topics:), option.Some(entry))
+            }
+          }
+      }
+    }
   }
 }
 
 @target(erlang)
-/// Send a client connected event to the Erlang actor
+fn handle_message(
+  state: ServerState(model, message),
+  event: InternalEvent(model, message),
+) -> actor.Next(ServerState(model, message), InternalEvent(model, message)) {
+  case event {
+    ClientConnected(client_id:, send:) ->
+      handle_connect_logic(state, client_id, send) |> actor.continue
+
+    ClientDisconnected(client_id:) ->
+      handle_disconnect_logic(state, client_id) |> actor.continue
+
+    Incoming(client_id:, bytes:) ->
+      handle_incoming_logic(state, client_id, bytes) |> actor.continue
+
+    SetHook(hook:) -> handle_set_hook_logic(state, hook) |> actor.continue
+
+    SetTopicMessageHook(hook:) ->
+      handle_set_topic_message_hook_logic(state, hook) |> actor.continue
+
+    RegisterTopic(id:, entry:, reply:) -> {
+      let #(new_state, result) = handle_register_topic_logic(state, id, entry)
+      process.send(reply, result)
+      actor.continue(new_state)
+    }
+
+    RegisterTopicKind(prefix:, create:, reply:) -> {
+      let #(new_state, result) =
+        handle_register_kind_logic(state, prefix, create)
+      process.send(reply, result)
+      actor.continue(new_state)
+    }
+
+    UnregisterTopic(id:) ->
+      handle_unregister_topic_logic(state, id) |> actor.continue
+
+    DoSubscribe(client_id:, topic_id:) ->
+      handle_do_subscribe_logic(state, client_id, topic_id) |> actor.continue
+
+    Stop -> {
+      handle_stop_logic(state)
+      actor.stop()
+    }
+  }
+}
+
+@target(erlang)
 fn platform_connect(
   handle: ServerHandle(model, message),
   client_id: String,
@@ -420,7 +727,6 @@ fn platform_connect(
 }
 
 @target(erlang)
-/// Send a client disconnected event to the Erlang actor
 fn platform_disconnect(
   handle: ServerHandle(model, message),
   client_id: String,
@@ -429,7 +735,15 @@ fn platform_disconnect(
 }
 
 @target(erlang)
-/// Send an incoming message event to the Erlang actor
+fn platform_do_subscribe(
+  handle: ServerHandle(model, message),
+  client_id: String,
+  topic_id: String,
+) -> Nil {
+  actor.send(handle, DoSubscribe(client_id:, topic_id:))
+}
+
+@target(erlang)
 fn platform_incoming(
   handle: ServerHandle(model, message),
   client_id: String,
@@ -439,7 +753,26 @@ fn platform_incoming(
 }
 
 @target(erlang)
-/// Send a set hook event to the Erlang actor
+fn platform_register_topic(
+  handle: ServerHandle(model, message),
+  id: String,
+  entry: ServerTopicEntry(model, message),
+) -> Result(Nil, Nil) {
+  process.call(handle, 5000, fn(reply) { RegisterTopic(id:, entry:, reply:) })
+}
+
+@target(erlang)
+fn platform_register_topic_kind(
+  handle: ServerHandle(model, message),
+  prefix: String,
+  create: fn(String) -> Option(ServerTopicEntry(model, message)),
+) -> Result(Nil, Nil) {
+  process.call(handle, 5000, fn(reply) {
+    RegisterTopicKind(prefix:, create:, reply:)
+  })
+}
+
+@target(erlang)
 fn platform_set_hook(
   handle: ServerHandle(model, message),
   hook: fn(message, model, String) -> Nil,
@@ -448,13 +781,14 @@ fn platform_set_hook(
 }
 
 @target(erlang)
-/// Send a stop event to the Erlang actor
-fn platform_stop(handle: ServerHandle(model, message)) -> Nil {
-  actor.send(handle, Stop)
+fn platform_set_topic_message_hook(
+  handle: ServerHandle(model, message),
+  hook: fn(message, String, String) -> Nil,
+) -> Nil {
+  actor.send(handle, SetTopicMessageHook(hook:))
 }
 
 @target(erlang)
-/// Start the Erlang OTP actor
 fn platform_start(
   initial_state: ServerState(model, message),
 ) -> Result(ServerHandle(model, message), Nil) {
@@ -465,134 +799,153 @@ fn platform_start(
   |> result.replace_error(Nil)
 }
 
-// =============================================================================
-// PRIVATE FUNCTIONS — JAVASCRIPT
-// =============================================================================
+@target(erlang)
+fn platform_stop(handle: ServerHandle(model, message)) -> Nil {
+  actor.send(handle, Stop)
+}
+
+@target(erlang)
+fn platform_unregister_topic(
+  handle: ServerHandle(model, message),
+  id: String,
+) -> Nil {
+  actor.send(handle, UnregisterTopic(id:))
+}
 
 @target(javascript)
-/// Register a client connection (JavaScript)
+fn modify(
+  handle: ServerHandle(model, message),
+  update: fn(ServerState(model, message)) -> ServerState(model, message),
+) -> Nil {
+  case reference.get(handle) {
+    option.Some(state) -> reference.set(handle, option.Some(update(state)))
+    option.None -> Nil
+  }
+}
+
+@target(javascript)
+fn modify_returning(
+  handle: ServerHandle(model, message),
+  update: fn(ServerState(model, message)) ->
+    #(ServerState(model, message), result),
+  default: result,
+) -> result {
+  case reference.get(handle) {
+    option.Some(state) -> {
+      let #(new_state, result) = update(state)
+      reference.set(handle, option.Some(new_state))
+      result
+    }
+    option.None -> default
+  }
+}
+
+@target(javascript)
 fn platform_connect(
   handle: ServerHandle(model, message),
   client_id: String,
   send: fn(BitArray) -> Nil,
 ) -> Nil {
-  ffi_connect(handle, client_id, send)
+  modify(handle, handle_connect_logic(_, client_id, send))
 }
 
 @target(javascript)
-/// Unregister a client connection (JavaScript)
 fn platform_disconnect(
   handle: ServerHandle(model, message),
   client_id: String,
 ) -> Nil {
-  ffi_disconnect(handle, client_id)
+  modify(handle, handle_disconnect_logic(_, client_id))
 }
 
 @target(javascript)
-/// Process an incoming message (JavaScript)
+fn platform_do_subscribe(
+  handle: ServerHandle(model, message),
+  client_id: String,
+  topic_id: String,
+) -> Nil {
+  modify(handle, handle_do_subscribe_logic(_, client_id, topic_id))
+}
+
+@target(javascript)
 fn platform_incoming(
   handle: ServerHandle(model, message),
   client_id: String,
   bytes: BitArray,
 ) -> Nil {
-  ffi_incoming(handle, client_id, bytes)
+  modify(handle, handle_incoming_logic(_, client_id, bytes))
 }
 
 @target(javascript)
-/// Set the message hook (JavaScript)
+fn platform_register_topic(
+  handle: ServerHandle(model, message),
+  id: String,
+  entry: ServerTopicEntry(model, message),
+) -> Result(Nil, Nil) {
+  modify_returning(
+    handle,
+    handle_register_topic_logic(_, id, entry),
+    Error(Nil),
+  )
+}
+
+@target(javascript)
+fn platform_register_topic_kind(
+  handle: ServerHandle(model, message),
+  prefix: String,
+  create: fn(String) -> Option(ServerTopicEntry(model, message)),
+) -> Result(Nil, Nil) {
+  modify_returning(
+    handle,
+    handle_register_kind_logic(_, prefix, create),
+    Error(Nil),
+  )
+}
+
+@target(javascript)
 fn platform_set_hook(
   handle: ServerHandle(model, message),
   hook: fn(message, model, String) -> Nil,
 ) -> Nil {
-  ffi_set_hook(handle, hook)
+  modify(handle, handle_set_hook_logic(_, hook))
 }
 
 @target(javascript)
-/// Stop the JavaScript server (clears its closure state)
-fn platform_stop(handle: ServerHandle(model, message)) -> Nil {
-  ffi_stop(handle)
+fn platform_set_topic_message_hook(
+  handle: ServerHandle(model, message),
+  hook: fn(message, String, String) -> Nil,
+) -> Nil {
+  modify(handle, handle_set_topic_message_hook_logic(_, hook))
 }
 
 @target(javascript)
-/// Start the JavaScript server (creates closure with mutable state)
 fn platform_start(
   initial_state: ServerState(model, message),
 ) -> Result(ServerHandle(model, message), Nil) {
-  Ok(ffi_create_server(
-    initial_state,
-    handle_client_connected_logic,
-    handle_client_disconnected_logic,
-    handle_incoming_logic,
-  ))
+  Ok(reference.make(option.Some(initial_state)))
+}
+
+@target(javascript)
+fn platform_stop(handle: ServerHandle(model, message)) -> Nil {
+  case reference.get(handle) {
+    option.Some(state) -> {
+      handle_stop_logic(state)
+      reference.set(handle, option.None)
+    }
+    option.None -> Nil
+  }
+}
+
+@target(javascript)
+fn platform_unregister_topic(
+  handle: ServerHandle(model, message),
+  id: String,
+) -> Nil {
+  modify(handle, handle_unregister_topic_logic(_, id))
 }
 
 // =============================================================================
 // PRIVATE FFI
 // =============================================================================
-
-@target(javascript)
-/// Call the connect method on the server handle
-@external(javascript, "./server.ffi.mjs", "connect")
-fn ffi_connect(
-  _handle: ServerHandle(model, message),
-  _client_id: String,
-  _send: fn(BitArray) -> Nil,
-) -> Nil {
-  Nil
-}
-
-@target(javascript)
-/// Create server with closure-scoped mutable state
-@external(javascript, "./server.ffi.mjs", "createServer")
-fn ffi_create_server(
-  _initial_state: ServerState(model, message),
-  _handle_connect: fn(ServerState(model, message), String, fn(BitArray) -> Nil) ->
-    ServerState(model, message),
-  _handle_disconnect: fn(ServerState(model, message), String) ->
-    ServerState(model, message),
-  _handle_incoming: fn(ServerState(model, message), String, BitArray) ->
-    ServerState(model, message),
-) -> ServerHandle(model, message) {
-  panic as "JavaScript only"
-}
-
-@target(javascript)
-/// Call the disconnect method on the server handle
-@external(javascript, "./server.ffi.mjs", "disconnect")
-fn ffi_disconnect(
-  _handle: ServerHandle(model, message),
-  _client_id: String,
-) -> Nil {
-  Nil
-}
-
-@target(javascript)
-/// Call the incoming method on the server handle
-@external(javascript, "./server.ffi.mjs", "incoming")
-fn ffi_incoming(
-  _handle: ServerHandle(model, message),
-  _client_id: String,
-  _bytes: BitArray,
-) -> Nil {
-  Nil
-}
-
-@target(javascript)
-/// Call the setHook method on the server handle
-@external(javascript, "./server.ffi.mjs", "setHook")
-fn ffi_set_hook(
-  _handle: ServerHandle(model, message),
-  _hook: fn(message, model, String) -> Nil,
-) -> Nil {
-  Nil
-}
-
-@target(javascript)
-/// Call the stop method on the server handle
-@external(javascript, "./server.ffi.mjs", "stop")
-fn ffi_stop(_handle: ServerHandle(model, message)) -> Nil {
-  Nil
-}
 
 @target(erlang)
 @external(erlang, "lily_server_ffi", "generate_client_id")

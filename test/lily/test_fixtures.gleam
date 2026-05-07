@@ -1,4 +1,5 @@
-// Shared test types, update function, and serialisers used across all test files.
+// Shared test types, update function, and serialisers used across all
+// test files.
 
 import gleam/dynamic/decode.{type Decoder}
 import gleam/json.{type Json}
@@ -56,7 +57,7 @@ pub fn update(model: Model, message: Message) -> Model {
 }
 
 // =============================================================================
-// CUSTOM SERIALISER (explicit encode/decode — no FFI, works on both targets)
+// CUSTOM SERIALISER (explicit encode/decode, no FFI, works on both targets)
 // =============================================================================
 
 pub fn custom_serialiser() -> Serialiser(Model, Message) {

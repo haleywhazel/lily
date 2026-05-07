@@ -9,11 +9,12 @@
  * Works identically in browsers, Node, Bun, and Deno.
  *
  * A module-level currentLevel threshold gates messages below it. Default is
- * 6 (Info). setLevel() updates it — useful on JS servers where DevTools is
+ * 6 (Info). setLevel() updates it, useful on JS servers where DevTools is
  * not available.
  *
  * Severity values (lower = more severe):
- *   0 Emergency, 1 Alert, 2 Critical, 3 Error, 4 Warning, 5 Notice, 6 Info, 7 Debug
+ *   0 Emergency, 1 Alert, 2 Critical, 3 Error,
+ *   4 Warning, 5 Notice, 6 Info, 7 Debug
  */
 
 let currentLevel = 6; // Info
@@ -23,38 +24,46 @@ function envvarEnabled(name) {
   return val !== undefined && val !== "" && val !== "false";
 }
 
-const colored =
+const coloured =
   typeof process !== "undefined" &&
   process.stdout?.isTTY === true &&
   !envvarEnabled("NO_COLOR") &&
   !envvarEnabled("NO_COLOUR");
 
-const LEVEL_CODES = {
-  EMRG: colored ? "\x1b[1;41mEMRG\x1b[0m" : "EMRG",
-  ALRT: colored ? "\x1b[1;41mALRT\x1b[0m" : "ALRT",
-  CRIT: colored ? "\x1b[1;41mCRIT\x1b[0m" : "CRIT",
-  EROR: colored ? "\x1b[1;31mEROR\x1b[0m" : "EROR",
-  WARN: colored ? "\x1b[1;33mWARN\x1b[0m" : "WARN",
-  NTCE: colored ? "\x1b[1;32mNTCE\x1b[0m" : "NTCE",
-  INFO: colored ? "\x1b[1;34mINFO\x1b[0m" : "INFO",
-  DEBG: colored ? "\x1b[1;36mDEBG\x1b[0m" : "DEBG",
-};
+// Indexed by severity (0..7). One array of pre-rendered tags (with optional
+// ANSI colours), one of console methods. Indexed lookup is cheaper than the
+// previous string-keyed dictionaries and removes a hop through level codes.
+const TAGS_BY_SEVERITY = coloured
+  ? [
+      "\x1b[1;41mEMRG\x1b[0m",
+      "\x1b[1;41mALRT\x1b[0m",
+      "\x1b[1;41mCRIT\x1b[0m",
+      "\x1b[1;31mEROR\x1b[0m",
+      "\x1b[1;33mWARN\x1b[0m",
+      "\x1b[1;32mNTCE\x1b[0m",
+      "\x1b[1;34mINFO\x1b[0m",
+      "\x1b[1;36mDEBG\x1b[0m",
+    ]
+  : ["EMRG", "ALRT", "CRIT", "EROR", "WARN", "NTCE", "INFO", "DEBG"];
 
-const CONSOLE_METHOD = {
-  EMRG: "error",
-  ALRT: "error",
-  CRIT: "error",
-  EROR: "error",
-  WARN: "warn",
-  NTCE: "info",
-  INFO: "info",
-  DEBG: "debug",
-};
+const METHOD_BY_SEVERITY = [
+  "error", // Emergency
+  "error", // Alert
+  "error", // Critical
+  "error", // Error
+  "warn",  // Warning
+  "info",  // Notice
+  "info",  // Info
+  "debug", // Debug
+];
 
-export function log(levelCode, levelSeverity, message) {
-  if (levelSeverity > currentLevel) return;
-  const line = LEVEL_CODES[levelCode] + " " + message;
-  console[CONSOLE_METHOD[levelCode] ?? "info"](line);
+export function isEnabled(severity) {
+  return severity <= currentLevel;
+}
+
+export function log(severity, message) {
+  if (severity > currentLevel) return;
+  console[METHOD_BY_SEVERITY[severity]](TAGS_BY_SEVERITY[severity] + " " + message);
 }
 
 export function setLevel(severity) {

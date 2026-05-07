@@ -12,7 +12,8 @@
 // IMPORTS
 // =============================================================================
 
-import { Ok, Error } from "../gleam.mjs";
+import { Ok, Error, toList } from "../gleam.mjs";
+import { Some, None } from "../../gleam_stdlib/gleam/option.mjs";
 import {
   SetText,
   SetAttribute,
@@ -60,9 +61,16 @@ export function createRuntime(store, apply) {
   let componentCounter = 0;
   const componentRegistry = new Map();
   let sessionConfig = null;
+  let lastSession = null;
   const previousFieldValues = new Map();
-  let connectionStatusConfig = null;
+  let clientIdSetter = null;
+  let setConnectionStatusModel = null;
   let snapshotHook = null;
+  let wiring = null;
+  let sendFrameFn = null;
+
+  // Per-target sequence tracking (in-memory; keyed by target key string)
+  const sequences = new Map();
 
   function flushNotify() {
     const model = currentStore.model;
@@ -72,35 +80,34 @@ export function createRuntime(store, apply) {
   }
 
   function scheduleNotify() {
-    dirty = true;
-    if (!frameScheduled) {
-      frameScheduled = true;
-      dirty = false;
-      flushNotify();
-      requestAnimationFrame(() => {
-        frameScheduled = false;
-        if (dirty) {
-          dirty = false;
-          flushNotify();
-        }
-      });
+    if (frameScheduled) {
+      dirty = true;
+      return;
     }
+    frameScheduled = true;
+    flushNotify();
+    requestAnimationFrame(() => {
+      frameScheduled = false;
+      if (dirty) {
+        dirty = false;
+        flushNotify();
+      }
+    });
   }
 
   function persistSessionChanges(session) {
     if (!sessionConfig) return;
-    const fields = sessionConfig.fields;
-    const prefix = "lily_session_";
+    // Skip the per-field loop when the session slice didn't change at all,
+    // by far the common case, since most messages don't touch the session.
+    if (session === lastSession) return;
+    lastSession = session;
 
-    for (const field of fields) {
-      // Serialise first — JSON values are objects, string comparison is stable
+    for (const field of sessionConfig.fields) {
       const serialised = JSON.stringify(field.get(session));
-      const previous = previousFieldValues.get(field.key);
-      if (previous !== undefined && previous === serialised) continue;
+      if (previousFieldValues.get(field.key) === serialised) continue;
       previousFieldValues.set(field.key, serialised);
-      const key = prefix + field.key;
       try {
-        localStorage.setItem(key, serialised);
+        localStorage.setItem(field.storageKey, serialised);
       } catch (error) {
         logLine(
           "EROR",
@@ -113,21 +120,14 @@ export function createRuntime(store, apply) {
   return {
     applyRemoteMessage(message) {
       currentStore = applyMessage(currentStore, message);
+      if (userMessageHook) userMessageHook(message, currentStore.model);
       scheduleNotify();
+    },
+    callStoredSendFrame(frame) {
+      if (sendFrameFn) sendFrameFn(frame);
     },
     clearRegistry() {
       componentRegistry.clear();
-    },
-    createSelective(selector, select, compare, handler) {
-      let previous = undefined;
-      let hasPrevious = false;
-      return function (model) {
-        const next = select(model);
-        if (hasPrevious && compare(previous, next)) return;
-        previous = next;
-        hasPrevious = true;
-        handler(next);
-      };
     },
     dispatchModel(model) {
       currentStore.model = model;
@@ -136,24 +136,24 @@ export function createRuntime(store, apply) {
     getComponentRegistry() {
       return componentRegistry;
     },
-    getSnapshotHook() {
-      return snapshotHook;
-    },
-    getLastSequence() {
-      const raw = localStorage.getItem(STORAGE_KEY_SEQUENCE);
-      return raw ? parseInt(raw, 10) || 0 : 0;
+    getAllSequences() {
+      // Return a Gleam List of [targetKey, sequence] 2-tuples (JS arrays)
+      return toList(Array.from(sequences.entries()));
     },
     getModel() {
       return currentStore.model;
+    },
+    getWiring() {
+      return wiring;
+    },
+    getSnapshotHook() {
+      return snapshotHook ? new Some(snapshotHook) : new None();
     },
     initialNotify() {
       flushNotify();
     },
     nextComponentId() {
       return `c${componentCounter++}`;
-    },
-    referenceEqual(a, b) {
-      return a === b;
     },
     registerComponent(id, handler) {
       componentRegistry.set(id, handler);
@@ -182,16 +182,23 @@ export function createRuntime(store, apply) {
       }
     },
     setConnectionStatus(connected) {
-      if (!connectionStatusConfig) return;
-      const updatedModel = connectionStatusConfig.set(
+      if (!setConnectionStatusModel) return;
+      currentStore.model = setConnectionStatusModel(
         currentStore.model,
         connected,
       );
-      currentStore.model = updatedModel;
       scheduleNotify();
     },
-    setConnectionStatusConfig(get, set) {
-      connectionStatusConfig = { get, set };
+    setClientIdSetter(set) {
+      clientIdSetter = set;
+    },
+    handleClientId(clientId) {
+      if (clientIdSetter === null) return;
+      currentStore.model = clientIdSetter(currentStore.model, clientId);
+      scheduleNotify();
+    },
+    setConnectionStatusConfig(set) {
+      setConnectionStatusModel = set;
     },
     setInnerHtml(selector, html) {
       const element = document.querySelector(selector);
@@ -199,8 +206,8 @@ export function createRuntime(store, apply) {
         element.innerHTML = html;
       }
     },
-    setLastSequence(sequence) {
-      localStorage.setItem(STORAGE_KEY_SEQUENCE, String(sequence));
+    setLastSequenceForTarget(targetKey, sequence) {
+      sequences.set(targetKey, sequence);
     },
     setModel(model) {
       currentStore.model = model;
@@ -208,17 +215,19 @@ export function createRuntime(store, apply) {
     setOnMessageHook(hook) {
       onMessageHook = hook;
     },
+    setWiring(r) {
+      wiring = r;
+    },
     setSessionConfig(config) {
       sessionConfig = config;
-      // Seed per-field previous values so the first update only writes changes
-      if (sessionConfig) {
-        const session = sessionConfig.get(currentStore.model);
-        for (const field of sessionConfig.fields) {
-          previousFieldValues.set(
-            field.key,
-            JSON.stringify(field.get(session)),
-          );
-        }
+      if (!sessionConfig) return;
+      const session = sessionConfig.get(currentStore.model);
+      lastSession = session;
+      for (const field of sessionConfig.fields) {
+        previousFieldValues.set(
+          field.key,
+          JSON.stringify(field.get(session)),
+        );
       }
     },
     setStore(store) {
@@ -233,6 +242,9 @@ export function createRuntime(store, apply) {
     setSnapshotHook(hook) {
       snapshotHook = hook;
     },
+    storeSendFrame(fn) {
+      sendFrameFn = fn;
+    },
   };
 }
 
@@ -241,12 +253,33 @@ export function referenceEqual(a, b) {
   return a === b;
 }
 
+/**
+ * Wrap a render handler so it only runs when `select(model)` produces a
+ * value `compare`-different from the previous one. Pure helper, no
+ * runtime state captured, exported for `component.ffi.mjs`.
+ */
+export function createSelective(select, compare, handler) {
+  let previous = undefined;
+  let hasPrevious = false;
+  return function (model) {
+    const next = select(model);
+    if (hasPrevious && compare(previous, next)) return;
+    previous = next;
+    hasPrevious = true;
+    handler(next);
+  };
+}
+
 // =============================================================================
 // WRAPPER EXPORTS (for Gleam FFI bindings)
 // =============================================================================
 
 export function applyRemoteMessage(runtime, message) {
   runtime.applyRemoteMessage(message);
+}
+
+export function callStoredSendFrame(runtime, frame) {
+  runtime.callStoredSendFrame(frame);
 }
 
 export function clearSession(prefix) {
@@ -266,31 +299,42 @@ export function dispatchModel(runtime, model) {
   runtime.dispatchModel(model);
 }
 
-export function getLastSequence(runtime) {
-  return runtime.getLastSequence();
+/**
+ * Generate a random 32-character hex string for use as a client-side
+ * session identifier.
+ */
+export function generateSessionId() {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+export function getAllSequences(runtime) {
+  return runtime.getAllSequences();
 }
 
 export function getModel(runtime) {
   return runtime.getModel();
 }
 
+export function getSnapshotHook(runtime) {
+  return runtime.getSnapshotHook();
+}
+
+export function getWiring(runtime) {
+  return runtime.getWiring();
+}
+
+export function handleClientId(runtime, clientId) {
+  runtime.handleClientId(clientId);
+}
+
 export function initialNotify(runtime) {
   runtime.initialNotify();
 }
 
-export function mergeLocalAndDispatch(runtime, incoming) {
-  const current = runtime.getModel();
-  const hook = runtime.getSnapshotHook();
-  const merged = hook ? hook(incoming, current) : mergeLocal(current, incoming);
-  runtime.dispatchModel(merged);
-}
-
 export function mergeLocals(incoming, current) {
-  return mergeLocal(current, incoming);
-}
-
-export function setSnapshotHook(runtime, hook) {
-  runtime.setSnapshotHook(hook);
+  return mergeLocal(incoming, current);
 }
 
 export function readField(prefix, key) {
@@ -313,16 +357,20 @@ export function sendViaTransport(runtime, bytes) {
   runtime.sendViaTransport(bytes);
 }
 
+export function setClientIdSetter(runtime, set) {
+  runtime.setClientIdSetter(set);
+}
+
 export function setConnectionStatus(runtime, connected) {
   runtime.setConnectionStatus(connected);
 }
 
-export function setConnectionStatusConfig(runtime, get, set) {
-  runtime.setConnectionStatusConfig(get, set);
+export function setConnectionStatusConfig(runtime, set) {
+  runtime.setConnectionStatusConfig(set);
 }
 
-export function setLastSequence(runtime, sequence) {
-  runtime.setLastSequence(sequence);
+export function setLastSequenceForTarget(runtime, targetKey, sequence) {
+  runtime.setLastSequenceForTarget(targetKey, sequence);
 }
 
 export function setModel(runtime, model) {
@@ -333,14 +381,16 @@ export function setOnMessageHook(runtime, hook) {
   runtime.setOnMessageHook(hook);
 }
 
-export function setSessionConfig(runtime, persistence, get, set) {
-  const fields = persistence.fields.toArray();
-  runtime.setSessionConfig({
-    persistence,
-    get,
-    set,
-    fields,
-  });
+export function setSessionConfig(runtime, persistence, prefix, get, set) {
+  const fields = persistence.fields.toArray().map((field) => ({
+    ...field,
+    storageKey: prefix + field.key,
+  }));
+  runtime.setSessionConfig({ persistence, get, set, fields });
+}
+
+export function setSnapshotHook(runtime, hook) {
+  runtime.setSnapshotHook(hook);
 }
 
 export function setStore(runtime, store) {
@@ -355,26 +405,27 @@ export function setUserMessageHook(runtime, hook) {
   runtime.setUserMessageHook(hook);
 }
 
-// =============================================================================
-// PRIVATE CONSTANTS
-// =============================================================================
+export function setWiring(runtime, wiring) {
+  runtime.setWiring(wiring);
+}
 
-// Sequence tracking at the protocol-level
-const STORAGE_KEY_SEQUENCE = "lily_last_sequence";
+export function storeSendFrame(runtime, fn) {
+  runtime.storeSendFrame(fn);
+}
 
 // =============================================================================
 // PRIVATE FUNCTIONS
 // =============================================================================
 
 /** Merges local values to the model */
-function mergeLocal(current, incoming) {
+function mergeLocal(incoming, current) {
   if (current instanceof StoreLocal) return current;
   if (!incoming || typeof incoming !== "object" || !incoming.withFields)
     return incoming;
   if (!current || typeof current !== "object") return incoming;
   const merged = Object.create(Object.getPrototypeOf(incoming));
   for (const key of Object.keys(incoming)) {
-    merged[key] = mergeLocal(current[key], incoming[key]);
+    merged[key] = mergeLocal(incoming[key], current[key]);
   }
   return merged;
 }

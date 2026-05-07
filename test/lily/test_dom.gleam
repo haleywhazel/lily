@@ -1,6 +1,6 @@
 // DOM inspection and event dispatch helpers for JavaScript tests.
-// All functions are @target(javascript) since they interact with the browser DOM
-// provided by jsdom (set up in test_setup.ffi.mjs).
+// All functions are @target(javascript) since they interact with the
+// browser DOM provided by jsdom (set up in test_setup.ffi.mjs).
 
 @target(javascript)
 @external(javascript, "./test_dom.ffi.mjs", "getInnerHtml")

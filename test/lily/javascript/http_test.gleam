@@ -1,5 +1,5 @@
-// Tests for transport.http — HTTP/SSE transport lifecycle.
-// All functions are @target(javascript) — skipped on Erlang.
+// Tests for transport.http, HTTP/SSE transport lifecycle.
+// All functions are @target(javascript), skipped on Erlang.
 
 @target(javascript)
 import gleam/bit_array
@@ -27,7 +27,7 @@ import lily/transport
 @target(javascript)
 fn new_runtime() -> client.Runtime(Model, Message) {
   store.new(test_fixtures.initial_model(), with: test_fixtures.update)
-  |> client.start
+  |> client.start(store.wiring())
 }
 
 // =============================================================================
@@ -86,11 +86,12 @@ pub fn http_connect_calls_on_reconnect_test() {
   test_setup.reset_mocks()
   let runtime = new_runtime()
   let reconnect_ref = test_ref.new(False)
-  let connector = fn(handler: transport.Handler) {
-    handler.on_reconnect()
-    test_ref.set(reconnect_ref, True)
-    transport.new(send: fn(_) { Nil }, close: fn() { Nil })
-  }
+  let connector =
+    transport.make_connector(fn(handler: transport.Handler) {
+      handler.on_reconnect()
+      test_ref.set(reconnect_ref, True)
+      transport.new(send: fn(_) { Nil }, close: fn() { Nil })
+    })
   let _r =
     client.connect(
       runtime,
@@ -107,11 +108,12 @@ pub fn http_connect_calls_on_disconnect_test() {
   test_setup.reset_mocks()
   let runtime = new_runtime()
   let disconnect_ref = test_ref.new(False)
-  let connector = fn(handler: transport.Handler) {
-    handler.on_disconnect()
-    test_ref.set(disconnect_ref, True)
-    transport.new(send: fn(_) { Nil }, close: fn() { Nil })
-  }
+  let connector =
+    transport.make_connector(fn(handler: transport.Handler) {
+      handler.on_disconnect()
+      test_ref.set(disconnect_ref, True)
+      transport.new(send: fn(_) { Nil }, close: fn() { Nil })
+    })
   let _r =
     client.connect(
       runtime,
@@ -128,14 +130,15 @@ pub fn http_connect_receives_messages_test() {
   test_setup.reset_mocks()
   let runtime = new_runtime()
   let received_ref = test_ref.new("")
-  let connector = fn(handler: transport.Handler) {
-    transport.new(send: fn(_) { Nil }, close: fn() { Nil })
-    |> fn(t) {
-      handler.on_receive(bit_array.from_string("test-message"))
-      test_ref.set(received_ref, "received")
-      t
-    }
-  }
+  let connector =
+    transport.make_connector(fn(handler: transport.Handler) {
+      transport.new(send: fn(_) { Nil }, close: fn() { Nil })
+      |> fn(t) {
+        handler.on_receive(bit_array.from_string("test-message"))
+        test_ref.set(received_ref, "received")
+        t
+      }
+    })
   let _r =
     client.connect(
       runtime,
@@ -184,17 +187,18 @@ pub fn http_close_shuts_down_event_source_test() {
   let runtime = new_runtime()
   let transport_ref: test_ref.Ref(transport.Transport) =
     test_ref.new(transport.new(send: fn(_) { Nil }, close: fn() { Nil }))
-  let connector = fn(handler: transport.Handler) {
-    let t =
-      transport.http(
-        post_url: "http://localhost/api/messages",
-        events_url: "http://localhost/events",
-      )
-      |> transport.http_connect
-      |> fn(c) { c(handler) }
-    test_ref.set(transport_ref, t)
-    t
-  }
+  let connector =
+    transport.make_connector(fn(handler: transport.Handler) {
+      let t =
+        transport.http(
+          post_url: "http://localhost/api/messages",
+          events_url: "http://localhost/events",
+        )
+        |> transport.http_connect
+        |> transport.run_connector(handler)
+      test_ref.set(transport_ref, t)
+      t
+    })
   let _r =
     client.connect(
       runtime,

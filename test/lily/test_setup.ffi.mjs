@@ -21,9 +21,9 @@ const dom = new JSDOM(
 globalThis.window = dom.window;
 globalThis.document = dom.window.document;
 globalThis.localStorage = dom.window.localStorage;
-// Use a synchronous requestAnimationFrame stub so notifications flush immediately
-// in tests. jsdom's RAF uses setTimeout internally which causes recursion when
-// globalThis.setTimeout is replaced.
+// Use a synchronous requestAnimationFrame stub so notifications flush
+// immediately in tests. jsdom's RAF uses setTimeout internally which causes
+// recursion when globalThis.setTimeout is replaced.
 globalThis.requestAnimationFrame = (cb) => { cb(0); };
 globalThis.location = dom.window.location;
 globalThis.Event = dom.window.Event;
@@ -103,7 +103,7 @@ let lastEs = null;
 // =============================================================================
 
 export function setup() {
-  // Globals already patched at import time — this is a no-op kept for
+  // Globals already patched at import time, this is a no-op kept for
   // explicitness when test files call setup() at the top of each test.
 }
 
@@ -125,7 +125,7 @@ export function getLastEventSource() {
   return lastEs;
 }
 
-// WebSocket test helpers — trigger lifecycle events on a mock instance
+// WebSocket test helpers, trigger lifecycle events on a mock instance
 export function triggerWebSocketOpen(ws) {
   ws.readyState = MockWebSocket.OPEN;
   if (ws.onopen) ws.onopen();

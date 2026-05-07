@@ -1,5 +1,5 @@
-// Tests for lily/client — JavaScript runtime lifecycle.
-// All functions are @target(javascript) — skipped on Erlang.
+// Tests for lily/client, JavaScript runtime lifecycle.
+// All functions are @target(javascript), skipped on Erlang.
 
 @target(javascript)
 import gleam/bit_array
@@ -27,7 +27,7 @@ import lily/transport
 @target(javascript)
 fn new_runtime() -> client.Runtime(Model, Message) {
   store.new(test_fixtures.initial_model(), with: test_fixtures.update)
-  |> client.start
+  |> client.start(store.wiring())
 }
 
 // =============================================================================
@@ -39,7 +39,7 @@ pub fn client_start_preserves_initial_model_test() {
   test_setup.reset_dom()
   let runtime =
     store.new(test_fixtures.initial_model(), with: test_fixtures.update)
-    |> client.start
+    |> client.start(store.wiring())
   let model = client.get_current_model(runtime)
   model.count
   |> should.equal(0)
@@ -55,7 +55,7 @@ pub fn client_start_returns_runtime_test() {
   test_setup.reset_mocks()
   let runtime =
     store.new(test_fixtures.initial_model(), with: test_fixtures.update)
-    |> client.start
+    |> client.start(store.wiring())
   client.get_current_model(runtime)
   |> should.equal(test_fixtures.initial_model())
 }
@@ -113,7 +113,7 @@ pub fn client_dispatch_updates_model_test() {
 pub fn client_on_message_returns_runtime_test() {
   test_setup.reset_dom()
   let runtime = new_runtime()
-  let returned = client.on_message(runtime, fn(_msg, _model) { Nil })
+  let returned = client.on_message(runtime, fn(_message, _model) { Nil })
   client.get_current_model(returned).count
   |> should.equal(0)
 }
@@ -158,17 +158,16 @@ pub fn client_connection_status_tracks_connect_test() {
   let runtime = new_runtime()
 
   let _runtime =
-    client.connection_status(
-      runtime,
-      get: fn(model) { model.connected },
-      set: fn(model, status) { test_fixtures.Model(..model, connected: status) },
-    )
+    client.connection_status(runtime, set: fn(model, status) {
+      test_fixtures.Model(..model, connected: status)
+    })
 
   let reconnect_ref = test_ref.new(False)
-  let connector = fn(handler: transport.Handler) {
-    handler.on_reconnect()
-    transport.new(send: fn(_) { Nil }, close: fn() { Nil })
-  }
+  let connector =
+    transport.make_connector(fn(handler: transport.Handler) {
+      handler.on_reconnect()
+      transport.new(send: fn(_) { Nil }, close: fn() { Nil })
+    })
   let _runtime2 =
     client.connect(
       runtime,
@@ -188,17 +187,16 @@ pub fn client_connection_status_tracks_disconnect_test() {
   let runtime = new_runtime()
 
   let _runtime =
-    client.connection_status(
-      runtime,
-      get: fn(model) { model.connected },
-      set: fn(model, status) { test_fixtures.Model(..model, connected: status) },
-    )
+    client.connection_status(runtime, set: fn(model, status) {
+      test_fixtures.Model(..model, connected: status)
+    })
 
-  let connector = fn(handler: transport.Handler) {
-    handler.on_reconnect()
-    handler.on_disconnect()
-    transport.new(send: fn(_) { Nil }, close: fn() { Nil })
-  }
+  let connector =
+    transport.make_connector(fn(handler: transport.Handler) {
+      handler.on_reconnect()
+      handler.on_disconnect()
+      transport.new(send: fn(_) { Nil }, close: fn() { Nil })
+    })
   let _runtime2 =
     client.connect(
       runtime,
@@ -211,7 +209,7 @@ pub fn client_connection_status_tracks_disconnect_test() {
 }
 
 // =============================================================================
-// CONNECT — TRANSPORT INTEGRATION
+// CONNECT, TRANSPORT INTEGRATION
 // =============================================================================
 
 @target(javascript)
@@ -221,14 +219,15 @@ pub fn client_connect_sends_client_message_on_dispatch_test() {
   let runtime = new_runtime()
 
   let sent_ref: test_ref.Ref(List(BitArray)) = test_ref.new([])
-  let connector = fn(_handler: transport.Handler) {
-    transport.new(
-      send: fn(bytes) {
-        test_ref.set(sent_ref, [bytes, ..test_ref.get(sent_ref)])
-      },
-      close: fn() { Nil },
-    )
-  }
+  let connector =
+    transport.make_connector(fn(_handler: transport.Handler) {
+      transport.new(
+        send: fn(bytes) {
+          test_ref.set(sent_ref, [bytes, ..test_ref.get(sent_ref)])
+        },
+        close: fn() { Nil },
+      )
+    })
 
   let _r =
     client.connect(
@@ -243,9 +242,9 @@ pub fn client_connect_sends_client_message_on_dispatch_test() {
   sent
   |> should.not_equal([])
   case sent {
-    [msg, ..] ->
-      case bit_array.to_string(msg) {
-        Ok(text) -> text |> string.contains("client_message") |> should.be_true
+    [bytes, ..] ->
+      case bit_array.to_string(bytes) {
+        Ok(text) -> text |> string.contains("session_message") |> should.be_true
         Error(_) -> should.fail()
       }
     [] -> should.fail()
@@ -268,15 +267,16 @@ pub fn client_connect_sends_resync_on_reconnect_test() {
       ),
     )
 
-  let connector = fn(handler: transport.Handler) {
-    test_ref.set(handler_ref, handler)
-    transport.new(
-      send: fn(bytes) {
-        test_ref.set(sent_ref, [bytes, ..test_ref.get(sent_ref)])
-      },
-      close: fn() { Nil },
-    )
-  }
+  let connector =
+    transport.make_connector(fn(handler: transport.Handler) {
+      test_ref.set(handler_ref, handler)
+      transport.new(
+        send: fn(bytes) {
+          test_ref.set(sent_ref, [bytes, ..test_ref.get(sent_ref)])
+        },
+        close: fn() { Nil },
+      )
+    })
 
   let _r =
     client.connect(
@@ -292,8 +292,8 @@ pub fn client_connect_sends_resync_on_reconnect_test() {
   sent
   |> should.not_equal([])
   case sent {
-    [msg, ..] ->
-      case bit_array.to_string(msg) {
+    [bytes, ..] ->
+      case bit_array.to_string(bytes) {
         Ok(text) -> text |> string.contains("resync") |> should.be_true
         Error(_) -> should.fail()
       }

@@ -1,5 +1,5 @@
-// Tests for lily/logging on JavaScript — set_level filtering.
-// All functions are @target(javascript) — skipped on Erlang.
+// Tests for lily/logging on JavaScript, set_level filtering.
+// All functions are @target(javascript), skipped on Erlang.
 
 @target(javascript)
 import gleeunit/should

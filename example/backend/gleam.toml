@@ -1,0 +1,16 @@
+name = "backend"
+version = "0.1.0"
+target = "erlang"
+
+[dependencies]
+gleam_stdlib = ">= 0.44.0 and < 2.0.0"
+gleam_erlang = ">= 1.3.0 and < 2.0.0"
+gleam_http = ">= 4.0.0 and < 5.0.0"
+gleam_otp = ">= 1.0.0 and < 2.0.0"
+mist = ">= 6.0.0 and < 7.0.0"
+wisp = ">= 2.2.0 and < 3.0.0"
+lily = { path = "../.." }
+shared = { path = "../shared" }
+
+[dev-dependencies]
+gleeunit = ">= 1.0.0 and < 2.0.0"

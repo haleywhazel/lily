@@ -5,7 +5,7 @@
  * DOM. Components create their own selective handlers that track slice changes.
  *
  * When renderTree is called on root mount, the HTML skeleton is generated, and
- * and the render function for each component is called – this is when the
+ * and the render function for each component is called, this is when the
  * handlers get created. Each handler is then triggered at the end of the
  * `renderTree` function, beginning live component updates.
  */
@@ -14,67 +14,44 @@
 // IMPORTS
 // =============================================================================
 
-import { applyPatchesToElement, referenceEqual } from "./client.ffi.mjs";
+import {
+  applyPatchesToElement,
+  createSelective,
+  referenceEqual,
+} from "./client.ffi.mjs";
 import { isEqual } from "../gleam.mjs";
-import { StructuralEqual } from "./component.mjs";
 
 // =============================================================================
 // EXPORT FUNCTIONS
 // =============================================================================
 
-/**
- * Get the model from the runtime
- */
+/** Get the model from the runtime */
 export function getModel(runtime) {
   return runtime.handle.getModel();
 }
 
 /**
- * Identity function, used as `to_dynamic` in the Gleam file. Workaround to
- * ensure that the public API still allows the slice listened to by each
- * component to remain Dynamic.
+ * Identity function, used as `to_dynamic` and `list_dynamic` in the Gleam
+ * file. Workaround so the public API can keep slice values opaque while the
+ * runtime treats them as plain JS values.
  */
 export function identity(value) {
   return value;
 }
 
-export function renderTree(
-  runtime,
-  rootSelector,
-  component,
-  model,
-  toHtml,
-  toSlot,
-  store,
-  depth,
-) {
+export function renderTree(runtime, rootSelector, component, model, toHtml, toSlot) {
   const handle = runtime.handle;
 
-  // Reset state on root render
-  if (depth === 0) {
-    handle.resetComponentCounter();
-    handle.clearRegistry();
-  }
+  handle.resetComponentCounter();
+  handle.clearRegistry();
 
-  const html = renderComponent(
-    handle,
-    component,
-    model,
-    toHtml,
-    toSlot,
-    store,
-    rootSelector,
-    depth,
-  );
+  const html = renderComponent(handle, component, model, toHtml, toSlot);
 
-  // Only set innerHTML and trigger handlers at the root
-  if (depth === 0) {
-    handle.setInnerHtml(rootSelector, html);
+  handle.setInnerHtml(rootSelector, html);
 
-    // Trigger all component handlers to populate dynamic content
-    for (const handler of handle.getComponentRegistry().values()) {
-      handler(model);
-    }
+  // Trigger all component handlers to populate dynamic content
+  for (const handler of handle.getComponentRegistry().values()) {
+    handler(model);
   }
 
   return null;
@@ -84,56 +61,20 @@ export function renderTree(
 // FUNCTIONS
 // =============================================================================
 
+// --- DOM HELPERS ---
+
 /**
- * Renders a child component, capturing any new component IDs that get
- * registered as a side effect. Returns the HTML string and the array of new
- * IDs so the caller can run their handlers immediately and track them for
- * cleanup when the parent item is removed or re-rendered.
+ * Returns `cached` if it's still in the document, otherwise re-queries
+ * `selector`. Handlers cache their root element to skip a querySelector on
+ * every model update; the re-query path is for re-mounts after detachment.
  */
-function renderChildAndCaptureIds(
-  runtime,
-  child,
-  model,
-  toHtml,
-  toSlot,
-  store,
-  parentSelector,
-  depth,
-) {
-  const registry = runtime.getComponentRegistry();
-  const beforeKeys = new Set(registry.keys());
-  const html = renderComponent(
-    runtime,
-    child,
-    model,
-    toHtml,
-    toSlot,
-    store,
-    parentSelector,
-    depth + 1,
-  );
-  const newIds = [];
-  for (const k of registry.keys()) {
-    if (!beforeKeys.has(k)) newIds.push(k);
-  }
-  return { html, newIds };
+function ensureCached(cached, selector) {
+  return cached && cached.isConnected
+    ? cached
+    : document.querySelector(selector);
 }
 
-/** Runs each handler in `ids` once with the current model to populate. */
-function runChildHandlers(runtime, ids, model) {
-  const registry = runtime.getComponentRegistry();
-  for (const id of ids) {
-    const handler = registry.get(id);
-    if (handler) handler(model);
-  }
-}
-
-/** Unregisters every id in `ids` from the runtime registry. */
-function unregisterChildHandlers(runtime, ids) {
-  for (const id of ids) {
-    runtime.unregisterComponent(id);
-  }
-}
+// --- SLOT HELPERS ---
 
 /**
  * Builds a slotter: a function the user calls inline in their content function
@@ -151,157 +92,160 @@ function makeSlotter(toSlot) {
 }
 
 /**
- * Regex matching a single `<lily-slot></lily-slot>` placeholder (with optional
- * whitespace). Used by substituteSlots; replace one at a time (first match).
+ * Renders a child component, capturing any new component IDs that get
+ * registered as a side effect. Returns the HTML string and the array of new
+ * IDs so the caller can run their handlers immediately and track them for
+ * cleanup when the parent item is removed or re-rendered.
  */
-const SLOT_RE = /<lily-slot[^>]*>\s*<\/lily-slot>/;
+function renderChildAndCaptureIds(handle, child, model, toHtml, toSlot) {
+  const registry = handle.getComponentRegistry();
+  const beforeKeys = new Set(registry.keys());
+  const html = renderComponent(handle, child, model, toHtml, toSlot);
+  const newIds = [];
+  for (const k of registry.keys()) {
+    if (!beforeKeys.has(k)) newIds.push(k);
+  }
+  return { html, newIds };
+}
+
+/** Runs each handler in `ids` once with the current model to populate. */
+function runChildHandlers(handle, ids, model) {
+  const registry = handle.getComponentRegistry();
+  for (const id of ids) {
+    const handler = registry.get(id);
+    if (handler) handler(model);
+  }
+}
 
 /**
  * After calling the user's content function and serialising to HTML, replace
  * each `<lily-slot>` marker in order with the rendered HTML of the
  * corresponding collected child component. Returns the substituted HTML string
  * and a flat list of all child component IDs registered during this call.
+ *
+ * Splits on every placeholder in one pass, then interleaves segments with
+ * rendered children. If there are more children than placeholders (the user
+ * dropped a slot return value), logs an error and unregisters the orphan
+ * children so their handlers don't dangle.
  */
-function substituteSlots(
-  parentHtml,
-  collected,
-  runtime,
-  model,
-  toHtml,
-  toSlot,
-  store,
-  parentSelector,
-  depth,
-) {
+function substituteSlots(parentHtml, collected, handle, model, toHtml, toSlot) {
+  if (collected.length === 0) {
+    return { html: parentHtml, ids: [] };
+  }
+
+  const segments = parentHtml.split(SLOT_RE);
+  const slotsAvailable = segments.length - 1;
   const allIds = [];
-  let html = parentHtml;
-  for (const component of collected) {
+  let html = segments[0];
+
+  for (let i = 0; i < collected.length; i++) {
     const { html: childHtml, newIds } = renderChildAndCaptureIds(
-      runtime,
-      component,
+      handle,
+      collected[i],
       model,
       toHtml,
       toSlot,
-      store,
-      parentSelector,
-      depth,
     );
-    allIds.push(...newIds);
-    if (!SLOT_RE.test(html)) {
+    if (i >= slotsAvailable) {
       console.error(
-        "lily: <lily-slot> placeholder missing from rendered HTML — child component dropped. " +
+        "lily: <lily-slot> placeholder missing from rendered HTML, child component dropped. " +
           "Make sure slot() return values are placed in the template.",
       );
-      unregisterChildHandlers(runtime, newIds);
+      unregisterChildHandlers(handle, newIds);
       continue;
     }
-    html = html.replace(SLOT_RE, childHtml); // replaces first match only
+    html += childHtml + segments[i + 1];
+    allIds.push(...newIds);
   }
+
+  // Append any trailing segments past the matched-children count. Only
+  // reachable if the template contains more placeholders than the user
+  // passed children, in which case those extra slots are dropped from output.
+  for (let i = collected.length + 1; i < segments.length; i++) {
+    html += segments[i];
+  }
+
   return { html, ids: allIds };
 }
 
+/** Unregisters every id in `ids` from the runtime registry. */
+function unregisterChildHandlers(handle, ids) {
+  for (const id of ids) {
+    handle.unregisterComponent(id);
+  }
+}
+
+// --- LIST HANDLERS ---
+
 /** Create handler for `component.each` (returns the handler function) */
 function createEachHandler(
-  runtime,
+  handle,
   selector,
   slice,
   getKey,
   render,
   toHtml,
   toSlot,
-  store,
-  depth,
   compare,
 ) {
-  const children = new Map();
   const previousItemByKey = new Map();
   const childIdsByKey = new Map();
-  let cachedContainer = null;
 
-  return function (model) {
-    // Re-query only if detached (handles re-mounts, not run normally)
-    if (!cachedContainer || !cachedContainer.isConnected) {
-      cachedContainer = document.querySelector(selector);
-    }
-
-    const container = cachedContainer;
-    if (!container) return;
-
-    const items = slice(model).toArray();
-    const currentKeySet = new Set(items.map((item) => getKey(item)));
-
-    // Drop children whose keys are no longer in the list and release their
-    // child component handlers from the runtime registry.
-    for (const [keyStr, child] of children) {
-      if (!currentKeySet.has(keyStr)) {
-        container.removeChild(child);
-        children.delete(keyStr);
-        previousItemByKey.delete(keyStr);
-        const oldIds = childIdsByKey.get(keyStr);
-        if (oldIds) unregisterChildHandlers(runtime, oldIds);
-        childIdsByKey.delete(keyStr);
-      }
-    }
-
-    // Sync children (create, update, and reorder in one pass)
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      const keyStr = getKey(item);
-
-      // Look up or create the element for this key
-      let element = children.get(keyStr);
-      if (!element) {
-        element = document.createElement("div");
-        element.setAttribute("data-lily-key", keyStr);
-        children.set(keyStr, element);
-      }
-
-      // Compare the slice item (not the rendered Component) — Components may
+  return createKeyedListHandler({
+    handle,
+    selector,
+    slice,
+    getKey,
+    onDrop(keyStr) {
+      previousItemByKey.delete(keyStr);
+      const oldIds = childIdsByKey.get(keyStr);
+      if (oldIds) unregisterChildHandlers(handle, oldIds);
+      childIdsByKey.delete(keyStr);
+    },
+    onItem({ container, liveChildren, item, keyStr, element, index, model }) {
+      // Compare the slice item (not the rendered Component), Components may
       // contain function fields (e.g. nested each_live) that never compare
       // structurally. The slice item is the user's source of truth.
       // Re-rendering replaces innerHTML, so any previously-registered child
-      // component handlers for this key are now pointing at detached nodes —
+      // component handlers for this key are now pointing at detached nodes,
       // release them and register the new ones.
       const previousItem = previousItemByKey.get(keyStr);
-      if (previousItem === undefined || !compare(previousItem, item)) {
+      const itemChanged =
+        previousItem === undefined || !compare(previousItem, item);
+
+      if (itemChanged) {
         previousItemByKey.set(keyStr, item);
         const oldIds = childIdsByKey.get(keyStr);
-        if (oldIds) unregisterChildHandlers(runtime, oldIds);
+        if (oldIds) unregisterChildHandlers(handle, oldIds);
 
-        const childSelector = `[data-lily-key="${keyStr}"]`;
         const { html, newIds } = renderChildAndCaptureIds(
-          runtime,
+          handle,
           render(item),
           model,
           toHtml,
           toSlot,
-          store,
-          childSelector,
-          depth,
         );
         element.innerHTML = html;
         childIdsByKey.set(keyStr, newIds);
-        // Slot into position before running child handlers so their queries
-        // find the freshly-inserted DOM.
-        const currentAtIndex = container.children[i];
-        if (currentAtIndex !== element) {
-          container.insertBefore(element, currentAtIndex || null);
-        }
-        runChildHandlers(runtime, newIds, model);
-      } else {
-        // Slot into the right position if it's drifted
-        const currentAtIndex = container.children[i];
-        if (currentAtIndex !== element) {
-          container.insertBefore(element, currentAtIndex || null);
-        }
       }
-    }
-  };
+
+      // Slot into position before running child handlers so their queries
+      // find the freshly-inserted DOM.
+      const currentAtIndex = liveChildren[index];
+      if (currentAtIndex !== element) {
+        container.insertBefore(element, currentAtIndex || null);
+      }
+
+      if (itemChanged) {
+        runChildHandlers(handle, childIdsByKey.get(keyStr), model);
+      }
+    },
+  });
 }
 
 /** Create handler for `component.each_live` (returns the handler function) */
 function createEachLiveHandler(
-  runtime,
+  handle,
   selector,
   slice,
   getKey,
@@ -309,69 +253,47 @@ function createEachLiveHandler(
   patch,
   toHtml,
   toSlot,
-  store,
-  depth,
   compare,
 ) {
-  const children = new Map();
-  let previousPatchesByKey = new Map();
+  const previousPatchesByKey = new Map();
   const childIdsByKey = new Map();
-  let cachedContainer = null;
 
-  return function (model) {
-    // Re-query only if detached (handles re-mounts, not run normally)
-    if (!cachedContainer || !cachedContainer.isConnected) {
-      cachedContainer = document.querySelector(selector);
-    }
-    const container = cachedContainer;
-    if (!container) return;
-
-    const items = slice(model).toArray();
-    const currentKeySet = new Set(items.map((item) => getKey(item)));
-
-    // Drop children whose keys are no longer in the list and release their
-    // child component handlers.
-    for (const [keyStr, element] of children) {
-      if (!currentKeySet.has(keyStr)) {
-        container.removeChild(element);
-        children.delete(keyStr);
-        previousPatchesByKey.delete(keyStr);
-        const oldIds = childIdsByKey.get(keyStr);
-        if (oldIds) unregisterChildHandlers(runtime, oldIds);
-        childIdsByKey.delete(keyStr);
-      }
-    }
-
-    // Track new IDs to kick after positioning, so that querying inside child
-    // handlers finds the inserted DOM.
-    const newlyCreated = [];
-
-    // Sync children (create, update, and reorder in one pass)
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      const keyStr = getKey(item);
-
-      // Look up or create the element for this key
-      let element = children.get(keyStr);
-      if (!element) {
-        // Only call initial() for this specific new item — not the whole list
-        element = document.createElement("div");
-        element.setAttribute("data-lily-key", keyStr);
-        const childSelector = `[data-lily-key="${keyStr}"]`;
+  return createKeyedListHandler({
+    handle,
+    selector,
+    slice,
+    getKey,
+    onDrop(keyStr) {
+      previousPatchesByKey.delete(keyStr);
+      const oldIds = childIdsByKey.get(keyStr);
+      if (oldIds) unregisterChildHandlers(handle, oldIds);
+      childIdsByKey.delete(keyStr);
+    },
+    onItem({
+      container,
+      liveChildren,
+      deferred,
+      item,
+      keyStr,
+      element,
+      isNew,
+      index,
+      model,
+    }) {
+      if (isNew) {
+        // Only call initial() for this specific new item, not the whole list
         const { html, newIds } = renderChildAndCaptureIds(
-          runtime,
+          handle,
           initial(item),
           model,
           toHtml,
           toSlot,
-          store,
-          childSelector,
-          depth,
         );
         element.innerHTML = html;
         childIdsByKey.set(keyStr, newIds);
-        children.set(keyStr, element);
-        newlyCreated.push(newIds);
+        // Defer until all items are positioned so child handlers' queries
+        // find the inserted DOM.
+        deferred.push(() => runChildHandlers(handle, newIds, model));
       }
 
       // Only patch if the patch list has changed (respects compare strategy)
@@ -386,180 +308,148 @@ function createEachLiveHandler(
       }
 
       // Slot into the right position if it's drifted
-      const currentAtIndex = container.children[i];
+      const currentAtIndex = liveChildren[index];
       if (currentAtIndex !== element) {
         container.insertBefore(element, currentAtIndex || null);
       }
+    },
+  });
+}
+
+/**
+ * Shared shell for keyed-list handlers (`component.each` and
+ * `component.each_live`). Owns the children Map, the slice-reference
+ * short-circuit, the dropped-keys diff, and the per-item positioning loop.
+ *
+ * Callers supply two callbacks. `onDrop(keyStr)` runs after a child element
+ * has been removed from the DOM, used to release per-key state. `onItem`
+ * runs once per item; the caller decides whether to render, patch, or do
+ * nothing. Anything that must run after all items are positioned can be
+ * pushed onto `deferred` from `onItem`.
+ */
+function createKeyedListHandler({ handle, selector, slice, getKey, onDrop, onItem }) {
+  const children = new Map();
+  let cachedContainer = null;
+  let previousList = null;
+
+  return function (model) {
+    // Short-circuit when the user's list slice returns the same reference,
+    // nothing in the list could have changed.
+    const list = slice(model);
+    if (list === previousList) return;
+    previousList = list;
+
+    cachedContainer = ensureCached(cachedContainer, selector);
+    const container = cachedContainer;
+    if (!container) return;
+
+    // Build items array and key set in a single pass.
+    const items = list.toArray();
+    const currentKeySet = new Set();
+    for (let i = 0; i < items.length; i++) {
+      currentKeySet.add(getKey(items[i]));
     }
 
-    // Kick handlers for newly-created items after all positioning is done
-    for (const newIds of newlyCreated) {
-      runChildHandlers(runtime, newIds, model);
+    // Drop children whose keys are no longer in the list.
+    for (const [keyStr, element] of children) {
+      if (!currentKeySet.has(keyStr)) {
+        container.removeChild(element);
+        children.delete(keyStr);
+        onDrop(keyStr);
+      }
+    }
+
+    // Cache the live HTMLCollection reference once, index reads avoid the
+    // per-iteration property lookup on `container`. The collection updates
+    // automatically as we `insertBefore`, so the live semantics are intact.
+    const liveChildren = container.children;
+    const deferred = [];
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const keyStr = getKey(item);
+
+      let element = children.get(keyStr);
+      const isNew = !element;
+      if (isNew) {
+        element = document.createElement("div");
+        element.setAttribute("data-lily-key", keyStr);
+        children.set(keyStr, element);
+      }
+
+      onItem({
+        handle,
+        container,
+        liveChildren,
+        deferred,
+        item,
+        keyStr,
+        element,
+        isNew,
+        index: i,
+        model,
+      });
+    }
+
+    // Run anything queued during the items loop (e.g. per-new-child handler
+    // kicks deferred until all positioning is done).
+    for (let i = 0; i < deferred.length; i++) {
+      deferred[i]();
     }
   };
 }
 
-/** Renders a general `Component` (irrespective of specific variant) */
-function renderComponent(
-  runtime,
-  component,
-  model,
-  toHtml,
-  toSlot,
-  store,
-  parentSelector,
-  depth,
-) {
-  const typeName = component.constructor.name;
+// --- RENDERERS ---
 
-  // Constructors are opaque in the public API, so instanceof doesn't work —
-  // string matching on the constructor name is the next best thing. Maybe this
-  // should be changed but it works for now, we're prioritising the cleanliness
-  // of the public API.
-  switch (typeName) {
-    case "Static":
-      return renderStatic(
-        runtime,
-        component,
-        model,
-        toHtml,
-        toSlot,
-        store,
-        parentSelector,
-        depth,
-      );
-    case "Simple":
-      return renderSimple(
-        runtime,
-        component,
-        model,
-        toHtml,
-        toSlot,
-        store,
-        parentSelector,
-        depth,
-      );
-    case "Live":
-      return renderLive(
-        runtime,
-        component,
-        model,
-        toHtml,
-        toSlot,
-        store,
-        parentSelector,
-        depth,
-      );
-    case "Each":
-      return renderEach(
-        runtime,
-        component,
-        model,
-        toHtml,
-        toSlot,
-        store,
-        parentSelector,
-        depth,
-      );
-    case "EachLive":
-      return renderEachLive(
-        runtime,
-        component,
-        model,
-        toHtml,
-        toSlot,
-        store,
-        parentSelector,
-        depth,
-      );
-    case "Fragment":
-      return renderFragment(
-        runtime,
-        component,
-        model,
-        toHtml,
-        toSlot,
-        store,
-        parentSelector,
-        depth,
-      );
-    case "RequireConnection":
-      return renderRequireConnection(
-        runtime,
-        component,
-        model,
-        toHtml,
-        toSlot,
-        store,
-        parentSelector,
-        depth,
-      );
-    default:
-      console.error("Unknown component variant:", typeName, component);
-      return "";
+/** Renders a general `Component` (irrespective of specific variant) */
+function renderComponent(handle, component, model, toHtml, toSlot) {
+  const typeName = component.constructor.name;
+  const render = RENDERERS[typeName];
+  if (!render) {
+    console.error("Unknown component variant:", typeName, component);
+    return "";
   }
+  return render(handle, component, model, toHtml, toSlot);
 }
 
 /** Renders an Each component */
-function renderEach(
-  runtime,
-  component,
-  model,
-  toHtml,
-  toSlot,
-  store,
-  parentSelector,
-  depth,
-) {
-  const componentId = runtime.nextComponentId();
+function renderEach(handle, component, model, toHtml, toSlot) {
+  const componentId = handle.nextComponentId();
   const selector = `[data-lily-component="${componentId}"]`;
 
-  const { slice, key, render, compare } = component;
+  const { slice, key, render, compare_structural } = component;
 
-  const compareStrategy =
-    compare instanceof StructuralEqual ? isEqual : referenceEqual;
+  const compareStrategy = compare_structural ? isEqual : referenceEqual;
 
   const handler = createEachHandler(
-    runtime,
+    handle,
     selector,
     slice,
     key,
     render,
     toHtml,
     toSlot,
-    store,
-    depth,
     compareStrategy,
   );
 
   // Register handler to be called on model updates
-  runtime.registerComponent(componentId, handler);
+  handle.registerComponent(componentId, handler);
 
-  // Render empty container — handler will populate it
+  // Render empty container, handler will populate it
   return `<div data-lily-component="${componentId}"></div>`;
 }
 
 /** Renders an EachLive component */
-function renderEachLive(
-  runtime,
-  component,
-  model,
-  toHtml,
-  toSlot,
-  store,
-  parentSelector,
-  depth,
-) {
-  const componentId = runtime.nextComponentId();
+function renderEachLive(handle, component, model, toHtml, toSlot) {
+  const componentId = handle.nextComponentId();
   const selector = `[data-lily-component="${componentId}"]`;
 
-  const { slice, key, initial, patch, compare } = component;
+  const { slice, key, initial, patch, compare_structural } = component;
 
-  const compareStrategy =
-    compare instanceof StructuralEqual ? isEqual : referenceEqual;
+  const compareStrategy = compare_structural ? isEqual : referenceEqual;
 
   const handler = createEachLiveHandler(
-    runtime,
+    handle,
     selector,
     slice,
     key,
@@ -567,230 +457,140 @@ function renderEachLive(
     patch,
     toHtml,
     toSlot,
-    store,
-    depth,
     compareStrategy,
   );
 
   // Register handler to be called on model updates
-  runtime.registerComponent(componentId, handler);
+  handle.registerComponent(componentId, handler);
 
-  // Render empty container — handler will populate it
+  // Render empty container, handler will populate it
   return `<div data-lily-component="${componentId}"></div>`;
 }
 
 /** Renders a Fragment component */
-function renderFragment(
-  runtime,
-  component,
-  model,
-  toHtml,
-  toSlot,
-  store,
-  parentSelector,
-  depth,
-) {
+function renderFragment(handle, component, model, toHtml, toSlot) {
   return component.children
     .toArray()
-    .map((child) =>
-      renderComponent(
-        runtime,
-        child,
-        model,
-        toHtml,
-        toSlot,
-        store,
-        parentSelector,
-        depth + 1,
-      ),
-    )
+    .map((child) => renderComponent(handle, child, model, toHtml, toSlot))
     .join("");
 }
 
 /** Renders a Live component */
-function renderLive(
-  runtime,
-  component,
-  model,
-  toHtml,
-  toSlot,
-  store,
-  parentSelector,
-  depth,
-) {
-  const componentId = runtime.nextComponentId();
+function renderLive(handle, component, model, toHtml, toSlot) {
+  const componentId = handle.nextComponentId();
   const selector = `[data-lily-component="${componentId}"]`;
 
-  const { slice, initial, apply, compare } = component;
+  const { slice, initial, apply, compare_structural } = component;
 
-  const compareStrategy =
-    compare instanceof StructuralEqual ? isEqual : referenceEqual;
+  const compareStrategy = compare_structural ? isEqual : referenceEqual;
 
   // Build the initial HTML with slot substitution. Children registered here
-  // persist for the lifetime of this live component — they are never
+  // persist for the lifetime of this live component, they are never
   // unregistered between patch updates.
   const { slot, collected } = makeSlotter(toSlot);
   const rawHtml = toHtml(initial(slot));
   const { html: initialHtml, ids: childIds } = substituteSlots(
     rawHtml,
     collected,
-    runtime,
+    handle,
     model,
     toHtml,
     toSlot,
-    store,
-    selector,
-    depth + 1,
   );
 
   let cachedElement = null;
 
-  const handler = runtime.createSelective(
-    selector,
-    slice,
-    compareStrategy,
-    (data) => {
-      const patches = apply(data).toArray();
+  const handler = createSelective(slice, compareStrategy, (data) => {
+    const patches = apply(data).toArray();
 
-      // Re-query only if detached (handles re-mounts, not run normally)
-      if (!cachedElement || !cachedElement.isConnected) {
-        cachedElement = document.querySelector(selector);
-      }
-      if (cachedElement) {
-        applyPatchesToElement(cachedElement, patches);
-      }
-    },
-  );
+    cachedElement = ensureCached(cachedElement, selector);
+    if (cachedElement) {
+      applyPatchesToElement(cachedElement, patches);
+    }
+  });
 
   // Register handler to be called on model updates
-  runtime.registerComponent(componentId, handler);
+  handle.registerComponent(componentId, handler);
 
   // Run child handlers after registering this component's own handler so
   // the registry order is parent-first.
   if (childIds.length > 0) {
-    runChildHandlers(runtime, childIds, model);
+    runChildHandlers(handle, childIds, model);
   }
 
   return `<div data-lily-component="${componentId}">${initialHtml}</div>`;
 }
 
 /** Renders a component wrapped in RequireConnection */
-function renderRequireConnection(
-  runtime,
-  component,
-  model,
-  toHtml,
-  toSlot,
-  store,
-  parentSelector,
-  depth,
-) {
-  const componentId = runtime.nextComponentId();
+function renderRequireConnection(handle, component, model, toHtml, toSlot) {
+  const componentId = handle.nextComponentId();
   const selector = `[data-lily-component="${componentId}"]`;
 
   const { inner, connected } = component;
 
-  const innerHtml = renderComponent(
-    runtime,
-    inner,
-    model,
-    toHtml,
-    toSlot,
-    store,
-    selector,
-    depth + 1,
-  );
+  const innerHtml = renderComponent(handle, inner, model, toHtml, toSlot);
 
   let cachedElement = null;
 
-  const handler = runtime.createSelective(
-    selector,
-    connected,
-    runtime.referenceEqual,
-    (isConnected) => {
-      // Re-query only if detached (handles re-mounts, not run normally)
-      if (!cachedElement || !cachedElement.isConnected) {
-        cachedElement = document.querySelector(selector);
-      }
-      if (!cachedElement) return;
+  const handler = createSelective(connected, referenceEqual, (isConnected) => {
+    cachedElement = ensureCached(cachedElement, selector);
+    if (!cachedElement) return;
 
-      if (isConnected) {
-        cachedElement.removeAttribute("data-lily-disabled");
-        cachedElement.removeAttribute("aria-disabled");
-        cachedElement.classList.remove("lily-disconnected");
-      } else {
-        cachedElement.setAttribute("data-lily-disabled", "true");
-        cachedElement.setAttribute("aria-disabled", "true");
-        cachedElement.classList.add("lily-disconnected");
-      }
-    },
-  );
+    if (isConnected) {
+      cachedElement.removeAttribute("data-lily-disabled");
+      cachedElement.removeAttribute("aria-disabled");
+      cachedElement.classList.remove("lily-disconnected");
+    } else {
+      cachedElement.setAttribute("data-lily-disabled", "true");
+      cachedElement.setAttribute("aria-disabled", "true");
+      cachedElement.classList.add("lily-disconnected");
+    }
+  });
 
   // Register handler to be called on model updates
-  runtime.registerComponent(componentId, handler);
+  handle.registerComponent(componentId, handler);
 
   return `<div data-lily-component="${componentId}">${innerHtml}</div>`;
 }
 
 /** Renders a Simple component */
-function renderSimple(
-  runtime,
-  component,
-  model,
-  toHtml,
-  toSlot,
-  store,
-  parentSelector,
-  depth,
-) {
-  const componentId = runtime.nextComponentId();
+function renderSimple(handle, component, model, toHtml, toSlot) {
+  const componentId = handle.nextComponentId();
   const selector = `[data-lily-component="${componentId}"]`;
 
-  const { slice, render, compare } = component;
+  const { slice, render, compare_structural } = component;
 
-  const compareStrategy =
-    compare instanceof StructuralEqual ? isEqual : referenceEqual;
+  const compareStrategy = compare_structural ? isEqual : referenceEqual;
 
   let cachedElement = null;
   let previousChildIds = [];
 
-  const handler = runtime.createSelective(
-    selector,
-    slice,
-    compareStrategy,
-    (data) => {
-      // Unregister previous child handlers before re-rendering
-      unregisterChildHandlers(runtime, previousChildIds);
+  const handler = createSelective(slice, compareStrategy, (data) => {
+    // Unregister previous child handlers before re-rendering
+    unregisterChildHandlers(handle, previousChildIds);
 
-      const { slot, collected } = makeSlotter(toSlot);
-      const rawHtml = toHtml(render(data, slot));
-      const { html, ids: newChildIds } = substituteSlots(
-        rawHtml,
-        collected,
-        runtime,
-        model,
-        toHtml,
-        toSlot,
-        store,
-        selector,
-        depth + 1,
-      );
-      previousChildIds = newChildIds;
+    const { slot, collected } = makeSlotter(toSlot);
+    const rawHtml = toHtml(render(data, slot));
+    const { html, ids: newChildIds } = substituteSlots(
+      rawHtml,
+      collected,
+      handle,
+      model,
+      toHtml,
+      toSlot,
+    );
+    previousChildIds = newChildIds;
 
-      // Re-query only if detached (handles re-mounts, not run normally)
-      if (!cachedElement || !cachedElement.isConnected) {
-        cachedElement = document.querySelector(selector);
-      }
-      if (cachedElement) {
-        cachedElement.innerHTML = html;
-        // Run child handlers after innerHTML is set so their selectors find DOM
-        runChildHandlers(runtime, newChildIds, model);
-      }
-    },
-  );
+    cachedElement = ensureCached(cachedElement, selector);
+    if (cachedElement) {
+      cachedElement.innerHTML = html;
+      // Run child handlers after innerHTML is set so their selectors find DOM
+      runChildHandlers(handle, newChildIds, model);
+    }
+  });
 
   // Register handler to be called on model updates
-  runtime.registerComponent(componentId, handler);
+  handle.registerComponent(componentId, handler);
 
   // Initial render
   const { slot, collected } = makeSlotter(toSlot);
@@ -798,13 +598,10 @@ function renderSimple(
   const { html: initialHtml, ids: childIds } = substituteSlots(
     rawHtml,
     collected,
-    runtime,
+    handle,
     model,
     toHtml,
     toSlot,
-    store,
-    selector,
-    depth + 1,
   );
   previousChildIds = childIds;
 
@@ -812,16 +609,7 @@ function renderSimple(
 }
 
 /** Renders a Static component */
-function renderStatic(
-  runtime,
-  component,
-  model,
-  toHtml,
-  toSlot,
-  store,
-  parentSelector,
-  depth,
-) {
+function renderStatic(handle, component, model, toHtml, toSlot) {
   const { slot, collected } = makeSlotter(toSlot);
   const rawHtml = toHtml(component.content(slot));
   if (collected.length === 0) return rawHtml;
@@ -829,13 +617,32 @@ function renderStatic(
   const { html } = substituteSlots(
     rawHtml,
     collected,
-    runtime,
+    handle,
     model,
     toHtml,
     toSlot,
-    store,
-    parentSelector,
-    depth + 1,
   );
   return html;
 }
+
+// =============================================================================
+// PRIVATE CONSTANTS
+// =============================================================================
+
+// Constructors are opaque in the public API, so instanceof doesn't work,
+// dispatching on the constructor name is the next best thing. The type
+// definition in component.gleam is the source of truth for these names.
+const RENDERERS = {
+  Each: renderEach,
+  EachLive: renderEachLive,
+  Fragment: renderFragment,
+  Live: renderLive,
+  RequireConnection: renderRequireConnection,
+  Simple: renderSimple,
+  Static: renderStatic,
+};
+
+// Regex matching a single `<lily-slot></lily-slot>` placeholder (with
+// optional whitespace). Used by substituteSlots; passed to String.split,
+// which always splits globally regardless of the `g` flag.
+const SLOT_RE = /<lily-slot[^>]*>\s*<\/lily-slot>/;

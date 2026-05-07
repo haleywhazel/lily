@@ -1,18 +1,19 @@
-//// The client within Lily manages the [`Runtime`](#Runtime) within Lily,
-//// managing the update loop, component subscriptions, local persistence,
-//// and server synchronisation. When connected, it also monitors online/
-//// offline status and queues messages in localStorage while disconnected. The
-//// client is meant to be used on the browser-side, so the Erlang compilation
-//// target is not supported by this module.
+//// The client owns the browser-side [`Runtime`](#Runtime): the update
+//// loop, component subscriptions, local persistence, and server
+//// synchronisation all live here. When a transport is connected, it also
+//// watches online/offline status and tucks messages into localStorage
+//// while disconnected, replaying them once the server is back. This
+//// module is browser-only, Erlang need not apply.
 ////
 //// The typical frontend setup would look like:
 ////
 //// 1. Creating a store with [`store.new`](./store.html#new)
-//// 2. Starting the runtime with [`client.start`](#start)
-//// 3. Mounting your components using
+//// 2. Building a wiring config with [`store.wiring`](./store.html#wiring)
+//// 3. Starting the runtime with [`client.start`](#start)
+//// 4. Mounting your components using
 ////    [`component.mount`](./component.html#mount)
-//// 4. Attaching event handlers
-//// 5. Connecting to a server with [`client.connect`](#connect)
+//// 5. Attaching event handlers
+//// 6. Connecting to a server with [`client.connect`](#connect)
 ////
 //// ```gleam
 //// import lily/client
@@ -22,23 +23,25 @@
 //// import lily/transport
 ////
 //// pub fn main() {
-////   // 1. Create your store
-////   let app_store = store.new(Model(count: 0), with: update)
-////
-////   // 2. Start the runtime
-////   let runtime = client.start(app_store)
-////
-////   // 3. Mount UI
-////   |> component.mount(selector: "#app", to_html: element.to_string, view: app)
-////   // 4. Attach events
-////   |> event.on_click(selector: "#app", decoder: parse_msg)
-////
-////   // 5. Connect to server
+////   store.new(shared.initial_model(), with: shared.update)
+////   |> client.start(shared.wiring())
+////   |> component.mount(
+////     selector: "#app",
+////     to_html: element.to_string,
+////     to_slot: fn() { element.element("lily-slot", [], []) },
+////     view: app,
+////   )
+////   |> event.on_decoded(
+////     event: event.click,
+////     selector: "#app",
+////     decoder: parse_message,
+////   )
 ////   |> client.connect(
 ////     with: transport.websocket(url: "ws://localhost:8080/ws")
 ////       |> transport.websocket_connect,
-////     serialiser: my_serialiser, // see transport module for more information
+////     serialiser: shared.serialiser(),
 ////   )
+////   |> client.subscribe("chat")
 //// }
 //// ```
 ////
@@ -72,7 +75,11 @@ import gleam/json.{type Json}
 @target(javascript)
 import gleam/list
 @target(javascript)
+import gleam/option
+@target(javascript)
 import gleam/result
+@target(javascript)
+import gleam/string
 @target(javascript)
 import lily/store.{type Store}
 @target(javascript)
@@ -125,7 +132,7 @@ pub opaque type Runtime(model, message) {
 ///     decoder: decode.optional(decode.string),
 ///   )
 ///
-/// client.start(app_store)
+/// client.start(app_store, routing)
 /// |> client.attach_session(
 ///   persistence:,
 ///   get: fn(model) { model.session },
@@ -138,20 +145,18 @@ pub fn attach_session(
   get get: fn(model) -> session,
   set set: fn(model, session) -> model,
 ) -> Runtime(model, message) {
-  let current_model = get_current_model(runtime)
+  let Runtime(handle) = runtime
+  let current_model = get_model(handle)
   let hydrated_session = hydrate_session(persistence, get(current_model))
   let hydrated_model = set(current_model, hydrated_session)
-  set_current_model(runtime, hydrated_model)
-  let Runtime(handle) = runtime
-  ffi_set_session_config(handle, persistence, get, set)
+  set_model(handle, hydrated_model)
+  set_session_config(handle, persistence, session_storage_prefix(), get, set)
   runtime
 }
 
 @target(javascript)
 /// Clear all Lily related session data from `localStorage` by removing all
 /// keys with the `lily_session_` prefix.
-///
-/// ## Example
 ///
 /// ```gleam
 /// fn update(model, message) {
@@ -169,13 +174,39 @@ pub fn clear_session() -> Nil {
 }
 
 @target(javascript)
+/// Inject the server-assigned client identifier into the model when a
+/// `Connected` frame arrives. The server sends this frame immediately after
+/// a WebSocket connection is established, so the model is updated before
+/// the first snapshot arrives.
+///
+/// ```gleam
+/// runtime
+/// |> client.client_id(set: fn(model, id) {
+///   shared.Model(
+///     ..model,
+///     session: shared.SessionState(..model.session, session_id: id),
+///   )
+/// })
+/// ```
+pub fn client_id(
+  runtime: Runtime(model, message),
+  set set: fn(model, String) -> model,
+) -> Runtime(model, message) {
+  let Runtime(handle) = runtime
+  set_client_id_setter(handle, set)
+  runtime
+}
+
+@target(javascript)
 /// Connect the runtime to a server using the provided transport method. The
 /// connector function is obtained from a transport implementation, e.g.
 /// [`websocket_connect(config)`](./transport.html#websocket_connect) or
 /// [`http_connect(config)`](./transport.html#http_connect).
 ///
 /// This also creates all the handlers for handling incoming messages, and
-/// changes to connection status.
+/// changes to connection status. Session messages are sent as `SessionMessage`
+/// frames; topic messages are routed to the correct topic using the routing
+/// config passed to [`client.start`](#start).
 ///
 /// ```gleam
 /// import lily/transport
@@ -185,7 +216,7 @@ pub fn clear_session() -> Nil {
 ///   with: transport.websocket(url: "ws://localhost:8080/ws")
 ///     |> transport.reconnect_base_milliseconds(2000)
 ///     |> transport.websocket_connect,
-///   serialiser: my_serialiser,
+///   serialiser: shared.serialiser(),
 /// )
 /// ```
 pub fn connect(
@@ -194,10 +225,19 @@ pub fn connect(
   serialiser serialiser: transport.Serialiser(model, message),
 ) -> Runtime(model, message) {
   let Runtime(handle) = runtime
+  let wiring = get_wiring(handle)
+
+  let send_any_frame = fn(frame: transport.Protocol(model, message)) {
+    let bytes = transport.encode(frame, serialiser:)
+    send_via_transport(handle, bytes)
+  }
+  store_send_frame(handle, send_any_frame)
 
   let handler =
     transport.Handler(
-      on_receive: fn(bytes) { handle_incoming(handle, bytes, serialiser) },
+      on_receive: fn(bytes) {
+        handle_incoming(handle, bytes, serialiser, wiring)
+      },
       on_reconnect: fn() {
         set_connection_status(handle, True)
         send_resync(handle, serialiser)
@@ -205,13 +245,17 @@ pub fn connect(
       on_disconnect: fn() { set_connection_status(handle, False) },
     )
 
-  let client_transport = connector(handler)
-
+  let client_transport = transport.run_connector(connector, handler)
   set_transport(handle, client_transport)
 
   set_on_message_hook(handle, fn(message) {
-    let bytes =
-      transport.encode(transport.ClientMessage(payload: message), serialiser:)
+    let target = store.route_message(wiring, message)
+    let frame = case target {
+      transport.Session -> transport.SessionMessage(payload: message)
+      transport.Topic(id) ->
+        transport.TopicMessage(topic_id: id, payload: message)
+    }
+    let bytes = transport.encode(frame, serialiser:)
     send_via_transport(handle, bytes)
   })
 
@@ -221,14 +265,10 @@ pub fn connect(
 @target(javascript)
 /// Often times you want to be able to track the connection status (for
 /// example, if you want to disable an element when there is no connection).
-/// This sets up tracking for the connection status in the model, with Lily
-/// calling `set` with `True` when the transport connects and `False` when it
+/// This sets up tracking for the connection status in the model: Lily calls
+/// `set` with `True` when the transport connects and `False` when it
 /// disconnects. Components can slice this field to react to connectivity
 /// changes.
-///
-/// `get` provides the way to read the connection status from the model (the
-/// user-defined model type should then have a way to save this status) and
-/// `set` provides a way to write into the model.
 ///
 /// This should be called before [`client.connect`](#connect) to ensure the
 /// initial connection state is captured.
@@ -237,39 +277,35 @@ pub fn connect(
 /// regardless internally, this mainly allows the status to be reflected within
 /// the model.
 ///
-/// ## Example
-///
 /// ```gleam
 /// runtime
-/// |> client.connection_status(
-///   get: fn(model) { model.connected },
-///   set: fn(model, status) { Model(..model, connected: status) },
-/// )
+/// |> client.connection_status(set: fn(model, status) {
+///   Model(..model, connected: status)
+/// })
 /// |> client.connect(
 ///   with: transport.websocket(url: "ws://localhost:8080/ws")
 ///     |> transport.websocket_connect,
-///   serialiser: my_serialiser,
+///   serialiser: shared.serialiser(),
 /// )
 /// ```
 pub fn connection_status(
   runtime: Runtime(model, message),
-  get get: fn(model) -> Bool,
   set set: fn(model, Bool) -> model,
 ) -> Runtime(model, message) {
   let Runtime(handle) = runtime
-  set_connection_status_config(handle, get, set)
+  set_connection_status_config(handle, set)
   runtime
 }
 
 @target(javascript)
 /// Get a dispatch function that sends messages into the runtime's update
-/// loop. Since the [`Store`](./store.html#Store), this is needed to handle
-/// side-effects (like fetch callbacks or timers). After generating the dispatch
-/// function, you are able to use this to send updates whenever some side-effect
-/// is called to update the store again.
+/// loop. The [`Store`](./store.html#Store) is pure, so this is needed to
+/// handle side-effects (fetch callbacks, timers, etc.). After generating
+/// the dispatch function, you are able to use this to send updates whenever
+/// some side-effect is called to update the store again.
 ///
 /// ```gleam
-/// let runtime = client.start(store)
+/// let runtime = client.start(store, routing)
 /// let dispatch = client.dispatch(runtime)
 ///
 /// fetch("/api/data", fn(response) {
@@ -282,11 +318,28 @@ pub fn dispatch(runtime: Runtime(model, message)) -> fn(message) -> Nil {
 }
 
 @target(javascript)
-/// The default snapshot reconciliation: recursively walk the incoming
-/// model, preserving any field whose current value is
-/// [`store.Local`](./store.html#Local) and otherwise taking the incoming
-/// value. Compose with [`on_snapshot`](#on_snapshot) when you want the
-/// default plus per-field overrides.
+/// Generate a random 32-character hex string suitable for use as a
+/// client-side session identifier. Each call returns a unique value derived
+/// from `crypto.getRandomValues`, so it is safe to call at application
+/// startup and store in the session model.
+///
+/// ```gleam
+/// let session_id = client.generate_session_id()
+/// let initial = shared.Model(
+///   session: shared.SessionState(..shared.initial_session(), session_id:),
+///   chat: shared.initial_chat(),
+/// )
+/// ```
+pub fn generate_session_id() -> String {
+  ffi_generate_session_id()
+}
+
+@target(javascript)
+/// A reconciliation helper for use inside [`on_snapshot`](#on_snapshot):
+/// recursively walks the incoming model, preserving any field whose
+/// current value is [`store.Local`](./store.html#Local) and otherwise
+/// taking the incoming value. Compose this with custom per-field merge
+/// logic when the default slice-merge isn't enough.
 ///
 /// Note the argument order matches the [`on_snapshot`](#on_snapshot) hook
 /// signature: `(incoming, current)`.
@@ -295,19 +348,16 @@ pub fn merge_locals(incoming: model, current: model) -> model {
 }
 
 @target(javascript)
-/// Register a hook that runs after each locally-dispatched message. Does not
-/// fire for remote messages from other clients.
-///
-/// ## Example
+/// Register a hook that runs after each locally-dispatched message. This hook
+/// fires for both session and topic messages. The `model` argument is the full
+/// outer model after the message has been applied locally.
 ///
 /// ```gleam
 /// runtime
-/// |> client.connect(with: connector, serialiser: my_serialiser)
 /// |> client.on_message(fn(message, model) {
 ///   case message {
-///     FetchUsers -> fetch("/api/users", fn(users) {
-///       dispatch(UsersLoaded(users))
-///     })
+///     Chat(NewChatMessage(body, _)) ->
+///       dispatch(Session(AddPopup(body)))
 ///     _ -> Nil
 ///   }
 /// })
@@ -326,12 +376,10 @@ pub fn on_message(
 /// The hook receives `(incoming, current)` and returns the merged model
 /// to dispatch into the runtime.
 ///
-/// Without a hook, the runtime preserves any field whose current value is
-/// wrapped in [`store.Local`](./store.html#Local) and otherwise adopts the
-/// incoming snapshot. Compose with [`merge_locals`](#merge_locals) to keep
-/// that behaviour and add per-field overrides on top.
-///
-/// ## Example
+/// Without a hook, the runtime uses the routing config to merge only the
+/// snapshotted target's slice into the current model, leaving all other
+/// slices intact. Compose with [`merge_locals`](#merge_locals) to additionally
+/// preserve `store.Local` fields.
 ///
 /// ```gleam
 /// runtime
@@ -355,8 +403,6 @@ pub fn on_snapshot(
 ///
 /// The `get` and `set` functions extract and inject the field from the session
 /// type. The `encode` and `decoder` handle JSON serialisation.
-///
-/// ## Example
 ///
 /// ```gleam
 /// client.session_persistence()
@@ -400,24 +446,78 @@ pub fn session_persistence() -> Persistence(session) {
 }
 
 @target(javascript)
-/// Start the client runtime. Returns a Runtime handle that should be used
-/// with [`component.mount`](./component.html#mount), event handlers, and
-/// [`client.connect`](#connect).
+/// Start the client runtime with a store and a wiring configuration. The
+/// wiring config tells the runtime how to dispatch messages to the correct
+/// server-side target (session store or a named topic store) and how to merge
+/// incoming snapshots into the outer model.
+///
+/// Build the wiring config in your `shared` package and import it here:
 ///
 /// ```gleam
 /// let runtime =
-///   store.new(Model(count: 0), with: update)
-///   |> client.start
+///   store.new(shared.initial_model(), with: shared.update)
+///   |> client.start(shared.wiring())
 ///
 /// runtime
-/// |> component.mount(selector: "#app", to_html: element.to_string, view: app)
-/// |> event.on_click(selector: "#app", decoder: parse_msg)
+/// |> component.mount(
+///   selector: "#app",
+///   to_html: element.to_string,
+///   to_slot: fn() { element.element("lily-slot", [], []) },
+///   view: app,
+/// )
+/// |> event.on_decoded(
+///   event: event.click,
+///   selector: "#app",
+///   decoder: parse_message,
+/// )
 /// ```
-pub fn start(store: Store(model, message)) -> Runtime(model, message) {
+pub fn start(
+  store: Store(model, message),
+  wiring wiring: store.Wiring(model, message),
+) -> Runtime(model, message) {
   let handle = create_runtime(store, store.apply)
   set_store(handle, store)
+  set_wiring(handle, wiring)
   initial_notify(handle)
   Runtime(handle)
+}
+
+@target(javascript)
+/// Subscribe this connection to a topic. The runtime sends a `Subscribe`
+/// frame to the server; on `Snapshot` arrival the topic's slice in the model
+/// is hydrated and components re-render. Idempotent, no-op if already
+/// subscribed. Must be called after [`client.connect`](#connect).
+///
+/// ```gleam
+/// runtime
+/// |> client.connect(with: connector, serialiser: shared.serialiser())
+/// |> client.subscribe("chat")
+/// ```
+pub fn subscribe(
+  runtime: Runtime(model, message),
+  topic_id: String,
+) -> Runtime(model, message) {
+  let Runtime(handle) = runtime
+  call_stored_send_frame(handle, transport.Subscribe(topic_id:))
+  runtime
+}
+
+@target(javascript)
+/// Unsubscribe from a topic. After unsubscribing the topic's slice resets to
+/// its initial value (set during runtime construction). Idempotent, no-op
+/// if not subscribed. Must be called after [`client.connect`](#connect).
+///
+/// ```gleam
+/// runtime
+/// |> client.unsubscribe("chat")
+/// ```
+pub fn unsubscribe(
+  runtime: Runtime(model, message),
+  topic_id: String,
+) -> Runtime(model, message) {
+  let Runtime(handle) = runtime
+  call_stored_send_frame(handle, transport.Unsubscribe(topic_id:))
+  runtime
 }
 
 // =============================================================================
@@ -451,16 +551,6 @@ pub fn send_message(runtime: Runtime(model, message), message: message) -> Nil {
   ffi_send_message(runtime_handle, message)
 }
 
-@target(javascript)
-/// Set a new model in the runtime. Used internally by the session module to
-/// apply hydrated session data. This bypasses the update function and does
-/// not trigger a re-render cycle.
-@internal
-pub fn set_current_model(runtime: Runtime(model, message), model: model) -> Nil {
-  let Runtime(handle) = runtime
-  set_model(handle, model)
-}
-
 // =============================================================================
 // PRIVATE TYPES
 // =============================================================================
@@ -483,7 +573,8 @@ type Field(session) {
 ///
 /// - `Runtime(model, message)`: Public opaque type users interact with
 /// - `RuntimeHandle`: Internal concrete type that matches the JavaScript
-///   object returned by `createRuntime()`. `@internal` for use by other Lily /////   modules (component) that need FFI access.
+///   object returned by `createRuntime()`. `@internal` for use by other Lily
+///   modules (component) that need FFI access.
 @internal
 pub type RuntimeHandle
 
@@ -492,7 +583,58 @@ pub type RuntimeHandle
 // =============================================================================
 
 @target(javascript)
-/// Hydrates the model from local persistence
+fn handle_incoming(
+  handle: RuntimeHandle,
+  bytes: BitArray,
+  serialiser: transport.Serialiser(model, message),
+  wiring: store.Wiring(model, message),
+) -> Nil {
+  case transport.decode(bytes, serialiser:) {
+    Ok(transport.Acknowledge(target:, sequence:)) ->
+      set_last_sequence_for_target(handle, target_to_key(target), sequence)
+
+    Ok(transport.Connected(client_id:)) -> handle_client_id(handle, client_id)
+
+    Ok(transport.Push(topic_id: _, payload:)) ->
+      apply_remote_message(handle, payload)
+
+    Ok(transport.TopicUpdate(topic_id:, sequence:, payload:)) -> {
+      set_last_sequence_for_target(
+        handle,
+        target_to_key(transport.Topic(topic_id)),
+        sequence,
+      )
+      apply_remote_message(handle, payload)
+    }
+
+    Ok(transport.Snapshot(target:, sequence:, state:)) -> {
+      set_last_sequence_for_target(handle, target_to_key(target), sequence)
+      handle_snapshot(handle, wiring, target, state)
+    }
+
+    Ok(transport.Rejected(topic_id: _, reason: _)) -> Nil
+
+    _ -> Nil
+  }
+}
+
+@target(javascript)
+fn handle_snapshot(
+  handle: RuntimeHandle,
+  wiring: store.Wiring(model, message),
+  target: transport.Target,
+  incoming: model,
+) -> Nil {
+  let current = get_model(handle)
+  let merged = store.merge_snapshot(wiring, target, current, incoming)
+  let final_model = case get_snapshot_hook(handle) {
+    option.None -> merged
+    option.Some(hook) -> hook(incoming, current)
+  }
+  dispatch_model(handle, final_model)
+}
+
+@target(javascript)
 fn hydrate_session(
   persistence: Persistence(session),
   initial: session,
@@ -500,66 +642,50 @@ fn hydrate_session(
   let Persistence(fields) = persistence
   list.fold(fields, initial, fn(session, f) {
     let Field(key, _get, set) = f
-    ffi_read_field(session_storage_prefix(), key)
+    read_field(session_storage_prefix(), key)
     |> result.try(set(session, _))
     |> result.unwrap(session)
   })
 }
 
 @target(javascript)
-/// Prefix for session storage; hopefully doesn't clash with most fields. Still
-/// debating whether or not this should be configurable or if that would be
-/// overkill for a public API.
+fn key_to_target(key: String) -> Result(transport.Target, Nil) {
+  case key {
+    "session" -> Ok(transport.Session)
+    _ ->
+      case string.starts_with(key, "topic:") {
+        True -> Ok(transport.Topic(string.drop_start(key, 6)))
+        False -> Error(Nil)
+      }
+  }
+}
+
+@target(javascript)
+fn send_resync(
+  handle: RuntimeHandle,
+  serialiser: transport.Serialiser(model, message),
+) -> Nil {
+  let raw_seqs = get_all_sequences(handle)
+  let cursors =
+    list.filter_map(raw_seqs, fn(pair) {
+      let #(key, _seq) = pair
+      key_to_target(key)
+    })
+  let bytes = transport.encode(transport.Resync(cursors:), serialiser:)
+  send_via_transport(handle, bytes)
+}
+
+@target(javascript)
 fn session_storage_prefix() -> String {
   "lily_session_"
 }
 
 @target(javascript)
-/// Handles incoming message from the server, decodes it, set local sequences
-/// (if any), and takes any appropriate actions.
-fn handle_incoming(
-  handle: RuntimeHandle,
-  bytes: BitArray,
-  serialiser: transport.Serialiser(model, message),
-) -> Nil {
-  case transport.decode(bytes, serialiser:) {
-    Ok(transport.Acknowledge(sequence:)) -> {
-      set_last_sequence(handle, sequence)
-    }
-
-    Ok(transport.ClientMessage(payload: _payload)) -> Nil
-
-    Ok(transport.Push(payload:)) -> apply_remote_message(handle, payload)
-
-    Ok(transport.ServerMessage(sequence:, payload:)) -> {
-      set_last_sequence(handle, sequence)
-      apply_remote_message(handle, payload)
-    }
-
-    Ok(transport.Snapshot(sequence:, state:)) -> {
-      set_last_sequence(handle, sequence)
-      merge_local_and_dispatch(handle, state)
-    }
-
-    Ok(transport.Resync(after_sequence: _after_sequence)) -> Nil
-
-    Error(_error) -> Nil
+fn target_to_key(target: transport.Target) -> String {
+  case target {
+    transport.Session -> "session"
+    transport.Topic(id) -> "topic:" <> id
   }
-}
-
-@target(javascript)
-/// Send a resync request
-fn send_resync(
-  handle: RuntimeHandle,
-  serialiser: transport.Serialiser(model, message),
-) -> Nil {
-  let last_sequence = get_last_sequence(handle)
-  let bytes =
-    transport.encode(
-      transport.Resync(after_sequence: last_sequence),
-      serialiser:,
-    )
-  send_via_transport(handle, bytes)
 }
 
 // =============================================================================
@@ -567,172 +693,153 @@ fn send_resync(
 // =============================================================================
 
 @target(javascript)
-/// Applies server message to the current client runtime state
 @external(javascript, "./client.ffi.mjs", "applyRemoteMessage")
-fn apply_remote_message(_handle: RuntimeHandle, _message: message) -> Nil {
-  Nil
-}
+fn apply_remote_message(handle: RuntimeHandle, message: message) -> Nil
 
 @target(javascript)
-/// Create a new runtime instance
+@external(javascript, "./client.ffi.mjs", "callStoredSendFrame")
+fn call_stored_send_frame(
+  handle: RuntimeHandle,
+  frame: transport.Protocol(model, message),
+) -> Nil
+
+@target(javascript)
 @external(javascript, "./client.ffi.mjs", "createRuntime")
 fn create_runtime(
-  _store: Store(model, message),
-  _apply: fn(Store(model, message), message) -> Store(model, message),
-) -> RuntimeHandle {
-  // This will never run (RuntimeHandle is only a JavaScript type so we're
-  // putting it here as a workaround)
-  panic as "createRuntime is only available in JavaScript"
-}
+  store: Store(model, message),
+  apply: fn(Store(model, message), message) -> Store(model, message),
+) -> RuntimeHandle
 
 @target(javascript)
-/// Send the FFI message
+@external(javascript, "./client.ffi.mjs", "dispatchModel")
+fn dispatch_model(handle: RuntimeHandle, model: model) -> Nil
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "clearSession")
+fn ffi_clear_session(prefix: String) -> Nil
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "generateSessionId")
+fn ffi_generate_session_id() -> String
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "mergeLocals")
+fn ffi_merge_locals(incoming: model, current: model) -> model
+
+@target(javascript)
 @external(javascript, "./client.ffi.mjs", "sendMessage")
-fn ffi_send_message(_handle: RuntimeHandle, _message: message) -> Nil {
-  Nil
-}
+fn ffi_send_message(handle: RuntimeHandle, message: message) -> Nil
 
 @target(javascript)
-/// Get the last key sequence for localStorage
-@external(javascript, "./client.ffi.mjs", "getLastSequence")
-fn get_last_sequence(_handle: RuntimeHandle) -> Int {
-  0
-}
+@external(javascript, "./client.ffi.mjs", "getAllSequences")
+fn get_all_sequences(handle: RuntimeHandle) -> List(#(String, Int))
 
 @target(javascript)
-/// Get the current model from the runtime
 @external(javascript, "./client.ffi.mjs", "getModel")
-fn get_model(_handle: RuntimeHandle) -> model {
-  panic as "getModel is only available in JavaScript"
-}
+fn get_model(handle: RuntimeHandle) -> model
 
 @target(javascript)
-/// Notify all subscribers with the current state — called once during start to
-/// trigger the initial render
+@external(javascript, "./client.ffi.mjs", "getSnapshotHook")
+fn get_snapshot_hook(
+  handle: RuntimeHandle,
+) -> option.Option(fn(model, model) -> model)
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "getWiring")
+fn get_wiring(handle: RuntimeHandle) -> store.Wiring(model, message)
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "handleClientId")
+fn handle_client_id(handle: RuntimeHandle, client_id: String) -> Nil
+
+@target(javascript)
 @external(javascript, "./client.ffi.mjs", "initialNotify")
-fn initial_notify(_handle: RuntimeHandle) -> Nil {
-  Nil
-}
+fn initial_notify(handle: RuntimeHandle) -> Nil
 
 @target(javascript)
-/// Apply a server snapshot to the runtime, preserving any Local fields from
-/// the current client model
-@external(javascript, "./client.ffi.mjs", "mergeLocalAndDispatch")
-fn merge_local_and_dispatch(_handle: RuntimeHandle, _state: model) -> Nil {
-  Nil
-}
+@external(javascript, "./client.ffi.mjs", "readField")
+fn read_field(prefix: String, key: String) -> Result(Dynamic, Nil)
 
 @target(javascript)
-/// Send via transport (WebSockets/HTTP)
 @external(javascript, "./client.ffi.mjs", "sendViaTransport")
-fn send_via_transport(_handle: RuntimeHandle, _bytes: BitArray) -> Nil {
-  Nil
-}
+fn send_via_transport(handle: RuntimeHandle, bytes: BitArray) -> Nil
 
 @target(javascript)
-/// Set connection status in the model
+@external(javascript, "./client.ffi.mjs", "setClientIdSetter")
+fn set_client_id_setter(
+  handle: RuntimeHandle,
+  set: fn(model, String) -> model,
+) -> Nil
+
+@target(javascript)
 @external(javascript, "./client.ffi.mjs", "setConnectionStatus")
-fn set_connection_status(_handle: RuntimeHandle, _connected: Bool) -> Nil {
-  Nil
-}
+fn set_connection_status(handle: RuntimeHandle, connected: Bool) -> Nil
 
 @target(javascript)
-/// Store connection status config on runtime
 @external(javascript, "./client.ffi.mjs", "setConnectionStatusConfig")
 fn set_connection_status_config(
-  _handle: RuntimeHandle,
-  _get: fn(model) -> Bool,
-  _set: fn(model, Bool) -> model,
-) -> Nil {
-  Nil
-}
+  handle: RuntimeHandle,
+  set: fn(model, Bool) -> model,
+) -> Nil
 
 @target(javascript)
-/// Set the last key sequence for local storage
-@external(javascript, "./client.ffi.mjs", "setLastSequence")
-fn set_last_sequence(_handle: RuntimeHandle, _sequence: Int) -> Nil {
-  Nil
-}
+@external(javascript, "./client.ffi.mjs", "setLastSequenceForTarget")
+fn set_last_sequence_for_target(
+  handle: RuntimeHandle,
+  target_key: String,
+  sequence: Int,
+) -> Nil
 
 @target(javascript)
-/// Set the current model in the runtime
 @external(javascript, "./client.ffi.mjs", "setModel")
-fn set_model(_handle: RuntimeHandle, _model: model) -> Nil {
-  Nil
-}
+fn set_model(handle: RuntimeHandle, model: model) -> Nil
 
 @target(javascript)
-/// Set the function that runs when a message happens (runs once)
 @external(javascript, "./client.ffi.mjs", "setOnMessageHook")
-fn set_on_message_hook(_handle: RuntimeHandle, _hook: fn(message) -> Nil) -> Nil {
-  Nil
-}
+fn set_on_message_hook(handle: RuntimeHandle, hook: fn(message) -> Nil) -> Nil
 
 @target(javascript)
-/// Set the current store
-@external(javascript, "./client.ffi.mjs", "setStore")
-fn set_store(_handle: RuntimeHandle, _store: Store(model, message)) -> Nil {
-  Nil
-}
+@external(javascript, "./client.ffi.mjs", "setSessionConfig")
+fn set_session_config(
+  handle: RuntimeHandle,
+  persistence: Persistence(session),
+  prefix: String,
+  get: fn(model) -> session,
+  set: fn(model, session) -> model,
+) -> Nil
 
 @target(javascript)
-/// Set the transport
-@external(javascript, "./client.ffi.mjs", "setTransport")
-fn set_transport(_handle: RuntimeHandle, _transport: transport.Transport) -> Nil {
-  Nil
-}
-
-@target(javascript)
-/// Set the user message hook that runs after each locally-dispatched message
-@external(javascript, "./client.ffi.mjs", "setUserMessageHook")
-fn set_user_message_hook(
-  _handle: RuntimeHandle,
-  _hook: fn(message, model) -> Nil,
-) -> Nil {
-  Nil
-}
-
-@target(javascript)
-/// Set the user snapshot hook that runs when a server snapshot arrives on
-/// reconnect, replacing the default `Local`-preserving merge
 @external(javascript, "./client.ffi.mjs", "setSnapshotHook")
 fn set_snapshot_hook(
-  _handle: RuntimeHandle,
-  _hook: fn(model, model) -> model,
-) -> Nil {
-  Nil
-}
+  handle: RuntimeHandle,
+  hook: fn(model, model) -> model,
+) -> Nil
 
 @target(javascript)
-/// Clear all session keys from localStorage
-@external(javascript, "./client.ffi.mjs", "clearSession")
-fn ffi_clear_session(_prefix: String) -> Nil {
-  Nil
-}
+@external(javascript, "./client.ffi.mjs", "setStore")
+fn set_store(handle: RuntimeHandle, store: Store(model, message)) -> Nil
 
 @target(javascript)
-/// Read a field from localStorage as a raw dynamic value for direct decoding
-@external(javascript, "./client.ffi.mjs", "readField")
-fn ffi_read_field(_prefix: String, _key: String) -> Result(Dynamic, Nil) {
-  Error(Nil)
-}
+@external(javascript, "./client.ffi.mjs", "setTransport")
+fn set_transport(handle: RuntimeHandle, transport: transport.Transport) -> Nil
 
 @target(javascript)
-/// Public binding for the default reconciliation merge. Flips argument
-/// order to match the `on_snapshot` hook signature.
-@external(javascript, "./client.ffi.mjs", "mergeLocals")
-fn ffi_merge_locals(_incoming: model, _current: model) -> model {
-  panic as "mergeLocals is only available in JavaScript"
-}
+@external(javascript, "./client.ffi.mjs", "setUserMessageHook")
+fn set_user_message_hook(
+  handle: RuntimeHandle,
+  hook: fn(message, model) -> Nil,
+) -> Nil
 
 @target(javascript)
-/// Store session config on runtime
-@external(javascript, "./client.ffi.mjs", "setSessionConfig")
-fn ffi_set_session_config(
-  _handle: RuntimeHandle,
-  _persistence: Persistence(session),
-  _get: fn(model) -> session,
-  _set: fn(model, session) -> model,
-) -> Nil {
-  Nil
-}
+@external(javascript, "./client.ffi.mjs", "setWiring")
+fn set_wiring(
+  handle: RuntimeHandle,
+  wiring: store.Wiring(model, message),
+) -> Nil
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "storeSendFrame")
+fn store_send_frame(
+  handle: RuntimeHandle,
+  send: fn(transport.Protocol(model, message)) -> Nil,
+) -> Nil

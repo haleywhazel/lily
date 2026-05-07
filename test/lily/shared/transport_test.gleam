@@ -1,5 +1,5 @@
 // Tests for lily/transport encode/decode with the custom serialiser.
-// Pure Gleam — no FFI, runs on both Erlang and JavaScript targets.
+// Pure Gleam, no FFI, runs on both Erlang and JavaScript targets.
 
 import gleam/bit_array
 import gleeunit/should
@@ -8,7 +8,7 @@ import lily/test_fixtures.{
 }
 import lily/test_ref
 import lily/transport.{
-  Acknowledge, ClientMessage, Resync, ServerMessage, Snapshot,
+  Acknowledge, Connected, Resync, Session, SessionMessage, Snapshot, TopicUpdate,
 }
 
 // =============================================================================
@@ -23,50 +23,64 @@ fn ser() {
 // ENCODE
 // =============================================================================
 
+pub fn encode_connected_test() {
+  transport.encode(Connected(client_id: "abc123"), serialiser: ser())
+  |> should.equal(bit_array.from_string(
+    "{\"type\":\"connected\",\"client_id\":\"abc123\"}",
+  ))
+}
+
 pub fn encode_acknowledge_test() {
-  let result = transport.encode(Acknowledge(sequence: 1), serialiser: ser())
-  result
-  |> should.equal(bit_array.from_string(
-    "{\"type\":\"acknowledge\",\"sequence\":1}",
-  ))
-}
-
-pub fn encode_client_message_test() {
-  let result =
-    transport.encode(ClientMessage(payload: Increment), serialiser: ser())
-  result
-  |> should.equal(bit_array.from_string(
-    "{\"type\":\"client_message\",\"payload\":{\"tag\":\"Increment\"}}",
-  ))
-}
-
-pub fn encode_resync_test() {
-  let result = transport.encode(Resync(after_sequence: 7), serialiser: ser())
-  result
-  |> should.equal(bit_array.from_string(
-    "{\"type\":\"resync\",\"after_sequence\":7}",
-  ))
-}
-
-pub fn encode_server_message_test() {
   let result =
     transport.encode(
-      ServerMessage(sequence: 3, payload: Decrement),
+      Acknowledge(target: Session, sequence: 1),
       serialiser: ser(),
     )
   result
   |> should.equal(bit_array.from_string(
-    "{\"type\":\"server_message\",\"sequence\":3,\"payload\":{\"tag\":\"Decrement\"}}",
+    "{\"type\":\"acknowledge\",\"target\":{\"kind\":\"session\"},\"sequence\":1}",
+  ))
+}
+
+pub fn encode_session_message_test() {
+  let result =
+    transport.encode(SessionMessage(payload: Increment), serialiser: ser())
+  result
+  |> should.equal(bit_array.from_string(
+    "{\"type\":\"session_message\",\"payload\":{\"tag\":\"Increment\"}}",
+  ))
+}
+
+pub fn encode_resync_test() {
+  let result = transport.encode(Resync(cursors: [Session]), serialiser: ser())
+  result
+  |> should.equal(bit_array.from_string(
+    "{\"type\":\"resync\",\"cursors\":[{\"kind\":\"session\"}]}",
+  ))
+}
+
+pub fn encode_topic_update_test() {
+  let result =
+    transport.encode(
+      TopicUpdate(topic_id: "test", sequence: 3, payload: Decrement),
+      serialiser: ser(),
+    )
+  result
+  |> should.equal(bit_array.from_string(
+    "{\"type\":\"topic_update\",\"topic_id\":\"test\",\"sequence\":3,\"payload\":{\"tag\":\"Decrement\"}}",
   ))
 }
 
 pub fn encode_snapshot_test() {
   let model = test_fixtures.Model(count: 5, name: "Bob", connected: True)
   let result =
-    transport.encode(Snapshot(sequence: 2, state: model), serialiser: ser())
+    transport.encode(
+      Snapshot(target: Session, sequence: 2, state: model),
+      serialiser: ser(),
+    )
   result
   |> should.equal(bit_array.from_string(
-    "{\"type\":\"snapshot\",\"sequence\":2,\"state\":{\"count\":5,\"name\":\"Bob\",\"connected\":true}}",
+    "{\"type\":\"snapshot\",\"target\":{\"kind\":\"session\"},\"sequence\":2,\"state\":{\"count\":5,\"name\":\"Bob\",\"connected\":true}}",
   ))
 }
 
@@ -74,70 +88,92 @@ pub fn encode_snapshot_test() {
 // DECODE ROUNDTRIP
 // =============================================================================
 
+pub fn decode_connected_test() {
+  transport.decode(
+    bit_array.from_string("{\"type\":\"connected\",\"client_id\":\"abc123\"}"),
+    serialiser: ser(),
+  )
+  |> should.equal(Ok(Connected(client_id: "abc123")))
+}
+
 pub fn decode_acknowledge_test() {
-  let bytes = bit_array.from_string("{\"type\":\"acknowledge\",\"sequence\":1}")
-  let result = transport.decode(bytes, serialiser: ser())
-  result
-  |> should.equal(Ok(Acknowledge(sequence: 1)))
-}
-
-pub fn decode_client_message_test() {
   let bytes =
     bit_array.from_string(
-      "{\"type\":\"client_message\",\"payload\":{\"tag\":\"Increment\"}}",
+      "{\"type\":\"acknowledge\",\"target\":{\"kind\":\"session\"},\"sequence\":1}",
     )
   let result = transport.decode(bytes, serialiser: ser())
   result
-  |> should.equal(Ok(ClientMessage(payload: Increment)))
+  |> should.equal(Ok(Acknowledge(target: Session, sequence: 1)))
 }
 
-pub fn decode_client_message_with_fields_test() {
+pub fn decode_session_message_test() {
   let bytes =
     bit_array.from_string(
-      "{\"type\":\"client_message\",\"payload\":{\"tag\":\"SetName\",\"name\":\"Alice\"}}",
+      "{\"type\":\"session_message\",\"payload\":{\"tag\":\"Increment\"}}",
     )
   let result = transport.decode(bytes, serialiser: ser())
   result
-  |> should.equal(Ok(ClientMessage(payload: SetName("Alice"))))
+  |> should.equal(Ok(SessionMessage(payload: Increment)))
+}
+
+pub fn decode_session_message_with_fields_test() {
+  let bytes =
+    bit_array.from_string(
+      "{\"type\":\"session_message\",\"payload\":{\"tag\":\"SetName\",\"name\":\"Alice\"}}",
+    )
+  let result = transport.decode(bytes, serialiser: ser())
+  result
+  |> should.equal(Ok(SessionMessage(payload: SetName("Alice"))))
 }
 
 pub fn decode_resync_test() {
   let bytes =
-    bit_array.from_string("{\"type\":\"resync\",\"after_sequence\":7}")
-  let result = transport.decode(bytes, serialiser: ser())
-  result
-  |> should.equal(Ok(Resync(after_sequence: 7)))
-}
-
-pub fn decode_server_message_test() {
-  let bytes =
     bit_array.from_string(
-      "{\"type\":\"server_message\",\"sequence\":3,\"payload\":{\"tag\":\"Decrement\"}}",
+      "{\"type\":\"resync\",\"cursors\":[{\"kind\":\"session\"}]}",
     )
   let result = transport.decode(bytes, serialiser: ser())
   result
-  |> should.equal(Ok(ServerMessage(sequence: 3, payload: Decrement)))
+  |> should.equal(Ok(Resync(cursors: [Session])))
+}
+
+pub fn decode_topic_update_test() {
+  let bytes =
+    bit_array.from_string(
+      "{\"type\":\"topic_update\",\"topic_id\":\"test\",\"sequence\":3,\"payload\":{\"tag\":\"Decrement\"}}",
+    )
+  let result = transport.decode(bytes, serialiser: ser())
+  result
+  |> should.equal(
+    Ok(TopicUpdate(topic_id: "test", sequence: 3, payload: Decrement)),
+  )
 }
 
 pub fn decode_snapshot_test() {
   let bytes =
     bit_array.from_string(
-      "{\"type\":\"snapshot\",\"sequence\":2,\"state\":{\"count\":0,\"name\":\"\",\"connected\":false}}",
+      "{\"type\":\"snapshot\",\"target\":{\"kind\":\"session\"},\"sequence\":2,\"state\":{\"count\":0,\"name\":\"\",\"connected\":false}}",
     )
   let result = transport.decode(bytes, serialiser: ser())
   result
   |> should.equal(
-    Ok(Snapshot(sequence: 2, state: test_fixtures.initial_model())),
+    Ok(Snapshot(
+      target: Session,
+      sequence: 2,
+      state: test_fixtures.initial_model(),
+    )),
   )
 }
 
 pub fn decode_snapshot_with_complex_model_test() {
   let model = test_fixtures.Model(count: 42, name: "Eve", connected: True)
   let encoded =
-    transport.encode(Snapshot(sequence: 10, state: model), serialiser: ser())
+    transport.encode(
+      Snapshot(target: Session, sequence: 10, state: model),
+      serialiser: ser(),
+    )
   let result = transport.decode(encoded, serialiser: ser())
   result
-  |> should.equal(Ok(Snapshot(sequence: 10, state: model)))
+  |> should.equal(Ok(Snapshot(target: Session, sequence: 10, state: model)))
 }
 
 // =============================================================================
@@ -161,7 +197,7 @@ pub fn decode_malformed_payload_returns_error_test() {
   let result =
     transport.decode(
       bit_array.from_string(
-        "{\"type\":\"client_message\",\"payload\":\"not_an_object\"}",
+        "{\"type\":\"session_message\",\"payload\":\"not_an_object\"}",
       ),
       serialiser: ser(),
     )
@@ -172,7 +208,7 @@ pub fn decode_malformed_payload_returns_error_test() {
 pub fn decode_missing_payload_returns_error_test() {
   let result =
     transport.decode(
-      bit_array.from_string("{\"type\":\"client_message\"}"),
+      bit_array.from_string("{\"type\":\"session_message\"}"),
       serialiser: ser(),
     )
   result
@@ -183,7 +219,7 @@ pub fn decode_missing_sequence_returns_error_test() {
   let result =
     transport.decode(
       bit_array.from_string(
-        "{\"type\":\"server_message\",\"payload\":{\"tag\":\"Increment\"}}",
+        "{\"type\":\"topic_update\",\"topic_id\":\"t\",\"payload\":{\"tag\":\"Increment\"}}",
       ),
       serialiser: ser(),
     )
@@ -217,7 +253,7 @@ pub fn decode_unknown_type_returns_error_test() {
 
 pub fn json_bytes_decode_fails_under_message_pack_test() {
   let json_bytes =
-    transport.encode(ClientMessage(payload: Increment), serialiser: ser())
+    transport.encode(SessionMessage(payload: Increment), serialiser: ser())
   let message_pack_ser = transport.automatic() |> transport.use_message_pack()
   transport.decode(json_bytes, serialiser: message_pack_ser)
   |> should.be_error
@@ -231,16 +267,23 @@ pub fn custom_json_use_json_is_noop_test() {
   let serialiser = ser()
   let after_toggle = transport.use_json(serialiser)
   let bytes =
-    transport.encode(Acknowledge(sequence: 5), serialiser: after_toggle)
+    transport.encode(
+      Acknowledge(target: Session, sequence: 5),
+      serialiser: after_toggle,
+    )
   transport.decode(bytes, serialiser: after_toggle)
-  |> should.equal(Ok(Acknowledge(sequence: 5)))
+  |> should.equal(Ok(Acknowledge(target: Session, sequence: 5)))
 }
 
 pub fn use_json_forces_json_path_test() {
   let serialiser = transport.automatic() |> transport.use_json()
-  let bytes = transport.encode(Acknowledge(sequence: 1), serialiser: serialiser)
+  let bytes =
+    transport.encode(
+      Acknowledge(target: Session, sequence: 1),
+      serialiser: serialiser,
+    )
   transport.decode(bytes, serialiser: serialiser)
-  |> should.equal(Ok(Acknowledge(sequence: 1)))
+  |> should.equal(Ok(Acknowledge(target: Session, sequence: 1)))
 }
 
 pub fn use_message_pack_restores_message_pack_path_test() {
@@ -248,9 +291,13 @@ pub fn use_message_pack_restores_message_pack_path_test() {
     transport.automatic()
     |> transport.use_json()
     |> transport.use_message_pack()
-  let bytes = transport.encode(Acknowledge(sequence: 1), serialiser: serialiser)
+  let bytes =
+    transport.encode(
+      Acknowledge(target: Session, sequence: 1),
+      serialiser: serialiser,
+    )
   transport.decode(bytes, serialiser: serialiser)
-  |> should.equal(Ok(Acknowledge(sequence: 1)))
+  |> should.equal(Ok(Acknowledge(target: Session, sequence: 1)))
 }
 
 // =============================================================================
@@ -291,8 +338,8 @@ pub fn transport_send_calls_send_function_test() {
 
 fn binary_serialiser() -> transport.Serialiser(Model, Message) {
   transport.custom_binary(
-    encode_message: fn(msg: Message) {
-      case msg {
+    encode_message: fn(message: Message) {
+      case message {
         test_fixtures.Increment -> <<1>>
         test_fixtures.Decrement -> <<2>>
         test_fixtures.Reset -> <<3>>
@@ -325,61 +372,130 @@ fn binary_serialiser() -> transport.Serialiser(Model, Message) {
   )
 }
 
-pub fn custom_binary_roundtrip_client_message_test() {
+pub fn custom_binary_roundtrip_session_message_test() {
   let ser = binary_serialiser()
-  transport.encode(ClientMessage(payload: Increment), serialiser: ser)
+  transport.encode(SessionMessage(payload: Increment), serialiser: ser)
   |> transport.decode(serialiser: ser)
-  |> should.equal(Ok(ClientMessage(payload: Increment)))
+  |> should.equal(Ok(SessionMessage(payload: Increment)))
 }
 
 pub fn custom_binary_roundtrip_decrement_test() {
   let ser = binary_serialiser()
-  transport.encode(ClientMessage(payload: Decrement), serialiser: ser)
+  transport.encode(SessionMessage(payload: Decrement), serialiser: ser)
   |> transport.decode(serialiser: ser)
-  |> should.equal(Ok(ClientMessage(payload: Decrement)))
+  |> should.equal(Ok(SessionMessage(payload: Decrement)))
 }
 
 pub fn custom_binary_roundtrip_set_name_test() {
   let ser = binary_serialiser()
-  transport.encode(ClientMessage(payload: SetName("Eve")), serialiser: ser)
+  transport.encode(SessionMessage(payload: SetName("Eve")), serialiser: ser)
   |> transport.decode(serialiser: ser)
-  |> should.equal(Ok(ClientMessage(payload: SetName("Eve"))))
+  |> should.equal(Ok(SessionMessage(payload: SetName("Eve"))))
 }
 
 pub fn custom_binary_roundtrip_snapshot_test() {
   let ser = binary_serialiser()
   let model = test_fixtures.Model(count: 7, name: "", connected: False)
-  transport.encode(Snapshot(sequence: 3, state: model), serialiser: ser)
+  transport.encode(
+    Snapshot(target: Session, sequence: 3, state: model),
+    serialiser: ser,
+  )
   |> transport.decode(serialiser: ser)
-  |> should.equal(Ok(Snapshot(sequence: 3, state: model)))
+  |> should.equal(Ok(Snapshot(target: Session, sequence: 3, state: model)))
 }
 
 pub fn custom_binary_roundtrip_acknowledge_test() {
   let ser = binary_serialiser()
-  transport.encode(Acknowledge(sequence: 5), serialiser: ser)
+  transport.encode(Acknowledge(target: Session, sequence: 5), serialiser: ser)
   |> transport.decode(serialiser: ser)
-  |> should.equal(Ok(Acknowledge(sequence: 5)))
+  |> should.equal(Ok(Acknowledge(target: Session, sequence: 5)))
 }
 
 pub fn custom_binary_roundtrip_resync_test() {
   let ser = binary_serialiser()
-  transport.encode(Resync(after_sequence: 4), serialiser: ser)
+  transport.encode(Resync(cursors: [Session]), serialiser: ser)
   |> transport.decode(serialiser: ser)
-  |> should.equal(Ok(Resync(after_sequence: 4)))
+  |> should.equal(Ok(Resync(cursors: [Session])))
 }
 
 pub fn custom_binary_use_json_is_noop_test() {
   let ser = binary_serialiser()
   let ser_after = transport.use_json(ser)
-  transport.encode(Acknowledge(sequence: 9), serialiser: ser_after)
+  transport.encode(
+    Acknowledge(target: Session, sequence: 9),
+    serialiser: ser_after,
+  )
   |> transport.decode(serialiser: ser_after)
-  |> should.equal(Ok(Acknowledge(sequence: 9)))
+  |> should.equal(Ok(Acknowledge(target: Session, sequence: 9)))
 }
 
 pub fn custom_binary_use_message_pack_is_noop_test() {
   let ser = binary_serialiser()
   let ser_after = transport.use_message_pack(ser)
-  transport.encode(Acknowledge(sequence: 9), serialiser: ser_after)
+  transport.encode(
+    Acknowledge(target: Session, sequence: 9),
+    serialiser: ser_after,
+  )
   |> transport.decode(serialiser: ser_after)
-  |> should.equal(Ok(Acknowledge(sequence: 9)))
+  |> should.equal(Ok(Acknowledge(target: Session, sequence: 9)))
+}
+
+// =============================================================================
+// CONNECTOR (make_connector / run_connector)
+// =============================================================================
+
+pub fn make_connector_wraps_function_test() {
+  let connector =
+    transport.make_connector(fn(_handler) {
+      transport.new(send: fn(_) { Nil }, close: fn() { Nil })
+    })
+  let handler =
+    transport.Handler(
+      on_receive: fn(_) { Nil },
+      on_reconnect: fn() { Nil },
+      on_disconnect: fn() { Nil },
+    )
+  let _t = transport.run_connector(connector, handler)
+  // If we got here without crashing, the connector pipeline worked.
+  True
+  |> should.be_true
+}
+
+pub fn run_connector_passes_handler_through_test() {
+  let received_ref = test_ref.new(<<>>)
+  let connector =
+    transport.make_connector(fn(handler: transport.Handler) {
+      // Invoke the handler's on_receive to prove it was passed through.
+      handler.on_receive(bit_array.from_string("relayed"))
+      transport.new(send: fn(_) { Nil }, close: fn() { Nil })
+    })
+  let handler =
+    transport.Handler(
+      on_receive: fn(bytes) { test_ref.set(received_ref, bytes) },
+      on_reconnect: fn() { Nil },
+      on_disconnect: fn() { Nil },
+    )
+  let _t = transport.run_connector(connector, handler)
+  test_ref.get(received_ref)
+  |> should.equal(bit_array.from_string("relayed"))
+}
+
+pub fn run_connector_returns_built_transport_test() {
+  let send_ref = test_ref.new(<<>>)
+  let connector =
+    transport.make_connector(fn(_handler) {
+      transport.new(send: fn(b) { test_ref.set(send_ref, b) }, close: fn() {
+        Nil
+      })
+    })
+  let handler =
+    transport.Handler(
+      on_receive: fn(_) { Nil },
+      on_reconnect: fn() { Nil },
+      on_disconnect: fn() { Nil },
+    )
+  let t = transport.run_connector(connector, handler)
+  transport.send(t, bit_array.from_string("payload"))
+  test_ref.get(send_ref)
+  |> should.equal(bit_array.from_string("payload"))
 }

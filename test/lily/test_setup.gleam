@@ -1,5 +1,5 @@
 // jsdom initialisation and DOM reset helpers for JavaScript tests.
-// Calling setup() from any test file is sufficient — the module-level side
+// Calling setup() from any test file is sufficient, the module-level side
 // effects in test_setup.ffi.mjs patch globalThis once on first import.
 
 @target(javascript)

@@ -1,5 +1,5 @@
 // Tests for the JavaScript auto-serialiser (transport.ffi.mjs).
-// All functions are @target(javascript) — skipped on Erlang.
+// All functions are @target(javascript), skipped on Erlang.
 
 @target(javascript)
 import gleam/bit_array
@@ -11,7 +11,7 @@ import lily/test_fixtures.{
 }
 @target(javascript)
 import lily/transport.{
-  Acknowledge, ClientMessage, Resync, ServerMessage, Snapshot,
+  Acknowledge, Resync, Session, SessionMessage, Snapshot, TopicUpdate,
 }
 
 // =============================================================================
@@ -24,10 +24,11 @@ fn ser() {
 }
 
 @target(javascript)
-fn roundtrip_msg(
-  msg: Message,
+fn roundtrip_message(
+  message: Message,
 ) -> Result(transport.Protocol(Model, Message), Nil) {
-  let encoded = transport.encode(ClientMessage(payload: msg), serialiser: ser())
+  let encoded =
+    transport.encode(SessionMessage(payload: message), serialiser: ser())
   transport.decode(encoded, serialiser: ser())
 }
 
@@ -37,103 +38,112 @@ fn roundtrip_snapshot(
   seq: Int,
 ) -> Result(transport.Protocol(Model, Message), Nil) {
   let encoded =
-    transport.encode(Snapshot(sequence: seq, state: model), serialiser: ser())
+    transport.encode(
+      Snapshot(target: Session, sequence: seq, state: model),
+      serialiser: ser(),
+    )
   transport.decode(encoded, serialiser: ser())
 }
 
 // =============================================================================
-// ROUNDTRIPS — ZERO-FIELD CONSTRUCTORS
+// ROUNDTRIPS, ZERO-FIELD CONSTRUCTORS
 // =============================================================================
 
 @target(javascript)
 pub fn auto_js_roundtrip_zero_field_test() {
-  roundtrip_msg(Increment)
-  |> should.equal(Ok(ClientMessage(payload: Increment)))
+  roundtrip_message(Increment)
+  |> should.equal(Ok(SessionMessage(payload: Increment)))
 }
 
 @target(javascript)
 pub fn auto_js_roundtrip_decrement_test() {
-  roundtrip_msg(Decrement)
-  |> should.equal(Ok(ClientMessage(payload: Decrement)))
+  roundtrip_message(Decrement)
+  |> should.equal(Ok(SessionMessage(payload: Decrement)))
 }
 
 @target(javascript)
 pub fn auto_js_roundtrip_reset_test() {
-  roundtrip_msg(Reset)
-  |> should.equal(Ok(ClientMessage(payload: Reset)))
+  roundtrip_message(Reset)
+  |> should.equal(Ok(SessionMessage(payload: Reset)))
 }
 
 @target(javascript)
 pub fn auto_js_roundtrip_noop_test() {
-  roundtrip_msg(Noop)
-  |> should.equal(Ok(ClientMessage(payload: Noop)))
+  roundtrip_message(Noop)
+  |> should.equal(Ok(SessionMessage(payload: Noop)))
 }
 
 // =============================================================================
-// ROUNDTRIPS — SINGLE-FIELD CONSTRUCTOR
+// ROUNDTRIPS, SINGLE-FIELD CONSTRUCTOR
 // =============================================================================
 
 @target(javascript)
 pub fn auto_js_roundtrip_single_field_test() {
-  roundtrip_msg(SetName("Alice"))
-  |> should.equal(Ok(ClientMessage(payload: SetName("Alice"))))
+  roundtrip_message(SetName("Alice"))
+  |> should.equal(Ok(SessionMessage(payload: SetName("Alice"))))
 }
 
 @target(javascript)
 pub fn auto_js_roundtrip_empty_string_test() {
-  roundtrip_msg(SetName(""))
-  |> should.equal(Ok(ClientMessage(payload: SetName(""))))
+  roundtrip_message(SetName(""))
+  |> should.equal(Ok(SessionMessage(payload: SetName(""))))
 }
 
 // =============================================================================
-// ROUNDTRIPS — MULTI-FIELD CONSTRUCTOR (Model in Snapshot)
+// ROUNDTRIPS, MULTI-FIELD CONSTRUCTOR (Model in Snapshot)
 // =============================================================================
 
 @target(javascript)
 pub fn auto_js_roundtrip_multi_field_test() {
   let model = test_fixtures.Model(count: 5, name: "Bob", connected: False)
   roundtrip_snapshot(model, 1)
-  |> should.equal(Ok(Snapshot(sequence: 1, state: model)))
+  |> should.equal(Ok(Snapshot(target: Session, sequence: 1, state: model)))
 }
 
 @target(javascript)
 pub fn auto_js_roundtrip_boolean_test() {
   let model = test_fixtures.Model(count: 0, name: "", connected: True)
   roundtrip_snapshot(model, 0)
-  |> should.equal(Ok(Snapshot(sequence: 0, state: model)))
+  |> should.equal(Ok(Snapshot(target: Session, sequence: 0, state: model)))
 }
 
 // =============================================================================
-// ROUNDTRIPS — PROTOCOL VARIANTS
+// ROUNDTRIPS, PROTOCOL VARIANTS
 // =============================================================================
 
 @target(javascript)
-pub fn auto_js_roundtrip_server_message_test() {
+pub fn auto_js_roundtrip_topic_update_test() {
   let encoded =
     transport.encode(
-      ServerMessage(sequence: 7, payload: Increment),
+      TopicUpdate(topic_id: "chat", sequence: 7, payload: Increment),
       serialiser: ser(),
     )
   transport.decode(encoded, serialiser: ser())
-  |> should.equal(Ok(ServerMessage(sequence: 7, payload: Increment)))
+  |> should.equal(
+    Ok(TopicUpdate(topic_id: "chat", sequence: 7, payload: Increment)),
+  )
 }
 
 @target(javascript)
 pub fn auto_js_roundtrip_resync_test() {
-  let encoded = transport.encode(Resync(after_sequence: 3), serialiser: ser())
+  let encoded = transport.encode(Resync(cursors: [Session]), serialiser: ser())
   transport.decode(encoded, serialiser: ser())
-  |> should.equal(Ok(Resync(after_sequence: 3)))
+  |> should.equal(Ok(Resync(cursors: [Session])))
 }
 
 @target(javascript)
 pub fn auto_js_roundtrip_acknowledge_test() {
-  let encoded = transport.encode(Acknowledge(sequence: 2), serialiser: ser())
+  let encoded =
+    transport.encode(
+      Acknowledge(target: Session, sequence: 2),
+      serialiser: ser(),
+    )
   transport.decode(encoded, serialiser: ser())
-  |> should.equal(Ok(Acknowledge(sequence: 2)))
+  |> should.equal(Ok(Acknowledge(target: Session, sequence: 2)))
 }
 
 // =============================================================================
-// REGISTRY — MODULE REGISTRATION ENABLES DECODE
+// REGISTRY, MODULE REGISTRATION ENABLES DECODE
 // =============================================================================
 
 @target(javascript)
@@ -144,57 +154,51 @@ fn register_test_fixtures() -> Nil {
 
 @target(javascript)
 pub fn auto_js_register_enables_decode_test() {
-  // Register all constructors from the test_fixtures module.
-  // After registering, decode should succeed even without a prior encode.
   register_test_fixtures()
-  // Encode a ServerMessage with SetName, simulating a server-originated message.
-  // The encode caches the constructor; then decode can reconstruct it.
   let encoded =
     transport.encode(
-      ServerMessage(sequence: 1, payload: SetName("Registered")),
+      TopicUpdate(topic_id: "t", sequence: 1, payload: SetName("Registered")),
       serialiser: ser(),
     )
   transport.decode(encoded, serialiser: ser())
   |> should.equal(
-    Ok(ServerMessage(sequence: 1, payload: SetName("Registered"))),
+    Ok(TopicUpdate(topic_id: "t", sequence: 1, payload: SetName("Registered"))),
   )
 }
 
 // =============================================================================
-// ROUNDTRIPS — JSON PATH (use_json toggle)
+// ROUNDTRIPS, JSON PATH (use_json toggle)
 // =============================================================================
 
 @target(javascript)
 pub fn auto_js_json_roundtrip_test() {
-  // Register all fixtures so the auto-decoder can reconstruct types from JSON.
   register_test_fixtures()
   let json_ser = transport.automatic() |> transport.use_json()
   let json_bytes =
     bit_array.from_string(
-      "{\"type\":\"client_message\",\"payload\":{\"_\":\"SetName\",\"0\":\"JsonPath\"}}",
+      "{\"type\":\"session_message\",\"payload\":{\"_\":\"SetName\",\"0\":\"JsonPath\"}}",
     )
   transport.decode(json_bytes, serialiser: json_ser)
-  |> should.equal(Ok(ClientMessage(payload: SetName("JsonPath"))))
+  |> should.equal(Ok(SessionMessage(payload: SetName("JsonPath"))))
 }
 
 // =============================================================================
-// ROUNDTRIPS — NESTED TYPES
+// ROUNDTRIPS, NESTED TYPES
 // =============================================================================
 
 @target(javascript)
 pub fn auto_js_roundtrip_nested_test() {
   let inner = test_fixtures.Model(count: 3, name: "Eve", connected: False)
   let nested = test_fixtures.Nested(inner:)
-  // Encode via a Snapshot so the Nested constructor gets cached in the registry.
   let nested_ser: transport.Serialiser(test_fixtures.Nested, Message) =
     transport.automatic()
   let encoded =
     transport.encode(
-      Snapshot(sequence: 1, state: nested),
+      Snapshot(target: Session, sequence: 1, state: nested),
       serialiser: nested_ser,
     )
   transport.decode(encoded, serialiser: nested_ser)
-  |> should.equal(Ok(Snapshot(sequence: 1, state: nested)))
+  |> should.equal(Ok(Snapshot(target: Session, sequence: 1, state: nested)))
 }
 
 @target(javascript)
@@ -204,11 +208,11 @@ pub fn auto_js_roundtrip_list_field_test() {
     transport.automatic()
   let encoded =
     transport.encode(
-      Snapshot(sequence: 0, state: with_list),
+      Snapshot(target: Session, sequence: 0, state: with_list),
       serialiser: list_ser,
     )
   transport.decode(encoded, serialiser: list_ser)
-  |> should.equal(Ok(Snapshot(sequence: 0, state: with_list)))
+  |> should.equal(Ok(Snapshot(target: Session, sequence: 0, state: with_list)))
 }
 
 // =============================================================================
@@ -217,10 +221,9 @@ pub fn auto_js_roundtrip_list_field_test() {
 
 @target(javascript)
 pub fn auto_js_message_pack_bytes_fail_under_json_test() {
-  // MessagePack bytes should not decode as JSON
   let mp_bytes =
     transport.encode(
-      Acknowledge(sequence: 1),
+      Acknowledge(target: Session, sequence: 1),
       serialiser: transport.automatic() |> transport.use_message_pack(),
     )
   let json_ser = transport.automatic()
@@ -235,9 +238,13 @@ pub fn auto_js_message_pack_bytes_fail_under_json_test() {
 @target(javascript)
 pub fn auto_js_use_json_roundtrip_test() {
   let json_ser = transport.automatic() |> transport.use_json()
-  let encoded = transport.encode(Acknowledge(sequence: 9), serialiser: json_ser)
+  let encoded =
+    transport.encode(
+      Acknowledge(target: Session, sequence: 9),
+      serialiser: json_ser,
+    )
   transport.decode(encoded, serialiser: json_ser)
-  |> should.equal(Ok(Acknowledge(sequence: 9)))
+  |> should.equal(Ok(Acknowledge(target: Session, sequence: 9)))
 }
 
 @target(javascript)
@@ -246,9 +253,13 @@ pub fn auto_js_use_message_pack_after_json_roundtrip_test() {
     transport.automatic()
     |> transport.use_json()
     |> transport.use_message_pack()
-  let encoded = transport.encode(Acknowledge(sequence: 5), serialiser: mp_ser)
+  let encoded =
+    transport.encode(
+      Acknowledge(target: Session, sequence: 5),
+      serialiser: mp_ser,
+    )
   transport.decode(encoded, serialiser: mp_ser)
-  |> should.equal(Ok(Acknowledge(sequence: 5)))
+  |> should.equal(Ok(Acknowledge(target: Session, sequence: 5)))
 }
 
 // =============================================================================

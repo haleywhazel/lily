@@ -1,34 +1,33 @@
-//// We need the [`Store`](./store.html#Store) that sits between client and
-//// server to communicate somehow, and this transport module provides that.
-//// It works on both Erlang and JS targets since both the client and server
-//// need it.
+//// Transport between client and server. The
+//// [`Store`](./store.html#Store) on each side stays in sync by exchanging
+//// serialised [`Protocol`](#Protocol) messages over this module. It works
+//// on both Erlang and JS targets since both ends need it; the WebSocket
+//// and HTTP/SSE connectors are JavaScript-only (a dedicated web server
+//// handles the corresponding server-side I/O).
 ////
-//// The WebSocket and HTTP/SSE transports are JS-only for client to receive
-//// info (on the server-side, a dedicated webserver should be used instead).
+//// The module provides:
 ////
-//// This module provides:
-////
-//// - Wire format: [`Protocol`](#Protocol) envelope types for
-////   client-server messages
+//// - Wire format: [`Protocol`](#Protocol) envelope types for messages
+////   exchanged between client and server.
 //// - Serialisation: [`Serialiser`](#Serialiser) with automatic
 ////   ([`automatic`](#automatic)) and custom ([`custom_json`](#custom_json),
-////   [`custom_binary`](#custom_binary)) options
+////   [`custom_binary`](#custom_binary)) variants.
 //// - WebSocket transport: [`websocket`](#websocket) config builder and
-////   [`websocket_connect`](#websocket_connect) connector with automatic
-////   reconnection and offline queueing
+////   [`websocket_connect`](#websocket_connect) connector, with automatic
+////   reconnection and offline queueing.
 //// - HTTP/SSE transport: [`http`](#http) config builder and
-////   [`http_connect`](#http_connect) connector using EventSource + POST
+////   [`http_connect`](#http_connect) connector using EventSource + POST.
 ////
 //// For most apps, use [`transport.automatic`](#automatic) for
-//// zero-configuration serialisation, then pick a transport (WebSockets work
-//// for most, although use HTTP when corporate firewalls might block them):
+//// zero-configuration serialisation, then pick a transport. WebSockets
+//// suit most cases; switch to HTTP if corporate firewalls block them:
 ////
 //// ```gleam
 //// import lily/client
 //// import lily/transport
 ////
 //// pub fn main() {
-////   let runtime = client.start(app_store)
+////   let runtime = client.start(app_store, shared.wiring())
 ////
 ////   client.connect(runtime,
 ////     with: transport.websocket(url: "ws://localhost:8080/ws")
@@ -63,9 +62,8 @@
 //// `{"_":"ConstructorName","0":field0,"1":field1,...}`. On JavaScript,
 //// constructors must be registered so the decoder can reconstruct them.
 ////
-//// The way this module is currently designed (and I have gone back-and-forth
-//// on this a lot) is to use a small FFI shim in your shared types module
-//// that calls `registerModule` from `transport.ffi.mjs`:
+//// To register constructors, your shared types module exposes a tiny FFI
+//// shim that calls `registerModule` from `transport.ffi.mjs`:
 ////
 //// ```javascript
 //// // my_shared.ffi.mjs
@@ -117,24 +115,30 @@ import gleam/bit_array
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
 import gleam/json.{type Json}
-import gleam/option.{type Option}
+import gleam/list
 import gleam/result
+import lily/internal/auto_codec
+import lily/internal/message_pack.{
+  type Value, ValueArray, ValueBytes, ValueInteger, ValueMap, ValueString,
+}
 
 // =============================================================================
 // PUBLIC TYPES
 // =============================================================================
 
-/// A connector is any function that, given Lily's [`Handler`](#Handler)
-/// callbacks, returns a Transport. Users provide a connector to
-/// [`client.connect`](./client.html#connect) to establish the server
-/// connection using their chosen transport (WebSocket, HTTP, etc.).
-pub type Connector =
-  fn(Handler) -> Transport
+/// Opaque transport connector. Built by
+/// [`websocket_connect`](#websocket_connect) and
+/// [`http_connect`](#http_connect); passed to
+/// [`client.connect`](./client.html#connect).
+pub opaque type Connector {
+  Connector(connect: fn(Handler) -> Transport)
+}
 
 /// Callbacks the runtime provides to the transport. The transport calls
 /// `on_receive` when a message arrives from the server, `on_reconnect` when
 /// the connection is established or restored, and `on_disconnect` when the
 /// connection is lost.
+@internal
 pub type Handler {
   Handler(
     on_receive: fn(BitArray) -> Nil,
@@ -143,56 +147,98 @@ pub type Handler {
   )
 }
 
-/// Lily's `Protocol` takes the sequence of messages taken into account when
-/// receiving updates to ensure proper syncing between stores and updating
-/// their sequence numbers. Sequence numbers are assigned by the server.
-pub type Protocol(model, message) {
-  /// `Acknowledge` is sent by the server on the reception of a `ClientMessage`
-  ///  and after it assigns a sequence number to the received message.
-  Acknowledge(sequence: Int)
-
-  /// `ClientMessage` carries any updates made by the client.
-  ClientMessage(payload: message)
-
-  /// `Push` is sent by the server (or a PubSub hub) directly to subscribed
-  /// clients. Unlike `ServerMessage` it carries no sequence number and is
-  /// never replayed on resync — it is ephemeral by design.
-  Push(payload: message)
-
-  /// `Resync` is used by the client to request the current model within the
-  /// the server store after a full reconnect. The `after_sequence` number
-  /// attached allows the server to know the last synced sequence state.
-  Resync(after_sequence: Int)
-
-  /// `ServerMessage` carries any updates from the server alongside a sequence
-  /// number.
-  ServerMessage(sequence: Int, payload: message)
-
-  /// `Snapshot` is sent by the server on the reception of a `Resync` request by
-  /// the client.
-  Snapshot(sequence: Int, state: model)
+/// `Target` identifies which store a frame applies to: the per-connection
+/// session store, or a named shared topic store.
+@internal
+pub type Target {
+  Session
+  Topic(id: String)
 }
 
-/// Serialises and deserialises `Protocol` values to and from bytes. Carries
-/// JSON encode/decode functions (always present, used when format is JSON) and
-/// an optional binary codec (MessagePack or any custom binary format).
+/// Wire-format envelope used between client and server. Sequence numbers
+/// are assigned by the server and tracked separately per [`Target`](#Target),
+/// so each store stays in sync independently.
+@internal
+pub type Protocol(model, message) {
+  /// Sent by the server after applying a `SessionMessage` or `TopicMessage`
+  /// and assigning it a sequence number for the relevant target. Also used
+  /// to confirm `Unsubscribe`.
+  Acknowledge(target: Target, sequence: Int)
+
+  /// Sent by the server immediately after a client connects, carrying the
+  /// server-assigned `client_id`. Use
+  /// [`client.client_id`](./client.html#client_id) to inject it into your
+  /// model so every session carries its authoritative identity.
+  Connected(client_id: String)
+
+  /// Sent by the server directly to subscribers of a topic. Carries no
+  /// sequence number and is never replayed on resync. Ephemeral by design.
+  Push(topic_id: String, payload: message)
+
+  /// Sent by the server when a `Subscribe` is denied: missing topic or
+  /// kind, invalid topic id, or `can_subscribe` returned `False`.
+  Rejected(topic_id: String, reason: String)
+
+  /// Sent by the client to request the current state of every known target
+  /// after a full reconnect. The server responds with a `Snapshot` per
+  /// target regardless of how far behind the client is, so the wire form
+  /// is just the list of targets the client wants resynced.
+  Resync(cursors: List(Target))
+
+  /// Carries an update from the client to be applied to the session store
+  /// of the originating connection.
+  SessionMessage(payload: message)
+
+  /// Sent by the server in response to `Resync` (per target) and to a
+  /// `Subscribe` (for the subscribed topic).
+  Snapshot(target: Target, sequence: Int, state: model)
+
+  /// Sent by the client to join a topic. The server replies with
+  /// `Snapshot(Topic(id), ...)` on success or `Rejected(id, reason)` on
+  /// failure.
+  Subscribe(topic_id: String)
+
+  /// Carries an update from the client to be applied to a shared topic
+  /// store. The server fans out the result as `TopicUpdate` to every other
+  /// subscriber and `Acknowledge` to the originator.
+  TopicMessage(topic_id: String, payload: message)
+
+  /// Carries an applied topic-store update from the server to every
+  /// subscriber other than the originator. Sequence is the topic's
+  /// sequence after applying.
+  TopicUpdate(topic_id: String, sequence: Int, payload: message)
+
+  /// Sent by the client to leave a topic. The server replies with
+  /// `Acknowledge(Topic(id), seq)` to confirm.
+  Unsubscribe(topic_id: String)
+}
+
+/// Serialises and deserialises `Protocol` values to and from bytes. The
+/// `Auto` variant uses positional encoding and works for any Gleam custom
+/// type without configuration; its `format` field selects JSON or MessagePack
+/// at runtime. `CustomJson` and `CustomBinary` carry user-supplied codecs and
+/// have a fixed format.
 ///
 /// Construct via [`automatic`](#automatic), [`custom_json`](#custom_json), or
-/// [`custom_binary`](#custom_binary). Toggle between formats using
-/// [`use_json`](#use_json) and [`use_message_pack`](#use_message_pack).
+/// [`custom_binary`](#custom_binary). Toggle the auto format using
+/// [`use_json`](#use_json) and [`use_message_pack`](#use_message_pack); these
+/// are no-ops on custom serialisers.
 pub opaque type Serialiser(model, message) {
-  Serialiser(
+  Auto(format: AutoFormat, codec: BinaryCodec(model, message))
+  CustomJson(
     encode_message: fn(message) -> Json,
     decode_message: decode.Decoder(message),
     encode_model: fn(model) -> Json,
     decode_model: decode.Decoder(model),
-    codec: Option(BinaryCodec(model, message)),
-    format: SerialiserFormat,
   )
+  CustomBinary(codec: BinaryCodec(model, message))
 }
 
-/// This is transport handle returned by a connector. Provides `send` to
-/// transmit messages and `close` to terminate the connection.
+/// Transport handle returned by a [`Connector`](#Connector). Carries `send`
+/// to transmit bytes and `close` to terminate the connection. Constructed
+/// inside the transport module by [`websocket_connect`](#websocket_connect)
+/// and [`http_connect`](#http_connect); not user-facing.
+@internal
 pub opaque type Transport {
   Transport(send: fn(BitArray) -> Nil, close: fn() -> Nil)
 }
@@ -221,14 +267,12 @@ pub opaque type HttpConfig {
 // PRIVATE TYPES
 // =============================================================================
 
-/// Active serialisation format. `Auto*` variants are toggled by
-/// [`use_json`](#use_json) and [`use_message_pack`](#use_message_pack).
-/// `Custom*` variants ignore toggles — the format is fixed at construction.
-type SerialiserFormat {
+/// Format selector for the [`Auto`](#Serialiser) variant of
+/// [`Serialiser`](#Serialiser). Toggled by [`use_json`](#use_json) and
+/// [`use_message_pack`](#use_message_pack).
+type AutoFormat {
   AutoJson
   AutoMessagePack
-  CustomBinary
-  CustomJson
 }
 
 type BinaryCodec(model, message) {
@@ -254,7 +298,7 @@ type WsHandle
 /// DevTools). Positional encoding works for any Gleam custom type on both
 /// targets without configuration.
 ///
-/// Switch to MessagePack for production — smaller, faster binary frames —
+/// Switch to MessagePack for production (smaller, faster binary frames)
 /// with [`transport.use_message_pack`](#use_message_pack):
 ///
 /// ```gleam
@@ -266,90 +310,62 @@ type WsHandle
 /// ```
 ///
 /// On JavaScript, constructors must be registered before connecting so the
-/// decoder can reconstruct all types — including those that only arrive from
+/// decoder can reconstruct all types, including those that only arrive from
 /// the server or from other clients. The recommended pattern is a FFI shim in
 /// your shared types module that calls `registerModule` from
 /// `transport.ffi.mjs`. Multiple modules are supported by calling
 /// `registerModule` once per file. See the module documentation for the
 /// full pattern.
 pub fn automatic() -> Serialiser(model, message) {
-  Serialiser(
-    encode_message: ffi_auto_encode,
-    decode_message: decode.new_primitive_decoder("Auto", ffi_auto_decode),
-    encode_model: ffi_auto_encode,
-    decode_model: decode.new_primitive_decoder("Auto", ffi_auto_decode),
-    codec: option.Some(
-      BinaryCodec(
-        encode_message: ffi_auto_encode_message_pack,
-        decode_message: fn(bytes) {
-          case ffi_auto_decode_message_pack(bytes) {
-            Ok(value) -> Ok(value)
-            Error(_) -> Error(Nil)
-          }
-        },
-        encode_model: ffi_auto_encode_message_pack,
-        decode_model: fn(bytes) {
-          case ffi_auto_decode_message_pack(bytes) {
-            Ok(value) -> Ok(value)
-            Error(_) -> Error(Nil)
-          }
-        },
-      ),
-    ),
+  Auto(
     format: AutoJson,
+    codec: BinaryCodec(
+      encode_message: ffi_auto_encode_message_pack,
+      decode_message: ffi_auto_decode_message_pack,
+      encode_model: ffi_auto_encode_message_pack,
+      decode_model: ffi_auto_decode_message_pack,
+    ),
   )
 }
 
 /// Close the transport connection. After calling this, the transport should
 /// clean up resources and stop attempting to reconnect.
+@internal
 pub fn close(transport: Transport) -> Nil {
   transport.close()
 }
 
-/// Create a serialiser from explicit binary encode/decode functions. Use this
-/// to provide a custom binary codec (MessagePack, CBOR, or any binary
+/// Create a serialiser from explicit binary encode/decode functions. Use
+/// this to provide a custom binary codec (MessagePack, CBOR, or any binary
 /// format). The format is fixed to binary; the [`use_json`](#use_json) and
-/// [`use_message_pack`](#use_message_pack) toggles are no-ops on this serialiser.
+/// [`use_message_pack`](#use_message_pack) toggles are no-ops on this
+/// serialiser.
 pub fn custom_binary(
   encode_message encode_message: fn(message) -> BitArray,
   decode_message decode_message: fn(BitArray) -> Result(message, Nil),
   encode_model encode_model: fn(model) -> BitArray,
   decode_model decode_model: fn(BitArray) -> Result(model, Nil),
 ) -> Serialiser(model, message) {
-  Serialiser(
-    encode_message: ffi_auto_encode,
-    decode_message: decode.new_primitive_decoder("Auto", ffi_auto_decode),
-    encode_model: ffi_auto_encode,
-    decode_model: decode.new_primitive_decoder("Auto", ffi_auto_decode),
-    codec: option.Some(BinaryCodec(
-      encode_message: encode_message,
-      decode_message: decode_message,
-      encode_model: encode_model,
-      decode_model: decode_model,
-    )),
-    format: CustomBinary,
-  )
+  CustomBinary(BinaryCodec(
+    encode_message:,
+    decode_message:,
+    encode_model:,
+    decode_model:,
+  ))
 }
 
 /// Create a serialiser from explicit JSON encode/decode functions. Useful
 /// when the auto format is not suitable (third-party APIs, human-readable
 /// JSON, backwards compatibility). The format is fixed to JSON; the
-/// [`use_json`](#use_json) and [`use_message_pack`](#use_message_pack) toggles are
-/// no-ops on this serialiser.
+/// [`use_json`](#use_json) and [`use_message_pack`](#use_message_pack)
+/// toggles are no-ops on this serialiser.
 pub fn custom_json(
   encode_message encode_message: fn(message) -> Json,
   decode_message decode_message: decode.Decoder(message),
   encode_model encode_model: fn(model) -> Json,
   decode_model decode_model: decode.Decoder(model),
 ) -> Serialiser(model, message) {
-  Serialiser(
-    encode_message: encode_message,
-    decode_message: decode_message,
-    encode_model: encode_model,
-    decode_model: decode_model,
-    codec: option.None,
-    format: CustomJson,
-  )
+  CustomJson(encode_message:, decode_message:, encode_model:, decode_model:)
 }
 
 /// Decode `BitArray` bytes into a [`Protocol`](#Protocol) result.
@@ -357,13 +373,18 @@ pub fn decode(
   bytes: BitArray,
   serialiser serialiser: Serialiser(model, message),
 ) -> Result(Protocol(model, message), Nil) {
-  case serialiser.format {
-    AutoJson | CustomJson -> decode_json(bytes, serialiser)
-    AutoMessagePack | CustomBinary ->
-      case serialiser.codec {
-        option.Some(codec) -> decode_message_pack(bytes, codec)
-        option.None -> decode_json(bytes, serialiser)
-      }
+  case serialiser {
+    Auto(format: AutoJson, ..) ->
+      decode_json(
+        bytes,
+        decode.new_primitive_decoder("Auto", ffi_auto_decode),
+        decode.new_primitive_decoder("Auto", ffi_auto_decode),
+      )
+    Auto(format: AutoMessagePack, codec:) ->
+      decode_message_pack_protocol(bytes, codec)
+    CustomJson(decode_message:, decode_model:, ..) ->
+      decode_json(bytes, decode_message, decode_model)
+    CustomBinary(codec:) -> decode_message_pack_protocol(bytes, codec)
   }
 }
 
@@ -373,13 +394,14 @@ pub fn encode(
   protocol: Protocol(model, message),
   serialiser serialiser: Serialiser(model, message),
 ) -> BitArray {
-  case serialiser.format {
-    AutoJson | CustomJson -> encode_json(protocol, serialiser)
-    AutoMessagePack | CustomBinary ->
-      case serialiser.codec {
-        option.Some(codec) -> encode_message_pack(protocol, codec)
-        option.None -> encode_json(protocol, serialiser)
-      }
+  case serialiser {
+    Auto(format: AutoJson, ..) ->
+      encode_json(protocol, ffi_auto_encode, ffi_auto_encode)
+    Auto(format: AutoMessagePack, codec:) ->
+      encode_message_pack_protocol(protocol, codec)
+    CustomJson(encode_message:, encode_model:, ..) ->
+      encode_json(protocol, encode_message, encode_model)
+    CustomBinary(codec:) -> encode_message_pack_protocol(protocol, codec)
   }
 }
 
@@ -428,7 +450,7 @@ pub fn http(
 /// )
 /// ```
 pub fn http_connect(config: HttpConfig) -> Connector {
-  fn(handler: Handler) {
+  Connector(connect: fn(handler: Handler) {
     let handle =
       ffi_http_connect(
         config.post_url,
@@ -439,17 +461,33 @@ pub fn http_connect(config: HttpConfig) -> Connector {
     new(send: fn(bytes) { ffi_http_send(handle, bytes) }, close: fn() {
       ffi_http_close(handle)
     })
-  }
+  })
 }
 
 /// Create a new [`Transport`](#Transport) with the given send and close
-/// functions. This is used by transport implementations (WebSocket, HTTP) to
+/// functions. Used by transport implementations (WebSocket, HTTP) to
 /// construct the Transport handle they return from their connector.
+@internal
 pub fn new(
   send send: fn(BitArray) -> Nil,
   close close: fn() -> Nil,
 ) -> Transport {
-  Transport(send: send, close: close)
+  Transport(send:, close:)
+}
+
+/// Wrap a `connect` function as a [`Connector`](#Connector). Used by
+/// [`websocket_connect`](#websocket_connect), [`http_connect`](#http_connect),
+/// and tests that fake the transport.
+@internal
+pub fn make_connector(connect: fn(Handler) -> Transport) -> Connector {
+  Connector(connect:)
+}
+
+/// Run a connector by passing it the runtime's handler. Used by
+/// [`client.connect`](./client.html#connect).
+@internal
+pub fn run_connector(connector: Connector, handler: Handler) -> Transport {
+  connector.connect(handler)
 }
 
 @target(javascript)
@@ -465,9 +503,8 @@ pub fn reconnect_base_milliseconds(
 @target(javascript)
 /// Set the jitter ratio applied to each WebSocket reconnection delay. A ratio
 /// of `0.25` produces ±25% randomisation, which spreads reconnects across
-/// clients after a mass disconnect. Must be between 0.0 (no jitter) and 1.0
-/// (full randomisation). Default is 0.25. I've also added caching of store
-/// for mass re-syncs to help with this to prevent unnecessary re-serialisation.
+/// clients after a mass disconnect so the server doesn't get stampeded. Must
+/// be between 0.0 (no jitter) and 1.0 (full randomisation). Default is 0.25.
 pub fn reconnect_jitter_ratio(
   config: WebSocketConfig,
   ratio: Float,
@@ -499,6 +536,7 @@ pub fn reconnect_multiplier(
 
 /// Send bytes through the transport. The bytes should be a serialised
 /// [`Protocol`](#Protocol) message.
+@internal
 pub fn send(transport: Transport, bytes: BitArray) -> Nil {
   transport.send(bytes)
 }
@@ -515,9 +553,9 @@ pub fn send(transport: Transport, bytes: BitArray) -> Nil {
 pub fn use_json(
   serialiser: Serialiser(model, message),
 ) -> Serialiser(model, message) {
-  case serialiser.format {
-    AutoMessagePack -> Serialiser(..serialiser, format: AutoJson)
-    AutoJson | CustomBinary | CustomJson -> serialiser
+  case serialiser {
+    Auto(format: AutoMessagePack, codec:) -> Auto(format: AutoJson, codec:)
+    Auto(..) | CustomJson(..) | CustomBinary(..) -> serialiser
   }
 }
 
@@ -528,9 +566,9 @@ pub fn use_json(
 pub fn use_message_pack(
   serialiser: Serialiser(model, message),
 ) -> Serialiser(model, message) {
-  case serialiser.format {
-    AutoJson -> Serialiser(..serialiser, format: AutoMessagePack)
-    AutoMessagePack | CustomBinary | CustomJson -> serialiser
+  case serialiser {
+    Auto(format: AutoJson, codec:) -> Auto(format: AutoMessagePack, codec:)
+    Auto(..) | CustomJson(..) | CustomBinary(..) -> serialiser
   }
 }
 
@@ -575,7 +613,7 @@ pub fn websocket(url url: String) -> WebSocketConfig {
 /// )
 /// ```
 pub fn websocket_connect(config: WebSocketConfig) -> Connector {
-  fn(handler: Handler) {
+  Connector(connect: fn(handler: Handler) {
     let handle =
       ffi_ws_connect(
         config.url,
@@ -588,7 +626,7 @@ pub fn websocket_connect(config: WebSocketConfig) -> Connector {
     new(send: fn(bytes) { ffi_ws_send(handle, bytes) }, close: fn() {
       ffi_ws_close(handle)
     })
-  }
+  })
 }
 
 // =============================================================================
@@ -597,23 +635,30 @@ pub fn websocket_connect(config: WebSocketConfig) -> Connector {
 
 /// Decoder for `Acknowledge`
 fn acknowledge_decoder() -> decode.Decoder(Protocol(model, message)) {
+  use target <- decode.field("target", target_decoder())
   use sequence <- decode.field("sequence", decode.int)
-  decode.success(Acknowledge(sequence:))
+  decode.success(Acknowledge(target:, sequence:))
 }
 
-/// Decoder for `ClientMessage`
-fn client_message_decoder(
-  serialiser: Serialiser(model, message),
-) -> decode.Decoder(Protocol(model, message)) {
-  use payload <- decode.field("payload", serialiser.decode_message)
-  decode.success(ClientMessage(payload:))
+/// Decoder for `Target`
+fn target_decoder() -> decode.Decoder(Target) {
+  use kind <- decode.field("kind", decode.string)
+  case kind {
+    "session" -> decode.success(Session)
+    "topic" -> {
+      use id <- decode.field("id", decode.string)
+      decode.success(Topic(id:))
+    }
+    _ -> decode.failure(Session, "Target")
+  }
 }
 
 fn decode_json(
   bytes: BitArray,
-  serialiser: Serialiser(model, message),
+  decode_message: decode.Decoder(message),
+  decode_model: decode.Decoder(model),
 ) -> Result(Protocol(model, message), Nil) {
-  let decoder = protocol_decoder(serialiser)
+  let decoder = protocol_decoder(decode_message, decode_model)
   bit_array.to_string(bytes)
   |> result.try(fn(text) {
     json.parse(from: text, using: decoder)
@@ -621,113 +666,496 @@ fn decode_json(
   })
 }
 
-fn decode_message_pack(
-  bytes: BitArray,
-  codec: BinaryCodec(model, message),
-) -> Result(Protocol(model, message), Nil) {
-  ffi_decode_message_pack_protocol(bytes, codec)
-}
-
 fn encode_json(
   protocol: Protocol(model, message),
-  serialiser: Serialiser(model, message),
+  encode_message: fn(message) -> Json,
+  encode_model: fn(model) -> Json,
 ) -> BitArray {
   case protocol {
-    ClientMessage(payload:) ->
-      json.object([
-        #("type", json.string("client_message")),
-        #("payload", serialiser.encode_message(payload)),
-      ])
-
-    Push(payload:) ->
-      json.object([
-        #("type", json.string("push")),
-        #("payload", serialiser.encode_message(payload)),
-      ])
-
-    ServerMessage(sequence:, payload:) ->
-      json.object([
-        #("type", json.string("server_message")),
-        #("sequence", json.int(sequence)),
-        #("payload", serialiser.encode_message(payload)),
-      ])
-
-    Snapshot(sequence:, state:) ->
-      json.object([
-        #("type", json.string("snapshot")),
-        #("sequence", json.int(sequence)),
-        #("state", serialiser.encode_model(state)),
-      ])
-
-    Resync(after_sequence:) ->
-      json.object([
-        #("type", json.string("resync")),
-        #("after_sequence", json.int(after_sequence)),
-      ])
-
-    Acknowledge(sequence:) ->
+    Acknowledge(target:, sequence:) ->
       json.object([
         #("type", json.string("acknowledge")),
+        #("target", encode_target_json(target)),
         #("sequence", json.int(sequence)),
+      ])
+
+    Connected(client_id:) ->
+      json.object([
+        #("type", json.string("connected")),
+        #("client_id", json.string(client_id)),
+      ])
+
+    Push(topic_id:, payload:) ->
+      json.object([
+        #("type", json.string("push")),
+        #("topic_id", json.string(topic_id)),
+        #("payload", encode_message(payload)),
+      ])
+
+    Rejected(topic_id:, reason:) ->
+      json.object([
+        #("type", json.string("rejected")),
+        #("topic_id", json.string(topic_id)),
+        #("reason", json.string(reason)),
+      ])
+
+    Resync(cursors:) ->
+      json.object([
+        #("type", json.string("resync")),
+        #("cursors", json.array(cursors, encode_target_json)),
+      ])
+
+    SessionMessage(payload:) ->
+      json.object([
+        #("type", json.string("session_message")),
+        #("payload", encode_message(payload)),
+      ])
+
+    Snapshot(target:, sequence:, state:) ->
+      json.object([
+        #("type", json.string("snapshot")),
+        #("target", encode_target_json(target)),
+        #("sequence", json.int(sequence)),
+        #("state", encode_model(state)),
+      ])
+
+    Subscribe(topic_id:) ->
+      json.object([
+        #("type", json.string("subscribe")),
+        #("topic_id", json.string(topic_id)),
+      ])
+
+    TopicMessage(topic_id:, payload:) ->
+      json.object([
+        #("type", json.string("topic_message")),
+        #("topic_id", json.string(topic_id)),
+        #("payload", encode_message(payload)),
+      ])
+
+    TopicUpdate(topic_id:, sequence:, payload:) ->
+      json.object([
+        #("type", json.string("topic_update")),
+        #("topic_id", json.string(topic_id)),
+        #("sequence", json.int(sequence)),
+        #("payload", encode_message(payload)),
+      ])
+
+    Unsubscribe(topic_id:) ->
+      json.object([
+        #("type", json.string("unsubscribe")),
+        #("topic_id", json.string(topic_id)),
       ])
   }
   |> json.to_string
   |> bit_array.from_string
 }
 
-fn encode_message_pack(
-  protocol: Protocol(model, message),
-  codec: BinaryCodec(model, message),
-) -> BitArray {
-  ffi_encode_message_pack_protocol(protocol, codec)
+fn encode_target_json(target: Target) -> Json {
+  case target {
+    Session -> json.object([#("kind", json.string("session"))])
+    Topic(id:) ->
+      json.object([
+        #("kind", json.string("topic")),
+        #("id", json.string(id)),
+      ])
+  }
 }
 
 /// Decoder for `Protocol`
 fn protocol_decoder(
-  serialiser: Serialiser(model, message),
+  decode_message: decode.Decoder(message),
+  decode_model: decode.Decoder(model),
 ) -> decode.Decoder(Protocol(model, message)) {
   use protocol_type <- decode.then(decode.at(["type"], decode.string))
   case protocol_type {
-    "client_message" -> client_message_decoder(serialiser)
-    "push" -> push_decoder(serialiser)
-    "server_message" -> server_message_decoder(serialiser)
-    "snapshot" -> snapshot_decoder(serialiser)
-    "resync" -> resync_decoder()
     "acknowledge" -> acknowledge_decoder()
-    _ -> decode.failure(Acknowledge(0), "Protocol")
+    "connected" -> connected_decoder()
+    "push" -> push_decoder(decode_message)
+    "rejected" -> rejected_decoder()
+    "resync" -> resync_decoder()
+    "session_message" -> session_message_decoder(decode_message)
+    "snapshot" -> snapshot_decoder(decode_model)
+    "subscribe" -> subscribe_decoder()
+    "topic_message" -> topic_message_decoder(decode_message)
+    "topic_update" -> topic_update_decoder(decode_message)
+    "unsubscribe" -> unsubscribe_decoder()
+    _ -> decode.failure(Acknowledge(Session, 0), "Protocol")
   }
+}
+
+/// Decoder for `Connected`
+fn connected_decoder() -> decode.Decoder(Protocol(model, message)) {
+  use client_id <- decode.field("client_id", decode.string)
+  decode.success(Connected(client_id:))
 }
 
 /// Decoder for `Push`
 fn push_decoder(
-  serialiser: Serialiser(model, message),
+  decode_message: decode.Decoder(message),
 ) -> decode.Decoder(Protocol(model, message)) {
-  use payload <- decode.field("payload", serialiser.decode_message)
-  decode.success(Push(payload:))
+  use topic_id <- decode.field("topic_id", decode.string)
+  use payload <- decode.field("payload", decode_message)
+  decode.success(Push(topic_id:, payload:))
+}
+
+/// Decoder for `Rejected`
+fn rejected_decoder() -> decode.Decoder(Protocol(model, message)) {
+  use topic_id <- decode.field("topic_id", decode.string)
+  use reason <- decode.field("reason", decode.string)
+  decode.success(Rejected(topic_id:, reason:))
 }
 
 /// Decoder for `Resync`
 fn resync_decoder() -> decode.Decoder(Protocol(model, message)) {
-  use after_sequence <- decode.field("after_sequence", decode.int)
-  decode.success(Resync(after_sequence:))
+  use cursors <- decode.field("cursors", decode.list(target_decoder()))
+  decode.success(Resync(cursors:))
 }
 
-/// Decoder for `ServerMessage`
-fn server_message_decoder(
-  serialiser: Serialiser(model, message),
+/// Decoder for `SessionMessage`
+fn session_message_decoder(
+  decode_message: decode.Decoder(message),
 ) -> decode.Decoder(Protocol(model, message)) {
-  use sequence <- decode.field("sequence", decode.int)
-  use payload <- decode.field("payload", serialiser.decode_message)
-  decode.success(ServerMessage(sequence:, payload:))
+  use payload <- decode.field("payload", decode_message)
+  decode.success(SessionMessage(payload:))
 }
 
 /// Decoder for `Snapshot`
 fn snapshot_decoder(
-  serialiser: Serialiser(model, message),
+  decode_model: decode.Decoder(model),
 ) -> decode.Decoder(Protocol(model, message)) {
+  use target <- decode.field("target", target_decoder())
   use sequence <- decode.field("sequence", decode.int)
-  use state <- decode.field("state", serialiser.decode_model)
-  decode.success(Snapshot(sequence:, state:))
+  use state <- decode.field("state", decode_model)
+  decode.success(Snapshot(target:, sequence:, state:))
+}
+
+/// Decoder for `Subscribe`
+fn subscribe_decoder() -> decode.Decoder(Protocol(model, message)) {
+  use topic_id <- decode.field("topic_id", decode.string)
+  decode.success(Subscribe(topic_id:))
+}
+
+/// Decoder for `TopicMessage`
+fn topic_message_decoder(
+  decode_message: decode.Decoder(message),
+) -> decode.Decoder(Protocol(model, message)) {
+  use topic_id <- decode.field("topic_id", decode.string)
+  use payload <- decode.field("payload", decode_message)
+  decode.success(TopicMessage(topic_id:, payload:))
+}
+
+/// Decoder for `TopicUpdate`
+fn topic_update_decoder(
+  decode_message: decode.Decoder(message),
+) -> decode.Decoder(Protocol(model, message)) {
+  use topic_id <- decode.field("topic_id", decode.string)
+  use sequence <- decode.field("sequence", decode.int)
+  use payload <- decode.field("payload", decode_message)
+  decode.success(TopicUpdate(topic_id:, sequence:, payload:))
+}
+
+/// Decoder for `Unsubscribe`
+fn unsubscribe_decoder() -> decode.Decoder(Protocol(model, message)) {
+  use topic_id <- decode.field("topic_id", decode.string)
+  decode.success(Unsubscribe(topic_id:))
+}
+
+fn ffi_auto_encode_message_pack(value: a) -> BitArray {
+  auto_codec.encode_message_pack(value)
+}
+
+fn ffi_auto_decode_message_pack(bytes: BitArray) -> Result(a, Nil) {
+  case auto_codec.decode_message_pack(bytes) {
+    Ok(value) -> Ok(unsafe_coerce_dynamic(value))
+    Error(_) -> Error(Nil)
+  }
+}
+
+/// Bridge `Dynamic` back into the call site's expected type. Pure FFI
+/// passthrough: Erlang and JS values do not carry static types at runtime,
+/// so reinterpreting `Dynamic` as `a` is sound here. The value was just
+/// reconstructed by `reflection.construct` and matches the shape of `a` by
+/// construction.
+@external(erlang, "lily_reflection_ffi", "passthrough")
+@external(javascript, "./internal/reflection.ffi.mjs", "passthrough")
+fn unsafe_coerce_dynamic(_value: Dynamic) -> a
+
+/// Encode a Protocol value to MessagePack bytes. Pure Gleam, single source
+/// of truth for both targets. The payload/state slots embed bytes produced
+/// by the configured codec (auto or user-supplied).
+fn encode_message_pack_protocol(
+  protocol: Protocol(model, message),
+  codec: BinaryCodec(model, message),
+) -> BitArray {
+  let str = message_pack.encode_string
+  let bin = message_pack.encode_bin
+  let int_bytes = message_pack.encode_int
+  case protocol {
+    Acknowledge(target:, sequence:) ->
+      message_pack.encode_map([
+        #(str("type"), str("acknowledge")),
+        #(str("target"), encode_target_message_pack(target)),
+        #(str("sequence"), int_bytes(sequence)),
+      ])
+
+    Connected(client_id:) ->
+      message_pack.encode_map([
+        #(str("type"), str("connected")),
+        #(str("client_id"), str(client_id)),
+      ])
+
+    Push(topic_id:, payload:) ->
+      message_pack.encode_map([
+        #(str("type"), str("push")),
+        #(str("topic_id"), str(topic_id)),
+        #(str("payload"), bin(codec.encode_message(payload))),
+      ])
+
+    Rejected(topic_id:, reason:) ->
+      message_pack.encode_map([
+        #(str("type"), str("rejected")),
+        #(str("topic_id"), str(topic_id)),
+        #(str("reason"), str(reason)),
+      ])
+
+    Resync(cursors:) ->
+      message_pack.encode_map([
+        #(str("type"), str("resync")),
+        #(
+          str("cursors"),
+          message_pack.encode_array(list.map(
+            cursors,
+            encode_target_message_pack,
+          )),
+        ),
+      ])
+
+    SessionMessage(payload:) ->
+      message_pack.encode_map([
+        #(str("type"), str("session_message")),
+        #(str("payload"), bin(codec.encode_message(payload))),
+      ])
+
+    Snapshot(target:, sequence:, state:) ->
+      message_pack.encode_map([
+        #(str("type"), str("snapshot")),
+        #(str("target"), encode_target_message_pack(target)),
+        #(str("sequence"), int_bytes(sequence)),
+        #(str("state"), bin(codec.encode_model(state))),
+      ])
+
+    Subscribe(topic_id:) ->
+      message_pack.encode_map([
+        #(str("type"), str("subscribe")),
+        #(str("topic_id"), str(topic_id)),
+      ])
+
+    TopicMessage(topic_id:, payload:) ->
+      message_pack.encode_map([
+        #(str("type"), str("topic_message")),
+        #(str("topic_id"), str(topic_id)),
+        #(str("payload"), bin(codec.encode_message(payload))),
+      ])
+
+    TopicUpdate(topic_id:, sequence:, payload:) ->
+      message_pack.encode_map([
+        #(str("type"), str("topic_update")),
+        #(str("topic_id"), str(topic_id)),
+        #(str("sequence"), int_bytes(sequence)),
+        #(str("payload"), bin(codec.encode_message(payload))),
+      ])
+
+    Unsubscribe(topic_id:) ->
+      message_pack.encode_map([
+        #(str("type"), str("unsubscribe")),
+        #(str("topic_id"), str(topic_id)),
+      ])
+  }
+}
+
+fn encode_target_message_pack(target: Target) -> BitArray {
+  let str = message_pack.encode_string
+  case target {
+    Session -> message_pack.encode_map([#(str("kind"), str("session"))])
+    Topic(id:) ->
+      message_pack.encode_map([
+        #(str("kind"), str("topic")),
+        #(str("id"), str(id)),
+      ])
+  }
+}
+
+/// Decode MessagePack-encoded bytes back to a Protocol using the provided
+/// codec for payload/state values.
+fn decode_message_pack_protocol(
+  bytes: BitArray,
+  codec: BinaryCodec(model, message),
+) -> Result(Protocol(model, message), Nil) {
+  use #(top_value, _) <- result.try(message_pack.decode(bytes))
+  case top_value {
+    ValueMap(entries) -> decode_message_pack_envelope(entries, codec)
+    _ -> Error(Nil)
+  }
+}
+
+fn decode_message_pack_envelope(
+  entries: List(#(Value, Value)),
+  codec: BinaryCodec(model, message),
+) -> Result(Protocol(model, message), Nil) {
+  use type_value <- result.try(envelope_get(entries, "type"))
+  use type_name <- result.try(value_string(type_value))
+  case type_name {
+    "acknowledge" -> {
+      use target_value <- result.try(envelope_get(entries, "target"))
+      use target <- result.try(decode_target_message_pack(target_value))
+      use sequence_value <- result.try(envelope_get(entries, "sequence"))
+      use sequence <- result.try(value_int(sequence_value))
+      Ok(Acknowledge(target:, sequence:))
+    }
+
+    "connected" -> {
+      use client_id_value <- result.try(envelope_get(entries, "client_id"))
+      use client_id <- result.try(value_string(client_id_value))
+      Ok(Connected(client_id:))
+    }
+
+    "push" -> {
+      use topic_id_value <- result.try(envelope_get(entries, "topic_id"))
+      use topic_id <- result.try(value_string(topic_id_value))
+      use payload_value <- result.try(envelope_get(entries, "payload"))
+      use payload_bytes <- result.try(value_bytes(payload_value))
+      use payload <- result.try(codec.decode_message(payload_bytes))
+      Ok(Push(topic_id:, payload:))
+    }
+
+    "rejected" -> {
+      use topic_id_value <- result.try(envelope_get(entries, "topic_id"))
+      use topic_id <- result.try(value_string(topic_id_value))
+      use reason_value <- result.try(envelope_get(entries, "reason"))
+      use reason <- result.try(value_string(reason_value))
+      Ok(Rejected(topic_id:, reason:))
+    }
+
+    "resync" -> {
+      use cursors_value <- result.try(envelope_get(entries, "cursors"))
+      use cursors <- result.try(value_array(cursors_value))
+      use targets <- result.try(list.try_map(
+        cursors,
+        decode_target_message_pack,
+      ))
+      Ok(Resync(cursors: targets))
+    }
+
+    "session_message" -> {
+      use payload_value <- result.try(envelope_get(entries, "payload"))
+      use payload_bytes <- result.try(value_bytes(payload_value))
+      use payload <- result.try(codec.decode_message(payload_bytes))
+      Ok(SessionMessage(payload:))
+    }
+
+    "snapshot" -> {
+      use target_value <- result.try(envelope_get(entries, "target"))
+      use target <- result.try(decode_target_message_pack(target_value))
+      use sequence_value <- result.try(envelope_get(entries, "sequence"))
+      use sequence <- result.try(value_int(sequence_value))
+      use state_value <- result.try(envelope_get(entries, "state"))
+      use state_bytes <- result.try(value_bytes(state_value))
+      use state <- result.try(codec.decode_model(state_bytes))
+      Ok(Snapshot(target:, sequence:, state:))
+    }
+
+    "subscribe" -> {
+      use topic_id_value <- result.try(envelope_get(entries, "topic_id"))
+      use topic_id <- result.try(value_string(topic_id_value))
+      Ok(Subscribe(topic_id:))
+    }
+
+    "topic_message" -> {
+      use topic_id_value <- result.try(envelope_get(entries, "topic_id"))
+      use topic_id <- result.try(value_string(topic_id_value))
+      use payload_value <- result.try(envelope_get(entries, "payload"))
+      use payload_bytes <- result.try(value_bytes(payload_value))
+      use payload <- result.try(codec.decode_message(payload_bytes))
+      Ok(TopicMessage(topic_id:, payload:))
+    }
+
+    "topic_update" -> {
+      use topic_id_value <- result.try(envelope_get(entries, "topic_id"))
+      use topic_id <- result.try(value_string(topic_id_value))
+      use sequence_value <- result.try(envelope_get(entries, "sequence"))
+      use sequence <- result.try(value_int(sequence_value))
+      use payload_value <- result.try(envelope_get(entries, "payload"))
+      use payload_bytes <- result.try(value_bytes(payload_value))
+      use payload <- result.try(codec.decode_message(payload_bytes))
+      Ok(TopicUpdate(topic_id:, sequence:, payload:))
+    }
+
+    "unsubscribe" -> {
+      use topic_id_value <- result.try(envelope_get(entries, "topic_id"))
+      use topic_id <- result.try(value_string(topic_id_value))
+      Ok(Unsubscribe(topic_id:))
+    }
+
+    _ -> Error(Nil)
+  }
+}
+
+fn decode_target_message_pack(value: Value) -> Result(Target, Nil) {
+  case value {
+    ValueMap(entries) -> {
+      use kind_value <- result.try(envelope_get(entries, "kind"))
+      use kind <- result.try(value_string(kind_value))
+      case kind {
+        "session" -> Ok(Session)
+        "topic" -> {
+          use id_value <- result.try(envelope_get(entries, "id"))
+          use id <- result.try(value_string(id_value))
+          Ok(Topic(id:))
+        }
+        _ -> Error(Nil)
+      }
+    }
+    _ -> Error(Nil)
+  }
+}
+
+fn envelope_get(
+  entries: List(#(Value, Value)),
+  key: String,
+) -> Result(Value, Nil) {
+  case entries {
+    [] -> Error(Nil)
+    [#(ValueString(k), v), ..] if k == key -> Ok(v)
+    [_, ..rest] -> envelope_get(rest, key)
+  }
+}
+
+fn value_string(value: Value) -> Result(String, Nil) {
+  case value {
+    ValueString(s) -> Ok(s)
+    _ -> Error(Nil)
+  }
+}
+
+fn value_int(value: Value) -> Result(Int, Nil) {
+  case value {
+    ValueInteger(n) -> Ok(n)
+    _ -> Error(Nil)
+  }
+}
+
+fn value_bytes(value: Value) -> Result(BitArray, Nil) {
+  case value {
+    ValueBytes(b) -> Ok(b)
+    _ -> Error(Nil)
+  }
+}
+
+fn value_array(value: Value) -> Result(List(Value), Nil) {
+  case value {
+    ValueArray(items) -> Ok(items)
+    _ -> Error(Nil)
+  }
 }
 
 // =============================================================================
@@ -741,45 +1169,11 @@ fn ffi_auto_decode(_value: Dynamic) -> Result(a, a) {
   panic as "auto_decode is implemented in FFI"
 }
 
-/// Auto-decode MessagePack bytes to a Gleam value
-@external(erlang, "lily_transport_ffi", "auto_decode_message_pack")
-@external(javascript, "./transport.ffi.mjs", "autoDecodeMessagePack")
-fn ffi_auto_decode_message_pack(_bytes: BitArray) -> Result(a, Nil) {
-  panic as "auto_decode_message_pack is implemented in FFI"
-}
-
 /// Auto-encode a value to JSON (JSON path)
 @external(erlang, "lily_transport_ffi", "auto_encode")
 @external(javascript, "./transport.ffi.mjs", "autoEncode")
 fn ffi_auto_encode(_value: a) -> Json {
   panic as "auto_encode is implemented in FFI"
-}
-
-/// Auto-encode a value to MessagePack bytes
-@external(erlang, "lily_transport_ffi", "auto_encode_message_pack")
-@external(javascript, "./transport.ffi.mjs", "autoEncodeMessagePack")
-fn ffi_auto_encode_message_pack(_value: a) -> BitArray {
-  panic as "auto_encode_message_pack is implemented in FFI"
-}
-
-/// Decode MessagePack bytes to a Protocol using the provided codec
-@external(erlang, "lily_transport_ffi", "decode_message_pack_protocol")
-@external(javascript, "./transport.ffi.mjs", "decodeMessagePackProtocol")
-fn ffi_decode_message_pack_protocol(
-  _bytes: BitArray,
-  _codec: BinaryCodec(model, message),
-) -> Result(Protocol(model, message), Nil) {
-  panic as "decode_message_pack_protocol is implemented in FFI"
-}
-
-/// Encode a Protocol to MessagePack bytes using the provided codec
-@external(erlang, "lily_transport_ffi", "encode_message_pack_protocol")
-@external(javascript, "./transport.ffi.mjs", "encodeMessagePackProtocol")
-fn ffi_encode_message_pack_protocol(
-  _protocol: Protocol(model, message),
-  _codec: BinaryCodec(model, message),
-) -> BitArray {
-  panic as "encode_message_pack_protocol is implemented in FFI"
 }
 
 @target(javascript)

@@ -1,5 +1,5 @@
-// Tests for lily/server on JavaScript — synchronous closure-based server.
-// All functions are @target(javascript) — skipped on Erlang.
+// Tests for lily/server on JavaScript, synchronous closure-based server.
+// All functions are @target(javascript), skipped on Erlang.
 
 @target(javascript)
 import gleam/bit_array
@@ -9,8 +9,6 @@ import gleam/list
 import gleam/string
 @target(javascript)
 import gleeunit/should
-@target(javascript)
-import lily/logging
 @target(javascript)
 import lily/server
 @target(javascript)
@@ -33,23 +31,36 @@ fn ser() {
 
 @target(javascript)
 fn new_server() -> server.Server(Model, Message) {
-  let app_store =
-    store.new(test_fixtures.initial_model(), with: test_fixtures.update)
-  let assert Ok(srv) = server.start(store: app_store, serialiser: ser())
+  let assert Ok(srv) =
+    server.new(
+      initial: test_fixtures.initial_model(),
+      serialiser: ser(),
+      wiring: store.wiring()
+        |> store.session(
+          extract: fn(message) { Ok(message) },
+          update: test_fixtures.update,
+          field_get: fn(model) { model },
+          field_set: fn(_, model) { model },
+        ),
+    )
+    |> server.start
   srv
 }
 
 @target(javascript)
 /// Connect a mock client that appends received messages to a ref list.
-/// Returns a getter fn that returns the collected messages.
+/// Returns a drain fn that returns and clears the captured messages.
+/// Drains the `Connected` frame sent immediately on connect so tests
+/// that check for other frames don't have to skip it.
 fn connect_client(
   srv: server.Server(Model, Message),
   client_id: String,
 ) -> fn() -> List(BitArray) {
   let ref = test_ref.new([])
-  server.connect(srv, client_id: client_id, send: fn(msg) {
-    test_ref.set(ref, [msg, ..test_ref.get(ref)])
+  server.connect(srv, client_id: client_id, send: fn(bytes) {
+    test_ref.set(ref, [bytes, ..test_ref.get(ref)])
   })
+  test_ref.set(ref, [])
   fn() {
     let msgs = list.reverse(test_ref.get(ref))
     test_ref.set(ref, [])
@@ -58,13 +69,19 @@ fn connect_client(
 }
 
 @target(javascript)
-fn encode_client(msg: Message) -> BitArray {
-  transport.encode(transport.ClientMessage(payload: msg), serialiser: ser())
+fn encode_session(message: Message) -> BitArray {
+  transport.encode(
+    transport.SessionMessage(payload: message),
+    serialiser: ser(),
+  )
 }
 
 @target(javascript)
-fn encode_resync(seq: Int) -> BitArray {
-  transport.encode(transport.Resync(after_sequence: seq), serialiser: ser())
+fn encode_resync_session(_seq: Int) -> BitArray {
+  transport.encode(
+    transport.Resync(cursors: [transport.Session]),
+    serialiser: ser(),
+  )
 }
 
 // =============================================================================
@@ -73,15 +90,39 @@ fn encode_resync(seq: Int) -> BitArray {
 
 @target(javascript)
 pub fn js_server_start_returns_ok_test() {
-  let app_store =
-    store.new(test_fixtures.initial_model(), with: test_fixtures.update)
-  server.start(store: app_store, serialiser: ser())
+  server.new(
+    initial: test_fixtures.initial_model(),
+    serialiser: ser(),
+    wiring: store.wiring()
+      |> store.session(
+        extract: fn(message) { Ok(message) },
+        update: test_fixtures.update,
+        field_get: fn(model) { model },
+        field_set: fn(_, model) { model },
+      ),
+  )
+  |> server.start
   |> should.be_ok
 }
 
 // =============================================================================
 // CLIENT MANAGEMENT
 // =============================================================================
+
+@target(javascript)
+pub fn js_server_connect_sends_connected_frame_test() {
+  let srv = new_server()
+  let ref = test_ref.new([])
+  server.connect(srv, client_id: "c1", send: fn(bytes) {
+    test_ref.set(ref, [bytes, ..test_ref.get(ref)])
+  })
+  case list.reverse(test_ref.get(ref)) {
+    [bytes] ->
+      transport.decode(bytes, serialiser: ser())
+      |> should.equal(Ok(transport.Connected(client_id: "c1")))
+    _ -> should.fail()
+  }
+}
 
 @target(javascript)
 pub fn js_server_disconnect_nonexistent_test() {
@@ -92,98 +133,116 @@ pub fn js_server_disconnect_nonexistent_test() {
 }
 
 @target(javascript)
-pub fn js_server_disconnect_stops_broadcast_test() {
+pub fn js_server_disconnect_prevents_acknowledgement_test() {
+  let srv = new_server()
+  let get_c1 = connect_client(srv, "c1")
+  server.disconnect(srv, client_id: "c1")
+  server.incoming(srv, client_id: "c1", bytes: encode_session(Increment))
+  get_c1()
+  |> list.length
+  |> should.equal(0)
+}
+
+// =============================================================================
+// SESSION MESSAGE PROCESSING
+// =============================================================================
+
+@target(javascript)
+pub fn js_server_session_message_acknowledges_sender_test() {
+  let srv = new_server()
+  let get_c1 = connect_client(srv, "c1")
+  server.incoming(srv, client_id: "c1", bytes: encode_session(Increment))
+  let messages = get_c1()
+  messages
+  |> list.length
+  |> should.equal(1)
+  case messages {
+    [bytes, ..] ->
+      transport.decode(bytes, serialiser: ser())
+      |> should.equal(
+        Ok(transport.Acknowledge(target: transport.Session, sequence: 1)),
+      )
+    [] -> should.fail()
+  }
+}
+
+@target(javascript)
+pub fn js_server_session_message_does_not_broadcast_test() {
+  // Session messages are per-connection, c2 receives nothing when c1 sends.
   let srv = new_server()
   let get_c1 = connect_client(srv, "c1")
   let get_c2 = connect_client(srv, "c2")
-  server.disconnect(srv, client_id: "c2")
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
+  server.incoming(srv, client_id: "c1", bytes: encode_session(Increment))
+  let _ = get_c1()
   get_c2()
   |> list.length
   |> should.equal(0)
-  get_c1()
-  |> list.length
-  |> should.equal(1)
 }
 
-// =============================================================================
-// MESSAGE PROCESSING
-// =============================================================================
-
 @target(javascript)
-pub fn js_server_incoming_acknowledges_sender_test() {
+pub fn js_server_session_sequence_increments_test() {
   let srv = new_server()
   let get_c1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
-  let messages = get_c1()
-  messages
-  |> list.length
-  |> should.equal(1)
-  case messages {
-    [msg, ..] -> {
-      transport.decode(msg, serialiser: ser())
-      |> should.equal(Ok(transport.Acknowledge(sequence: 1)))
-    }
-    [] -> should.fail()
-  }
-}
-
-@target(javascript)
-pub fn js_server_incoming_broadcasts_to_others_test() {
-  let srv = new_server()
-  let _get_c1 = connect_client(srv, "c1")
-  let get_c2 = connect_client(srv, "c2")
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
-  let messages = get_c2()
-  messages
-  |> list.length
-  |> should.equal(1)
-  case messages {
-    [msg, ..] -> {
-      transport.decode(msg, serialiser: ser())
-      |> should.equal(
-        Ok(transport.ServerMessage(sequence: 1, payload: Increment)),
-      )
-    }
-    [] -> should.fail()
-  }
-}
-
-@target(javascript)
-pub fn js_server_incoming_does_not_broadcast_to_sender_test() {
-  let srv = new_server()
-  let get_c1 = connect_client(srv, "c1")
-  let _get_c2 = connect_client(srv, "c2")
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
-  let messages = get_c1()
-  messages
-  |> list.length
-  |> should.equal(1)
-  case messages {
-    [msg, ..] -> {
-      transport.decode(msg, serialiser: ser())
-      |> should.equal(Ok(transport.Acknowledge(sequence: 1)))
-    }
-    [] -> should.fail()
-  }
-}
-
-@target(javascript)
-pub fn js_server_sequence_increments_test() {
-  let srv = new_server()
-  let get_c1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
+  server.incoming(srv, client_id: "c1", bytes: encode_session(Increment))
+  server.incoming(srv, client_id: "c1", bytes: encode_session(Increment))
   let messages = get_c1()
   messages
   |> list.length
   |> should.equal(2)
   case messages {
-    [_ack1, ack2] -> {
+    [_ack1, ack2] ->
       transport.decode(ack2, serialiser: ser())
-      |> should.equal(Ok(transport.Acknowledge(sequence: 2)))
-    }
+      |> should.equal(
+        Ok(transport.Acknowledge(target: transport.Session, sequence: 2)),
+      )
     _ -> should.fail()
+  }
+}
+
+@target(javascript)
+pub fn js_server_session_sequence_is_per_connection_test() {
+  let srv = new_server()
+  let get_c1 = connect_client(srv, "c1")
+  let get_c2 = connect_client(srv, "c2")
+  server.incoming(srv, client_id: "c1", bytes: encode_session(Increment))
+  server.incoming(srv, client_id: "c2", bytes: encode_session(SetName("Alice")))
+  case get_c1() {
+    [bytes, ..] ->
+      transport.decode(bytes, serialiser: ser())
+      |> should.equal(
+        Ok(transport.Acknowledge(target: transport.Session, sequence: 1)),
+      )
+    [] -> should.fail()
+  }
+  case get_c2() {
+    [bytes, ..] ->
+      transport.decode(bytes, serialiser: ser())
+      |> should.equal(
+        Ok(transport.Acknowledge(target: transport.Session, sequence: 1)),
+      )
+    [] -> should.fail()
+  }
+}
+
+@target(javascript)
+pub fn js_server_session_state_is_per_connection_test() {
+  let srv = new_server()
+  let get_c1 = connect_client(srv, "c1")
+  let get_c2 = connect_client(srv, "c2")
+  server.incoming(srv, client_id: "c1", bytes: encode_session(Increment))
+  let _ = get_c1()
+  server.incoming(srv, client_id: "c2", bytes: encode_resync_session(0))
+  case get_c2() {
+    [bytes, ..] ->
+      transport.decode(bytes, serialiser: ser())
+      |> should.equal(
+        Ok(transport.Snapshot(
+          target: transport.Session,
+          sequence: 0,
+          state: test_fixtures.initial_model(),
+        )),
+      )
+    [] -> should.fail()
   }
 }
 
@@ -192,62 +251,46 @@ pub fn js_server_sequence_increments_test() {
 // =============================================================================
 
 @target(javascript)
-pub fn js_server_resync_after_messages_test() {
-  let srv = new_server()
-  let get_c1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", bytes: encode_client(SetName("Alice")))
-  let _ = get_c1()
-  server.incoming(srv, client_id: "c1", bytes: encode_resync(1))
-  let messages = get_c1()
-  case messages {
-    [msg, ..] -> {
-      let expected_model =
-        test_fixtures.Model(count: 0, name: "Alice", connected: False)
-      transport.decode(msg, serialiser: ser())
-      |> should.equal(
-        Ok(transport.Snapshot(sequence: 1, state: expected_model)),
-      )
-    }
-    [] -> should.fail()
-  }
-}
-
-@target(javascript)
-pub fn js_server_resync_from_new_client_test() {
-  let srv = new_server()
-  let get_c1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
-  let _ = get_c1()
-  let get_c2 = connect_client(srv, "c2")
-  server.incoming(srv, client_id: "c2", bytes: encode_resync(0))
-  let messages = get_c2()
-  case messages {
-    [msg, ..] -> {
-      let expected_model =
-        test_fixtures.Model(count: 1, name: "", connected: False)
-      transport.decode(msg, serialiser: ser())
-      |> should.equal(
-        Ok(transport.Snapshot(sequence: 1, state: expected_model)),
-      )
-    }
-    [] -> should.fail()
-  }
-}
-
-@target(javascript)
 pub fn js_server_resync_sends_snapshot_test() {
   let srv = new_server()
   let get_c1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", bytes: encode_resync(0))
+  server.incoming(srv, client_id: "c1", bytes: encode_resync_session(0))
   let messages = get_c1()
   messages
   |> list.length
   |> should.equal(1)
   case messages {
-    [msg, ..] -> {
-      transport.decode(msg, serialiser: ser())
+    [bytes, ..] ->
+      transport.decode(bytes, serialiser: ser())
       |> should.equal(
-        Ok(transport.Snapshot(sequence: 0, state: test_fixtures.initial_model())),
+        Ok(transport.Snapshot(
+          target: transport.Session,
+          sequence: 0,
+          state: test_fixtures.initial_model(),
+        )),
+      )
+    [] -> should.fail()
+  }
+}
+
+@target(javascript)
+pub fn js_server_resync_after_session_messages_test() {
+  let srv = new_server()
+  let get_c1 = connect_client(srv, "c1")
+  server.incoming(srv, client_id: "c1", bytes: encode_session(SetName("Alice")))
+  let _ = get_c1()
+  server.incoming(srv, client_id: "c1", bytes: encode_resync_session(1))
+  case get_c1() {
+    [bytes, ..] -> {
+      let expected_model =
+        test_fixtures.Model(count: 0, name: "Alice", connected: False)
+      transport.decode(bytes, serialiser: ser())
+      |> should.equal(
+        Ok(transport.Snapshot(
+          target: transport.Session,
+          sequence: 1,
+          state: expected_model,
+        )),
       )
     }
     [] -> should.fail()
@@ -255,63 +298,25 @@ pub fn js_server_resync_sends_snapshot_test() {
 }
 
 @target(javascript)
-/// Wrap the custom serialiser with a counter around `encode_model` so tests
-/// can assert how many times the server encodes a `Snapshot`.
-fn counting_serialiser(
-  counter: test_ref.Ref(Int),
-) -> transport.Serialiser(Model, Message) {
-  transport.custom_json(
-    encode_message: test_fixtures.encode_message,
-    decode_message: test_fixtures.message_decoder(),
-    encode_model: fn(model) {
-      test_ref.set(counter, test_ref.get(counter) + 1)
-      test_fixtures.encode_model(model)
-    },
-    decode_model: test_fixtures.model_decoder(),
-  )
-}
-
-@target(javascript)
-pub fn js_server_resync_reuses_cached_snapshot_test() {
-  let counter = test_ref.new(0)
-  let app_store =
-    store.new(test_fixtures.initial_model(), with: test_fixtures.update)
-  let assert Ok(srv) =
-    server.start(store: app_store, serialiser: counting_serialiser(counter))
-  let _ = connect_client(srv, "c1")
-
-  list.repeat(Nil, 100)
-  |> list.each(fn(_) {
-    server.incoming(srv, client_id: "c1", bytes: encode_resync(0))
-  })
-  test_ref.get(counter)
-  |> should.equal(1)
-}
-
-@target(javascript)
-pub fn js_server_client_message_invalidates_snapshot_cache_test() {
-  let counter = test_ref.new(0)
-  let app_store =
-    store.new(test_fixtures.initial_model(), with: test_fixtures.update)
-  let assert Ok(srv) =
-    server.start(store: app_store, serialiser: counting_serialiser(counter))
-  let _ = connect_client(srv, "c1")
-
-  list.repeat(Nil, 100)
-  |> list.each(fn(_) {
-    server.incoming(srv, client_id: "c1", bytes: encode_resync(0))
-  })
-  test_ref.get(counter)
-  |> should.equal(1)
-
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
-
-  list.repeat(Nil, 100)
-  |> list.each(fn(_) {
-    server.incoming(srv, client_id: "c1", bytes: encode_resync(0))
-  })
-  test_ref.get(counter)
-  |> should.equal(2)
+pub fn js_server_resync_reflects_own_session_only_test() {
+  let srv = new_server()
+  let get_c1 = connect_client(srv, "c1")
+  server.incoming(srv, client_id: "c1", bytes: encode_session(Increment))
+  let _ = get_c1()
+  let get_c2 = connect_client(srv, "c2")
+  server.incoming(srv, client_id: "c2", bytes: encode_resync_session(0))
+  case get_c2() {
+    [bytes, ..] ->
+      transport.decode(bytes, serialiser: ser())
+      |> should.equal(
+        Ok(transport.Snapshot(
+          target: transport.Session,
+          sequence: 0,
+          state: test_fixtures.initial_model(),
+        )),
+      )
+    [] -> should.fail()
+  }
 }
 
 // =============================================================================
@@ -322,7 +327,7 @@ pub fn js_server_client_message_invalidates_snapshot_cache_test() {
 pub fn js_server_no_hook_does_not_crash_test() {
   let srv = new_server()
   let get_c1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
+  server.incoming(srv, client_id: "c1", bytes: encode_session(Increment))
   get_c1()
   |> list.length
   |> should.equal(1)
@@ -350,14 +355,17 @@ pub fn js_server_incoming_invalid_json_test() {
 pub fn js_server_sequence_starts_at_zero_test() {
   let srv = new_server()
   let get_c1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", bytes: encode_resync(0))
+  server.incoming(srv, client_id: "c1", bytes: encode_resync_session(0))
   case get_c1() {
-    [msg, ..] -> {
-      transport.decode(msg, serialiser: ser())
+    [bytes, ..] ->
+      transport.decode(bytes, serialiser: ser())
       |> should.equal(
-        Ok(transport.Snapshot(sequence: 0, state: test_fixtures.initial_model())),
+        Ok(transport.Snapshot(
+          target: transport.Session,
+          sequence: 0,
+          state: test_fixtures.initial_model(),
+        )),
       )
-    }
     [] -> should.fail()
   }
 }
@@ -380,21 +388,6 @@ pub fn js_server_generate_client_id_returns_32_char_hex_test() {
 }
 
 // =============================================================================
-// AUTO LOG MESSAGES
-// =============================================================================
-
-@target(javascript)
-pub fn js_server_auto_log_messages_processes_normally_test() {
-  let srv = new_server()
-  let _srv2 = server.auto_log_messages(srv, level: logging.Info)
-  let get_c1 = connect_client(srv, "c1")
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
-  get_c1()
-  |> list.length
-  |> should.equal(1)
-}
-
-// =============================================================================
 // STOP
 // =============================================================================
 
@@ -403,8 +396,7 @@ pub fn js_server_stop_silently_drops_further_calls_test() {
   let srv = new_server()
   let get_c1 = connect_client(srv, "c1")
   server.stop(srv)
-  // Subsequent calls do not crash and produce no output
-  server.incoming(srv, client_id: "c1", bytes: encode_client(Increment))
+  server.incoming(srv, client_id: "c1", bytes: encode_session(Increment))
   server.disconnect(srv, client_id: "c1")
   get_c1()
   |> list.length

@@ -1,14 +1,18 @@
-//// Event handlers attach browser events to DOM elements using CSS selectors.
-//// Each handler produces a message that gets sent to the
-//// [`Store`](./store.html#Store).
+//// Event handlers attach browser events to DOM elements via CSS selectors.
+//// Each handler produces a message that flows into the
+//// [`Store`](./store.html#Store), so anything the user does on the page
+//// becomes a tidy little `Message` value somewhere downstream.
 ////
-//// Whenever an event is fired, instead of sending a message, it fires a
-//// handler instead to be able to deal with events that also emit some kind of
-//// value.
+//// The public API is two type-safe binders, [`on()`](#on) and
+//// [`on_decoded()`](#on_decoded), paired with one constant per DOM event
+//// (`event.click`, `event.mouse_down`, `event.key_down`, etc.). The
+//// constant fixes the payload type, so the compiler enforces that the
+//// handler matches.
 ////
-//// Handlers target elements using standard CSS selector strings and use
-//// event delegation for dynamic elements (e.g., `on_click` with `data-msg`
-//// attributes). They're set up once and persist until page unload.
+//// Selectors are standard CSS. Lily uses event delegation under the hood,
+//// so patterns like `on(event.click, selector: "#app")` paired with
+//// `data-msg` attributes keep working as you patch the DOM. Handlers are
+//// set up once and persist until page unload.
 ////
 //// ```gleam
 //// import lily/client
@@ -19,22 +23,50 @@
 //// pub fn main() {
 ////   let runtime =
 ////     store.new(Model(count: 0), with: update)
-////     |> client.start
+////     |> client.start(store.wiring())
 ////
 ////   runtime
-////   |> component.mount(selector: "#app", to_html: element.to_string, view: app)
-////   |> event.on_click(selector: "#app", decoder: parse_click)
-////   |> event.on_input(selector: "#search", handler: fn(text) { Search(text) })
-////   |> event.on_key_down(selector: "document", handler: fn(ke) { KeyPressed(ke.key) })
+////   |> component.mount(
+////     selector: "#app",
+////     to_html: element.to_string,
+////     to_slot: fn() { element.element("lily-slot", [], []) },
+////     view: app,
+////   )
+////   |> event.on_decoded(
+////     event: event.click,
+////     selector: "#app",
+////     decoder: parse_click,
+////   )
+////   |> event.on(event: event.input, selector: "#search", handler: Search)
+////   |> event.on(
+////     event: event.key_down,
+////     selector: "document",
+////     handler: fn(ke) { KeyPressed(ke.key) },
+////   )
 //// }
 ////
-//// fn parse_click(msg_name: String) -> Result(Message, Nil) {
-////   case msg_name {
+//// fn parse_click(message_name: String) -> Result(Message, Nil) {
+////   case message_name {
 ////     "increment" -> Ok(Increment)
 ////     "decrement" -> Ok(Decrement)
 ////     _ -> Error(Nil)
 ////   }
 //// }
+//// ```
+////
+//// For events that need debouncing, throttling, or `preventDefault`, build
+//// an [`EventOptions`](#EventOptions) with [`options()`](#options) and the
+//// builder functions, then use [`on_with_options()`](#on_with_options)
+//// or [`on_decoded_with_options()`](#on_decoded_with_options).
+////
+//// ```gleam
+//// runtime
+//// |> event.on_with_options(
+////   event: event.input,
+////   selector: "#search",
+////   options: event.options() |> event.debounce_milliseconds(200),
+////   handler: Search,
+//// )
 //// ```
 ////
 //// All event handlers are JavaScript-only (`@target(javascript)`).
@@ -54,56 +86,47 @@ import lily/client.{type Runtime}
 // =============================================================================
 
 @target(javascript)
-/// Options for event handlers created with `*_with` variants. Controls
-/// debouncing, throttling, once-only firing, propagation, and default action.
-///
-/// Build with [`default_options`](#default_options) and update fields:
-///
-/// ```gleam
-/// event.default_options()
-/// |> fn(options) { event.EventOptions(..options, debounce_ms: option.Some(200)) }
-/// ```
-pub type EventOptions {
-  EventOptions(
-    debounce_ms: Option(Int),
-    stop_propagation: Bool,
-    prevent_default: Bool,
-    throttle_ms: Option(Int),
-    once: Bool,
-  )
-}
-
-@target(javascript)
 /// Data extracted from the DOM element that matched the event handler's
 /// selector. `dataset` contains all `data-*` attributes as name/value pairs
-/// using their original kebab-case names (e.g., `data-card-id` → `"card-id"`).
-///
-/// ```gleam
-/// event.on_mouse_enter(runtime, selector: ".card", handler: fn(el) {
-///   case list.key_find(el.dataset, "id") {
-///     Ok(id) -> CardHovered(id)
-///     Error(Nil) -> NoOp
-///   }
-/// })
-/// ```
+/// using their original kebab-case names (e.g., `data-card-id` →
+/// `"card-id"`).
 pub type ElementData {
   ElementData(dataset: List(#(String, String)))
 }
 
 @target(javascript)
-/// Data extracted from a keyboard event. `key` is the key name (e.g.,
-/// `"Enter"`, `"ArrowUp"`, `"a"`). The modifier flags match the corresponding
-/// browser event properties.
+/// A typed handle for a DOM event. The `payload` parameter is fixed by
+/// each constant (e.g. [`mouse_down`](#mouse_down) is `Event(#(Int, Int,
+/// ElementData))`), so the handler signature is checked at compile time.
+/// Pass these constants to [`on()`](#on) and friends.
+pub opaque type Event(payload) {
+  Event(name: String, event_type: EventType)
+}
+
+@target(javascript)
+/// Optional modifiers for an event handler: debounce, throttle, fire-once,
+/// stop-propagation, prevent-default. Build with [`options()`](#options)
+/// and the dedicated builder functions.
 ///
 /// ```gleam
-/// event.on_key_down(runtime, selector: "#search", handler: fn(ke) {
-///   case ke.key, ke.ctrl {
-///     "k", True -> OpenSearch
-///     "Escape", _ -> CloseSearch
-///     _, _ -> NoOp
-///   }
-/// })
+/// event.options()
+/// |> event.debounce_milliseconds(200)
+/// |> event.stop_propagation
 /// ```
+pub opaque type EventOptions {
+  EventOptions(
+    debounce_milliseconds: Option(Int),
+    throttle_milliseconds: Option(Int),
+    once: Bool,
+    stop_propagation: Bool,
+    prevent_default: Bool,
+  )
+}
+
+@target(javascript)
+/// Data extracted from a keyboard event. `key` is the key name (e.g.,
+/// `"Enter"`, `"ArrowUp"`, `"a"`). The modifier flags match the
+/// corresponding browser event properties.
 pub type KeyEvent {
   KeyEvent(key: String, ctrl: Bool, shift: Bool, alt: Bool, meta: Bool)
 }
@@ -113,12 +136,172 @@ pub type KeyEvent {
 // =============================================================================
 
 @target(javascript)
-/// Returns an `EventOptions` with all modifiers disabled: no debounce,
-/// no throttle, fires every time, does not stop propagation or prevent default.
-pub fn default_options() -> EventOptions {
+/// Set the debounce delay in milliseconds. Multiple events within the
+/// window collapse to a single dispatch fired after the gap.
+pub fn debounce_milliseconds(options: EventOptions, value: Int) -> EventOptions {
+  EventOptions(..options, debounce_milliseconds: option.Some(value))
+}
+
+@target(javascript)
+/// Programmatically move focus to the first element matching `selector`.
+/// Runs after the next paint so the call is safe from a `client.on_message`
+/// hook whose dispatch may have just rendered the target element. No-op if
+/// the selector matches nothing.
+///
+/// ```gleam
+/// client.on_message(runtime, fn(message, _model) {
+///   case message {
+///     OpenDialog -> event.focus(runtime, "#dialog-cancel")
+///     CloseDialog -> event.focus(runtime, "#dialog-trigger")
+///     _ -> Nil
+///   }
+/// })
+/// ```
+pub fn focus(_runtime: Runtime(model, message), selector: String) -> Nil {
+  setup_focus(selector)
+}
+
+@target(javascript)
+/// Confine Tab and Shift+Tab cycling to focusable descendants of the
+/// element matching `within`. Focusable elements are re-enumerated on
+/// every Tab press so dynamic content inside the container is handled.
+/// The `release_on` predicate runs on every keydown inside the document
+/// while the trap is active; returning `True` releases the trap and
+/// dispatches the message produced by `on_exit`. Only one trap can be
+/// active at a time, activating a new one silently replaces the previous
+/// trap (no `on_exit`).
+///
+/// Pair with [`focus`](#focus) to seed initial focus inside the trapped
+/// region, and [`release_focus_trap`](#release_focus_trap) for imperative
+/// release (e.g. clicking Cancel rather than pressing the exit key).
+pub fn focus_trap(
+  runtime: Runtime(model, message),
+  within within: String,
+  release_on release_on: fn(String) -> Bool,
+  on_exit on_exit: fn() -> message,
+) -> Nil {
+  setup_focus_trap(within, release_on, fn() {
+    client.send_message(runtime, on_exit())
+  })
+}
+
+@target(javascript)
+/// Bind an event handler that always dispatches a message. The `event`
+/// argument fixes the payload type, so the handler's signature is
+/// checked at compile time.
+///
+/// ```gleam
+/// runtime
+/// |> event.on(event: event.input, selector: "#search", handler: Search)
+/// |> event.on(
+///   event: event.mouse_down,
+///   selector: ".card",
+///   handler: fn(payload) {
+///     let #(x, y, element) = payload
+///     Pressed(x, y, element)
+///   },
+/// )
+/// ```
+pub fn on(
+  runtime: Runtime(model, message),
+  event event: Event(payload),
+  selector selector: String,
+  handler handler: fn(payload) -> message,
+) -> Runtime(model, message) {
+  on_with_options(runtime, event, selector, options(), handler)
+}
+
+@target(javascript)
+/// Bind an event handler whose decoder may decline to dispatch by
+/// returning `Error(Nil)`. Useful for [`click`](#click) (the `data-msg`
+/// attribute may not match a known message) and form events (validation
+/// failure should skip dispatching).
+///
+/// ```gleam
+/// runtime
+/// |> event.on_decoded(
+///   event: event.click,
+///   selector: "#app",
+///   decoder: parse_click,
+/// )
+/// |> event.on_decoded(
+///   event: event.form_submit,
+///   selector: "#todo-form",
+///   decoder: submit_todo,
+/// )
+/// ```
+pub fn on_decoded(
+  runtime: Runtime(model, message),
+  event event: Event(payload),
+  selector selector: String,
+  decoder decoder: fn(payload) -> Result(message, Nil),
+) -> Runtime(model, message) {
+  on_decoded_with_options(runtime, event, selector, options(), decoder)
+}
+
+@target(javascript)
+/// Like [`on_decoded`](#on_decoded) with an extra
+/// [`EventOptions`](#EventOptions) parameter. See [`options()`](#options).
+pub fn on_decoded_with_options(
+  runtime: Runtime(model, message),
+  event event: Event(payload),
+  selector selector: String,
+  options options: EventOptions,
+  decoder decoder: fn(payload) -> Result(message, Nil),
+) -> Runtime(model, message) {
+  let dispatch = fn(payload: payload) {
+    case decoder(payload) {
+      Ok(message) -> client.send_message(runtime, message)
+      Error(Nil) -> Nil
+    }
+  }
+  register_event(event, selector, options, dispatch)
+  runtime
+}
+
+@target(javascript)
+/// Like [`on`](#on) with an extra [`EventOptions`](#EventOptions)
+/// parameter. See [`options()`](#options).
+///
+/// ```gleam
+/// runtime
+/// |> event.on_with_options(
+///   event: event.input,
+///   selector: "#search",
+///   options: event.options() |> event.debounce_milliseconds(200),
+///   handler: Search,
+/// )
+/// ```
+pub fn on_with_options(
+  runtime: Runtime(model, message),
+  event event: Event(payload),
+  selector selector: String,
+  options options: EventOptions,
+  handler handler: fn(payload) -> message,
+) -> Runtime(model, message) {
+  let dispatch = fn(payload: payload) {
+    client.send_message(runtime, handler(payload))
+  }
+  register_event(event, selector, options, dispatch)
+  runtime
+}
+
+@target(javascript)
+/// Set the handler to fire only the first time. After that, all matching
+/// events are ignored.
+pub fn once(options: EventOptions) -> EventOptions {
+  EventOptions(..options, once: True)
+}
+
+@target(javascript)
+/// Build an [`EventOptions`](#EventOptions) with all modifiers off:
+/// no debounce, no throttle, fires every time, does not stop propagation
+/// or prevent default. Compose with the builder functions to enable
+/// modifiers.
+pub fn options() -> EventOptions {
   EventOptions(
-    debounce_ms: option.None,
-    throttle_ms: option.None,
+    debounce_milliseconds: option.None,
+    throttle_milliseconds: option.None,
     once: False,
     stop_propagation: False,
     prevent_default: False,
@@ -126,814 +309,255 @@ pub fn default_options() -> EventOptions {
 }
 
 @target(javascript)
-/// Fires when an element loses focus. The handler receives [`ElementData`](#ElementData)
-/// for the element that lost focus, giving access to its `data-*` attributes.
-pub fn on_blur(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(ElementData) -> message,
-) -> Runtime(model, message) {
-  setup_element_event(selector, "blur", ElementData, fn(el) {
-    client.send_message(runtime, handler(el))
-  })
-  runtime
+/// Set `event.preventDefault()` to fire on every matching event,
+/// regardless of debounce or throttle. Use to suppress browser defaults
+/// (e.g. drop-target behaviour, native form submission).
+pub fn prevent_default(options: EventOptions) -> EventOptions {
+  EventOptions(..options, prevent_default: True)
 }
 
 @target(javascript)
-/// Fires when an input value changes (after focus is lost). For real-time
-/// updates, use `on_input` instead.
-pub fn on_change(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(String) -> message,
-) -> Runtime(model, message) {
-  setup_value_event_with_options(
-    selector,
-    "change",
-    #(-1, -1, False, False, False),
-    fn(value) { client.send_message(runtime, handler(value)) },
-  )
-  runtime
+/// Release the active focus trap, if any. No-op when no trap is active.
+/// Does not dispatch the trap's `on_exit` message, call this when the
+/// caller is already running its own close logic and just needs the trap
+/// unhooked (e.g. a click on a Cancel button that dispatches `CloseDialog`
+/// and restores focus separately).
+pub fn release_focus_trap(_runtime: Runtime(model, message)) -> Nil {
+  release_focus_trap_ffi()
 }
 
 @target(javascript)
-/// Fires on click events using event delegation with `data-msg` attributes.
-/// The decoder receives the `data-msg` attribute value and should return the
-/// corresponding message. Elements must have a `data-msg` attribute to trigger
-/// this handler.
-pub fn on_click(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  decoder decoder: fn(String) -> Result(message, Nil),
-) -> Runtime(model, message) {
-  setup_click_event_with_options(
-    selector,
-    #(-1, -1, False, False, False),
-    fn(message_name) {
-      case decoder(message_name) {
-        Ok(message) -> client.send_message(runtime, message)
-        Error(Nil) -> Nil
-      }
-    },
-  )
-  runtime
+/// Set `event.stopPropagation()` to fire before the inner handler. Useful
+/// for delegated events that should not bubble further up.
+pub fn stop_propagation(options: EventOptions) -> EventOptions {
+  EventOptions(..options, stop_propagation: True)
 }
 
 @target(javascript)
-/// Like `on_click`, but with event modifiers. See [`EventOptions`](#EventOptions)
-/// and [`default_options`](#default_options).
-pub fn on_click_with(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  options options: EventOptions,
-  decoder decoder: fn(String) -> Result(message, Nil),
-) -> Runtime(model, message) {
-  setup_click_event_with_options(
-    selector,
-    unpack_options(options),
-    fn(message_name) {
-      case decoder(message_name) {
-        Ok(message) -> client.send_message(runtime, message)
-        Error(Nil) -> Nil
-      }
-    },
-  )
-  runtime
+/// Set the throttle interval in milliseconds. Events fire at most once
+/// per interval; subsequent events within the window are dropped.
+pub fn throttle_milliseconds(options: EventOptions, value: Int) -> EventOptions {
+  EventOptions(..options, throttle_milliseconds: option.Some(value))
 }
 
-@target(javascript)
-/// Fires when the context menu is opened (usually right-click). Provides mouse
-/// coordinates (x, y) relative to the viewport and [`ElementData`](#ElementData)
-/// for the matched element.
-pub fn on_context_menu(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(Int, Int, ElementData) -> message,
-) -> Runtime(model, message) {
-  setup_coordinate_element_event_with_options(
-    selector,
-    "contextmenu",
-    #(-1, -1, False, False, False),
-    ElementData,
-    fn(x, y, el) { client.send_message(runtime, handler(x, y, el)) },
-  )
-  runtime
-}
+// =============================================================================
+// PUBLIC EVENTS
+// =============================================================================
 
 @target(javascript)
-/// Fires when text is copied to the clipboard.
-pub fn on_copy(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn() -> message,
-) -> Runtime(model, message) {
-  setup_simple_event_with_options(
-    selector,
-    "copy",
-    #(-1, -1, False, False, False),
-    fn() { client.send_message(runtime, handler()) },
-  )
-  runtime
-}
+/// `blur` event, fires when an element loses focus.
+pub const blur: Event(ElementData) = Event("blur", TypeElement)
 
 @target(javascript)
-/// Fires when text is cut to the clipboard.
-pub fn on_cut(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn() -> message,
-) -> Runtime(model, message) {
-  setup_simple_event_with_options(
-    selector,
-    "cut",
-    #(-1, -1, False, False, False),
-    fn() { client.send_message(runtime, handler()) },
-  )
-  runtime
-}
+/// `change` event, fires when an input value is committed (after blur).
+/// For real-time updates, use [`input`](#input).
+pub const change: Event(String) = Event("change", TypeValue)
 
 @target(javascript)
-/// Fires on double-click events. The handler receives [`ElementData`](#ElementData)
-/// for the matched element, giving access to its `data-*` attributes to
-/// identify which item was double-clicked.
-pub fn on_double_click(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(ElementData) -> message,
-) -> Runtime(model, message) {
-  setup_element_event(selector, "dblclick", ElementData, fn(el) {
-    client.send_message(runtime, handler(el))
-  })
-  runtime
-}
+/// `click` event, uses delegation against the `data-msg` attribute. The
+/// payload is the matched element's `data-msg` value. Pair with
+/// [`on_decoded()`](#on_decoded) so unknown messages can be skipped via
+/// `Error(Nil)`.
+pub const click: Event(String) = Event("click", TypeClick)
 
 @target(javascript)
-/// Fires repeatedly while an element is being dragged. Provides current mouse
-/// coordinates (x, y). Note: This fires many times during a drag operation,
-/// consider using `on_drag_with` with a throttle option.
-pub fn on_drag(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(Int, Int) -> message,
-) -> Runtime(model, message) {
-  setup_coordinate_event_with_options(
-    selector,
-    "drag",
-    #(-1, -1, False, False, False),
-    fn(x, y) { client.send_message(runtime, handler(x, y)) },
-  )
-  runtime
-}
+/// `contextmenu` event, fires on right-click. Payload is `(x, y,
+/// element)` relative to the viewport.
+pub const context_menu: Event(#(Int, Int, ElementData)) = Event(
+  "contextmenu",
+  TypeCoordinatesElement,
+)
 
 @target(javascript)
-/// Fires once when a drag operation ends (mouse released). The handler receives
-/// [`ElementData`](#ElementData) for the dragged element.
-pub fn on_drag_end(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(ElementData) -> message,
-) -> Runtime(model, message) {
-  setup_element_event(selector, "dragend", ElementData, fn(el) {
-    client.send_message(runtime, handler(el))
-  })
-  runtime
-}
+/// `copy` event, fires when text is copied to the clipboard.
+pub const copy: Event(Nil) = Event("copy", TypeEmpty)
 
 @target(javascript)
-/// Fires repeatedly when a dragged element is over a valid drop target.
-/// Provides mouse coordinates (x, y) and [`ElementData`](#ElementData) for
-/// the drop target element. Note: call with `prevent_default: True` in options
-/// to enable dropping on the target.
-pub fn on_drag_over(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(Int, Int, ElementData) -> message,
-) -> Runtime(model, message) {
-  setup_coordinate_element_event_with_options(
-    selector,
-    "dragover",
-    #(-1, -1, False, False, False),
-    ElementData,
-    fn(x, y, el) { client.send_message(runtime, handler(x, y, el)) },
-  )
-  runtime
-}
+/// `cut` event, fires when text is cut to the clipboard.
+pub const cut: Event(Nil) = Event("cut", TypeEmpty)
 
 @target(javascript)
-/// Like `on_drag_over`, but with event modifiers. See [`EventOptions`](#EventOptions).
-/// Set `prevent_default: True` to allow dropping on the target element.
-pub fn on_drag_over_with(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  options options: EventOptions,
-  handler handler: fn(Int, Int, ElementData) -> message,
-) -> Runtime(model, message) {
-  setup_coordinate_element_event_with_options(
-    selector,
-    "dragover",
-    unpack_options(options),
-    ElementData,
-    fn(x, y, el) { client.send_message(runtime, handler(x, y, el)) },
-  )
-  runtime
-}
+/// `dblclick` event, fires on a double click.
+pub const double_click: Event(ElementData) = Event("dblclick", TypeElement)
 
 @target(javascript)
-/// Fires once when a drag operation starts. Provides initial mouse coordinates
-/// (x, y) and [`ElementData`](#ElementData) for the element being dragged.
-pub fn on_drag_start(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(Int, Int, ElementData) -> message,
-) -> Runtime(model, message) {
-  setup_coordinate_element_event_with_options(
-    selector,
-    "dragstart",
-    #(-1, -1, False, False, False),
-    ElementData,
-    fn(x, y, el) { client.send_message(runtime, handler(x, y, el)) },
-  )
-  runtime
-}
+/// `drag` event, fires repeatedly while an element is being dragged.
+/// Consider pairing with [`throttle_milliseconds`](#throttle_milliseconds).
+pub const drag: Event(#(Int, Int)) = Event("drag", TypeCoordinates)
 
 @target(javascript)
-/// Like `on_drag`, but with event modifiers. See [`EventOptions`](#EventOptions).
-pub fn on_drag_with(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  options options: EventOptions,
-  handler handler: fn(Int, Int) -> message,
-) -> Runtime(model, message) {
-  setup_coordinate_event_with_options(
-    selector,
-    "drag",
-    unpack_options(options),
-    fn(x, y) { client.send_message(runtime, handler(x, y)) },
-  )
-  runtime
-}
+/// `dragend` event, fires once when a drag operation ends.
+pub const drag_end: Event(ElementData) = Event("dragend", TypeElement)
 
 @target(javascript)
-/// Fires when a dragged element is dropped on a valid drop target. Provides
-/// drop coordinates (x, y) and [`ElementData`](#ElementData) for the drop
-/// target element.
-pub fn on_drop(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(Int, Int, ElementData) -> message,
-) -> Runtime(model, message) {
-  setup_coordinate_element_event_with_options(
-    selector,
-    "drop",
-    #(-1, -1, False, False, False),
-    ElementData,
-    fn(x, y, el) { client.send_message(runtime, handler(x, y, el)) },
-  )
-  runtime
-}
+/// `dragover` event, fires repeatedly while a dragged element is over a
+/// valid drop target. Pair with `prevent_default(options)` to enable
+/// dropping.
+pub const drag_over: Event(#(Int, Int, ElementData)) = Event(
+  "dragover",
+  TypeCoordinatesElement,
+)
 
 @target(javascript)
-/// Fires when an element receives focus. The handler receives
-/// [`ElementData`](#ElementData) for the focused element.
-pub fn on_focus(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(ElementData) -> message,
-) -> Runtime(model, message) {
-  setup_element_event(selector, "focus", ElementData, fn(el) {
-    client.send_message(runtime, handler(el))
-  })
-  runtime
-}
+/// `dragstart` event, fires once when a drag operation starts.
+pub const drag_start: Event(#(Int, Int, ElementData)) = Event(
+  "dragstart",
+  TypeCoordinatesElement,
+)
 
 @target(javascript)
-/// Fires whenever any field in a form changes, passing the current field
-/// values as a list of name/value pairs. The handler returns
-/// `Result(message, Nil)` — return `Error(Nil)` to skip dispatching.
-///
-/// This is the uncontrolled-form counterpart to `on_input`: rather than
-/// tracking each field individually, you read all field values at once on
-/// each change.
-///
-/// ```gleam
-/// use fields <- event.on_form_change(runtime, selector: "#my-form")
-/// formal.decoding(my_decoder)
-/// |> formal.add_values(fields)
-/// |> formal.run
-/// |> result.map(FormChanged)
-/// ```
-pub fn on_form_change(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(List(#(String, String))) -> Result(message, Nil),
-) -> Runtime(model, message) {
-  setup_form_change_event(selector, fn(fields) {
-    case handler(fields) {
-      Ok(message) -> client.send_message(runtime, message)
-      Error(Nil) -> Nil
-    }
-  })
-  runtime
-}
+/// `drop` event, fires when a dragged element is dropped on a valid
+/// target.
+pub const drop: Event(#(Int, Int, ElementData)) = Event(
+  "drop",
+  TypeCoordinatesElement,
+)
 
 @target(javascript)
-/// Fires when a form is submitted, passing the submitted field values as a
-/// list of name/value pairs (from the form's `FormData`). Prevents the
-/// browser's default form submission, and resets the form after the handler
-/// runs so the inputs clear automatically.
-///
-/// The handler returns `Result(message, Nil)` — return `Error(Nil)` to skip
-/// dispatching a message (e.g. when a required field is empty).
-///
-/// Use this for uncontrolled forms — where the DOM is the source of truth
-/// for draft input — so you can avoid plumbing draft state through the
-/// model. The list shape matches the `formal` hex package, which can decode
-/// it into typed structs:
-///
-/// ```gleam
-/// use fields <- event.on_form_submit(runtime, selector: "#my-form")
-/// formal.decoding(my_decoder)
-/// |> formal.add_values(fields)
-/// |> formal.run
-/// |> result.map(Submit)
-/// ```
-pub fn on_form_submit(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(List(#(String, String))) -> Result(message, Nil),
-) -> Runtime(model, message) {
-  setup_submit_form_event(selector, fn(fields) {
-    case handler(fields) {
-      Ok(message) -> client.send_message(runtime, message)
-      Error(Nil) -> Nil
-    }
-  })
-  runtime
-}
+/// `focus` event, fires when an element receives focus. Named
+/// `focus_event` to avoid collision with the [`focus()`](#focus) function.
+pub const focus_event: Event(ElementData) = Event("focus", TypeElement)
 
 @target(javascript)
-/// Fires immediately when an input value changes. For delayed updates (after
-/// blur), use `on_change` instead.
-pub fn on_input(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(String) -> message,
-) -> Runtime(model, message) {
-  setup_value_event_with_options(
-    selector,
-    "input",
-    #(-1, -1, False, False, False),
-    fn(value) { client.send_message(runtime, handler(value)) },
-  )
-  runtime
-}
+/// `input` on a form, payload is the current `FormData` as a list of
+/// name/value pairs. The uncontrolled-form counterpart of [`input`](#input).
+/// Pair with [`on_decoded()`](#on_decoded) to skip dispatch on validation
+/// failure.
+pub const form_change: Event(List(#(String, String))) = Event(
+  "input",
+  TypeFormChange,
+)
 
 @target(javascript)
-/// Like `on_input`, but with event modifiers. See [`EventOptions`](#EventOptions).
-/// Particularly useful with `debounce_ms` to avoid dispatching on every keystroke.
-pub fn on_input_with(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  options options: EventOptions,
-  handler handler: fn(String) -> message,
-) -> Runtime(model, message) {
-  setup_value_event_with_options(
-    selector,
-    "input",
-    unpack_options(options),
-    fn(value) { client.send_message(runtime, handler(value)) },
-  )
-  runtime
-}
+/// `submit` on a form, payload is the submitted `FormData` as a list of
+/// name/value pairs. Prevents the browser's default form submission and
+/// resets the form after the handler runs. Pair with
+/// [`on_decoded()`](#on_decoded) to skip dispatch on validation failure.
+pub const form_submit: Event(List(#(String, String))) = Event(
+  "submit",
+  TypeFormSubmit,
+)
 
 @target(javascript)
-/// Fires when a key is pressed down. Receives a [`KeyEvent`](#KeyEvent) with
-/// the key name and modifier flags (ctrl, shift, alt, meta).
-pub fn on_key_down(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(KeyEvent) -> message,
-) -> Runtime(model, message) {
-  setup_key_full_event_with_options(
-    selector,
-    "keydown",
-    #(-1, -1, False, False, False),
-    KeyEvent,
-    fn(ke) { client.send_message(runtime, handler(ke)) },
-  )
-  runtime
-}
+/// `input` event, fires immediately when an input value changes. Payload
+/// is the current value. For delayed updates use [`change`](#change).
+pub const input: Event(String) = Event("input", TypeValue)
 
 @target(javascript)
-/// Like `on_key_down`, but with event modifiers. See [`EventOptions`](#EventOptions).
-pub fn on_key_down_with(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  options options: EventOptions,
-  handler handler: fn(KeyEvent) -> message,
-) -> Runtime(model, message) {
-  setup_key_full_event_with_options(
-    selector,
-    "keydown",
-    unpack_options(options),
-    KeyEvent,
-    fn(ke) { client.send_message(runtime, handler(ke)) },
-  )
-  runtime
-}
+/// `keydown` event, fires when a key is pressed.
+pub const key_down: Event(KeyEvent) = Event("keydown", TypeKey)
 
 @target(javascript)
-/// Fires when a key is released. Receives a [`KeyEvent`](#KeyEvent) with
-/// the key name and modifier flags (ctrl, shift, alt, meta).
-pub fn on_key_up(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(KeyEvent) -> message,
-) -> Runtime(model, message) {
-  setup_key_full_event_with_options(
-    selector,
-    "keyup",
-    #(-1, -1, False, False, False),
-    KeyEvent,
-    fn(ke) { client.send_message(runtime, handler(ke)) },
-  )
-  runtime
-}
+/// `keyup` event, fires when a key is released.
+pub const key_up: Event(KeyEvent) = Event("keyup", TypeKey)
 
 @target(javascript)
-/// Fires when a mouse button is pressed down. Provides mouse coordinates (x, y)
-/// relative to the viewport and [`ElementData`](#ElementData) for the matched
-/// element.
-pub fn on_mouse_down(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(Int, Int, ElementData) -> message,
-) -> Runtime(model, message) {
-  setup_coordinate_element_event_with_options(
-    selector,
-    "mousedown",
-    #(-1, -1, False, False, False),
-    ElementData,
-    fn(x, y, el) { client.send_message(runtime, handler(x, y, el)) },
-  )
-  runtime
-}
+/// `mousedown` event, fires when a mouse button is pressed. Payload is
+/// `(x, y, element)`.
+pub const mouse_down: Event(#(Int, Int, ElementData)) = Event(
+  "mousedown",
+  TypeCoordinatesElement,
+)
 
 @target(javascript)
-/// Fires when the mouse enters an element's boundary. Does not bubble.
-/// The handler receives [`ElementData`](#ElementData) for the element being
-/// entered, giving access to its `data-*` attributes to identify which item
-/// is being hovered.
-pub fn on_mouse_enter(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(ElementData) -> message,
-) -> Runtime(model, message) {
-  setup_element_event(selector, "mouseenter", ElementData, fn(el) {
-    client.send_message(runtime, handler(el))
-  })
-  runtime
-}
+/// `mouseenter` event, fires when the mouse enters an element's
+/// boundary. Mapped to `mouseover` with a relatedTarget guard so
+/// delegation works.
+pub const mouse_enter: Event(ElementData) = Event("mouseenter", TypeElement)
 
 @target(javascript)
-/// Fires when the mouse leaves an element's boundary. Does not bubble.
-/// The handler receives [`ElementData`](#ElementData) for the element being
-/// left.
-pub fn on_mouse_leave(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(ElementData) -> message,
-) -> Runtime(model, message) {
-  setup_element_event(selector, "mouseleave", ElementData, fn(el) {
-    client.send_message(runtime, handler(el))
-  })
-  runtime
-}
+/// `mouseleave` event, fires when the mouse leaves an element's
+/// boundary. Mapped to `mouseout` with a relatedTarget guard so
+/// delegation works.
+pub const mouse_leave: Event(ElementData) = Event("mouseleave", TypeElement)
 
 @target(javascript)
-/// Fires repeatedly while the mouse moves over an element. Provides current
-/// mouse coordinates (x, y). Consider using `on_mouse_move_with` with a
-/// throttle option for expensive operations.
-pub fn on_mouse_move(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(Int, Int) -> message,
-) -> Runtime(model, message) {
-  setup_coordinate_event_with_options(
-    selector,
-    "mousemove",
-    #(-1, -1, False, False, False),
-    fn(x, y) { client.send_message(runtime, handler(x, y)) },
-  )
-  runtime
-}
+/// `mousemove` event, fires repeatedly while the mouse moves. Consider
+/// pairing with [`throttle_milliseconds`](#throttle_milliseconds).
+pub const mouse_move: Event(#(Int, Int)) = Event("mousemove", TypeCoordinates)
 
 @target(javascript)
-/// Like `on_mouse_move`, but with event modifiers. See [`EventOptions`](#EventOptions).
-pub fn on_mouse_move_with(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  options options: EventOptions,
-  handler handler: fn(Int, Int) -> message,
-) -> Runtime(model, message) {
-  setup_coordinate_event_with_options(
-    selector,
-    "mousemove",
-    unpack_options(options),
-    fn(x, y) { client.send_message(runtime, handler(x, y)) },
-  )
-  runtime
-}
+/// `mouseup` event, fires when a mouse button is released.
+pub const mouse_up: Event(#(Int, Int, ElementData)) = Event(
+  "mouseup",
+  TypeCoordinatesElement,
+)
 
 @target(javascript)
-/// Fires when a mouse button is released. Provides mouse coordinates (x, y)
-/// relative to the viewport and [`ElementData`](#ElementData) for the matched
-/// element.
-pub fn on_mouse_up(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(Int, Int, ElementData) -> message,
-) -> Runtime(model, message) {
-  setup_coordinate_element_event_with_options(
-    selector,
-    "mouseup",
-    #(-1, -1, False, False, False),
-    ElementData,
-    fn(x, y, el) { client.send_message(runtime, handler(x, y, el)) },
-  )
-  runtime
-}
+/// `paste` event, fires when text is pasted from the clipboard.
+pub const paste: Event(Nil) = Event("paste", TypeEmpty)
 
 @target(javascript)
-/// Fires when text is pasted from the clipboard.
-pub fn on_paste(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn() -> message,
-) -> Runtime(model, message) {
-  setup_simple_event_with_options(
-    selector,
-    "paste",
-    #(-1, -1, False, False, False),
-    fn() { client.send_message(runtime, handler()) },
-  )
-  runtime
-}
+/// `pointerdown` event, unifies mouse, touch, and pen.
+pub const pointer_down: Event(#(Int, Int)) = Event(
+  "pointerdown",
+  TypeCoordinates,
+)
 
 @target(javascript)
-/// Fires when a pointer (mouse, pen, touch) is pressed down. Provides pointer
-/// coordinates (x, y). Pointer events unify mouse, touch, and pen input.
-pub fn on_pointer_down(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(Int, Int) -> message,
-) -> Runtime(model, message) {
-  setup_coordinate_event_with_options(
-    selector,
-    "pointerdown",
-    #(-1, -1, False, False, False),
-    fn(x, y) { client.send_message(runtime, handler(x, y)) },
-  )
-  runtime
-}
+/// `pointermove` event, unifies mouse, touch, and pen.
+pub const pointer_move: Event(#(Int, Int)) = Event(
+  "pointermove",
+  TypeCoordinates,
+)
 
 @target(javascript)
-/// Fires repeatedly while a pointer moves over an element. Provides current
-/// pointer coordinates (x, y). Pointer events unify mouse, touch, and pen input.
-pub fn on_pointer_move(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(Int, Int) -> message,
-) -> Runtime(model, message) {
-  setup_coordinate_event_with_options(
-    selector,
-    "pointermove",
-    #(-1, -1, False, False, False),
-    fn(x, y) { client.send_message(runtime, handler(x, y)) },
-  )
-  runtime
-}
+/// `pointerup` event, unifies mouse, touch, and pen.
+pub const pointer_up: Event(#(Int, Int)) = Event("pointerup", TypeCoordinates)
 
 @target(javascript)
-/// Like `on_pointer_move`, but with event modifiers. See [`EventOptions`](#EventOptions).
-pub fn on_pointer_move_with(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  options options: EventOptions,
-  handler handler: fn(Int, Int) -> message,
-) -> Runtime(model, message) {
-  setup_coordinate_event_with_options(
-    selector,
-    "pointermove",
-    unpack_options(options),
-    fn(x, y) { client.send_message(runtime, handler(x, y)) },
-  )
-  runtime
-}
+/// `resize` event, fires when an element (or window) resizes.
+/// Typically used with `selector: "window"`.
+pub const resize: Event(Nil) = Event("resize", TypeEmpty)
 
 @target(javascript)
-/// Fires when a pointer (mouse, pen, touch) is released. Provides pointer
-/// coordinates (x, y). Pointer events unify mouse, touch, and pen input.
-pub fn on_pointer_up(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(Int, Int) -> message,
-) -> Runtime(model, message) {
-  setup_coordinate_event_with_options(
-    selector,
-    "pointerup",
-    #(-1, -1, False, False, False),
-    fn(x, y) { client.send_message(runtime, handler(x, y)) },
-  )
-  runtime
-}
+/// `scroll` event, payload is `(scroll_top, scroll_left)`. Consider
+/// pairing with [`throttle_milliseconds`](#throttle_milliseconds).
+pub const scroll: Event(#(Int, Int)) = Event("scroll", TypeScroll)
 
 @target(javascript)
-/// Fires when an element is resized. Typically used on `window` with selector
-/// "window". Consider using `on_resize_with` with a debounce option.
-pub fn on_resize(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn() -> message,
-) -> Runtime(model, message) {
-  setup_simple_event_with_options(
-    selector,
-    "resize",
-    #(-1, -1, False, False, False),
-    fn() { client.send_message(runtime, handler()) },
-  )
-  runtime
-}
+/// `submit` event, fires when a form is submitted, with no payload.
+/// Prevents the browser's default form submission. Use for controlled
+/// forms (input state already in the model). For uncontrolled forms,
+/// use [`form_submit`](#form_submit).
+pub const submit: Event(Nil) = Event("submit", TypeSubmit)
 
 @target(javascript)
-/// Like `on_resize`, but with event modifiers. See [`EventOptions`](#EventOptions).
-pub fn on_resize_with(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  options options: EventOptions,
-  handler handler: fn() -> message,
-) -> Runtime(model, message) {
-  setup_simple_event_with_options(
-    selector,
-    "resize",
-    unpack_options(options),
-    fn() { client.send_message(runtime, handler()) },
-  )
-  runtime
-}
+/// `touchend` event, fires when all touches are removed.
+pub const touch_end: Event(ElementData) = Event("touchend", TypeElement)
 
 @target(javascript)
-/// Fires when an element's scroll position changes. Provides the element's
-/// current `scrollTop` and `scrollLeft` values as (scroll_top, scroll_left).
-/// Consider using `on_scroll_with` with a throttle option for expensive work.
-pub fn on_scroll(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(Int, Int) -> message,
-) -> Runtime(model, message) {
-  setup_scroll_position_event_with_options(
-    selector,
-    #(-1, -1, False, False, False),
-    fn(top, left) { client.send_message(runtime, handler(top, left)) },
-  )
-  runtime
-}
+/// `touchmove` event, fires repeatedly while a touch point moves.
+/// Consider pairing with [`throttle_milliseconds`](#throttle_milliseconds).
+pub const touch_move: Event(#(Int, Int)) = Event("touchmove", TypeCoordinates)
 
 @target(javascript)
-/// Like `on_scroll`, but with event modifiers. See [`EventOptions`](#EventOptions).
-/// Particularly useful with `throttle_ms` to limit scroll handler frequency.
-pub fn on_scroll_with(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  options options: EventOptions,
-  handler handler: fn(Int, Int) -> message,
-) -> Runtime(model, message) {
-  setup_scroll_position_event_with_options(
-    selector,
-    unpack_options(options),
-    fn(top, left) { client.send_message(runtime, handler(top, left)) },
-  )
-  runtime
-}
+/// `touchstart` event, fires when a touch point is placed.
+pub const touch_start: Event(#(Int, Int)) = Event("touchstart", TypeCoordinates)
 
 @target(javascript)
-/// Fires when a form is submitted. Prevents the browser's default form
-/// submission behaviour automatically. Use this for controlled forms — where
-/// input state is already tracked in the model via `on_input` — or for
-/// action buttons wrapped in a `<form>`. For uncontrolled forms where the
-/// handler needs the submitted field values, use
-/// [`on_form_submit`](#on_form_submit) instead.
-pub fn on_submit(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn() -> message,
-) -> Runtime(model, message) {
-  setup_simple_event_prevent_default(selector, "submit", fn() {
-    client.send_message(runtime, handler())
-  })
-  runtime
-}
+/// `wheel` event, payload is `(delta_x, delta_y)`. Useful for scroll
+/// hijacking and zoom controls.
+pub const wheel: Event(#(Float, Float)) = Event("wheel", TypeWheel)
+
+// =============================================================================
+// PRIVATE TYPES
+// =============================================================================
 
 @target(javascript)
-/// Fires when all touches are removed from the screen. The handler receives
-/// [`ElementData`](#ElementData) for the element where the touch ended.
-pub fn on_touch_end(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(ElementData) -> message,
-) -> Runtime(model, message) {
-  setup_element_event(selector, "touchend", ElementData, fn(el) {
-    client.send_message(runtime, handler(el))
-  })
-  runtime
-}
-
-@target(javascript)
-/// Fires repeatedly while a touch point moves across the screen. Provides
-/// touch coordinates (x, y). Consider using `on_touch_move_with` with a
-/// throttle option.
-pub fn on_touch_move(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(Int, Int) -> message,
-) -> Runtime(model, message) {
-  setup_coordinate_event_with_options(
-    selector,
-    "touchmove",
-    #(-1, -1, False, False, False),
-    fn(x, y) { client.send_message(runtime, handler(x, y)) },
-  )
-  runtime
-}
-
-@target(javascript)
-/// Like `on_touch_move`, but with event modifiers. See [`EventOptions`](#EventOptions).
-pub fn on_touch_move_with(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  options options: EventOptions,
-  handler handler: fn(Int, Int) -> message,
-) -> Runtime(model, message) {
-  setup_coordinate_event_with_options(
-    selector,
-    "touchmove",
-    unpack_options(options),
-    fn(x, y) { client.send_message(runtime, handler(x, y)) },
-  )
-  runtime
-}
-
-@target(javascript)
-/// Fires when a touch point is placed on the screen. Provides initial touch
-/// coordinates (x, y).
-pub fn on_touch_start(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(Int, Int) -> message,
-) -> Runtime(model, message) {
-  setup_coordinate_event_with_options(
-    selector,
-    "touchstart",
-    #(-1, -1, False, False, False),
-    fn(x, y) { client.send_message(runtime, handler(x, y)) },
-  )
-  runtime
-}
-
-@target(javascript)
-/// Fires when the mouse wheel is scrolled. Provides scroll deltas (delta_x,
-/// delta_y) indicating scroll direction and amount.
-pub fn on_wheel(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  handler handler: fn(Float, Float) -> message,
-) -> Runtime(model, message) {
-  setup_wheel_event_with_options(
-    selector,
-    #(-1, -1, False, False, False),
-    fn(delta_x, delta_y) {
-      client.send_message(runtime, handler(delta_x, delta_y))
-    },
-  )
-  runtime
-}
-
-@target(javascript)
-/// Like `on_wheel`, but with event modifiers. See [`EventOptions`](#EventOptions).
-pub fn on_wheel_with(
-  runtime: Runtime(model, message),
-  selector selector: String,
-  options options: EventOptions,
-  handler handler: fn(Float, Float) -> message,
-) -> Runtime(model, message) {
-  setup_wheel_event_with_options(
-    selector,
-    unpack_options(options),
-    fn(delta_x, delta_y) {
-      client.send_message(runtime, handler(delta_x, delta_y))
-    },
-  )
-  runtime
+type EventType {
+  TypeClick
+  TypeCoordinates
+  TypeCoordinatesElement
+  TypeElement
+  TypeEmpty
+  TypeFormChange
+  TypeFormSubmit
+  TypeKey
+  TypeScroll
+  TypeSubmit
+  TypeValue
+  TypeWheel
 }
 
 // =============================================================================
@@ -941,10 +565,123 @@ pub fn on_wheel_with(
 // =============================================================================
 
 @target(javascript)
+fn register_event(
+  event: Event(payload),
+  selector: String,
+  options: EventOptions,
+  dispatch: fn(payload) -> Nil,
+) -> Nil {
+  // Each Event constant pairs `event_type` with the phantom `payload`
+  // type at the declaration site, so the casts below are safe by
+  // construction, the user's handler signature is already constrained
+  // to match.
+  let unpacked = unpack_options(options)
+  case event.event_type {
+    TypeClick -> {
+      let typed: fn(String) -> Nil = unsafe_cast(dispatch)
+      setup_click_event_with_options(selector, unpacked, typed)
+    }
+
+    TypeCoordinates -> {
+      let typed: fn(#(Int, Int)) -> Nil = unsafe_cast(dispatch)
+      setup_coordinate_event_with_options(
+        selector,
+        event.name,
+        unpacked,
+        fn(x, y) { typed(#(x, y)) },
+      )
+    }
+
+    TypeCoordinatesElement -> {
+      let typed: fn(#(Int, Int, ElementData)) -> Nil = unsafe_cast(dispatch)
+      setup_coordinate_element_event_with_options(
+        selector,
+        event.name,
+        unpacked,
+        ElementData,
+        fn(x, y, element) { typed(#(x, y, element)) },
+      )
+    }
+
+    TypeElement -> {
+      let typed: fn(ElementData) -> Nil = unsafe_cast(dispatch)
+      setup_element_event_with_options(
+        selector,
+        event.name,
+        unpacked,
+        ElementData,
+        typed,
+      )
+    }
+
+    TypeEmpty -> {
+      let typed: fn(Nil) -> Nil = unsafe_cast(dispatch)
+      setup_simple_event_with_options(selector, event.name, unpacked, fn() {
+        typed(Nil)
+      })
+    }
+
+    TypeFormChange -> {
+      let typed: fn(List(#(String, String))) -> Nil = unsafe_cast(dispatch)
+      setup_form_change_event_with_options(selector, unpacked, typed)
+    }
+
+    TypeFormSubmit -> {
+      let typed: fn(List(#(String, String))) -> Nil = unsafe_cast(dispatch)
+      setup_submit_form_event_with_options(selector, unpacked, typed)
+    }
+
+    TypeKey -> {
+      let typed: fn(KeyEvent) -> Nil = unsafe_cast(dispatch)
+      setup_key_full_event_with_options(
+        selector,
+        event.name,
+        unpacked,
+        KeyEvent,
+        typed,
+      )
+    }
+
+    TypeScroll -> {
+      let typed: fn(#(Int, Int)) -> Nil = unsafe_cast(dispatch)
+      setup_scroll_position_event_with_options(
+        selector,
+        unpacked,
+        fn(top, left) { typed(#(top, left)) },
+      )
+    }
+
+    TypeSubmit -> {
+      // Bake prevent-default in regardless of caller options.
+      let typed: fn(Nil) -> Nil = unsafe_cast(dispatch)
+      let with_prevent_default = unpack_options(prevent_default(options))
+      setup_simple_event_with_options(
+        selector,
+        "submit",
+        with_prevent_default,
+        fn() { typed(Nil) },
+      )
+    }
+
+    TypeValue -> {
+      let typed: fn(String) -> Nil = unsafe_cast(dispatch)
+      setup_value_event_with_options(selector, event.name, unpacked, typed)
+    }
+
+    TypeWheel -> {
+      let typed: fn(#(Float, Float)) -> Nil = unsafe_cast(dispatch)
+      setup_wheel_event_with_options(selector, unpacked, fn(delta_x, delta_y) {
+        typed(#(delta_x, delta_y))
+      })
+    }
+  }
+}
+
+@target(javascript)
 fn unpack_options(options: EventOptions) -> #(Int, Int, Bool, Bool, Bool) {
   #(
-    option.unwrap(options.debounce_ms, -1),
-    option.unwrap(options.throttle_ms, -1),
+    option.unwrap(options.debounce_milliseconds, -1),
+    option.unwrap(options.throttle_milliseconds, -1),
     options.once,
     options.stop_propagation,
     options.prevent_default,
@@ -958,127 +695,118 @@ fn unpack_options(options: EventOptions) -> #(Int, Int, Bool, Bool, Bool) {
 // See event.ffi.mjs for explanations for each function.
 
 @target(javascript)
+@external(javascript, "./event.ffi.mjs", "identity")
+fn unsafe_cast(value: a) -> b
+
+@target(javascript)
+@external(javascript, "./event.ffi.mjs", "releaseFocusTrap")
+fn release_focus_trap_ffi() -> Nil
+
+@target(javascript)
 @external(javascript, "./event.ffi.mjs", "setupClickEventWithOptions")
 fn setup_click_event_with_options(
-  _selector: String,
-  _options: #(Int, Int, Bool, Bool, Bool),
-  _handler: fn(String) -> Nil,
-) -> Nil {
-  Nil
-}
+  selector: String,
+  options: #(Int, Int, Bool, Bool, Bool),
+  handler: fn(String) -> Nil,
+) -> Nil
 
 @target(javascript)
 @external(javascript, "./event.ffi.mjs", "setupCoordinateElementEventWithOptions")
 fn setup_coordinate_element_event_with_options(
-  _selector: String,
-  _event_name: String,
-  _options: #(Int, Int, Bool, Bool, Bool),
-  _make_element_data: fn(List(#(String, String))) -> ElementData,
-  _handler: fn(Int, Int, ElementData) -> Nil,
-) -> Nil {
-  Nil
-}
+  selector: String,
+  event_name: String,
+  options: #(Int, Int, Bool, Bool, Bool),
+  make_element_data: fn(List(#(String, String))) -> ElementData,
+  handler: fn(Int, Int, ElementData) -> Nil,
+) -> Nil
 
 @target(javascript)
 @external(javascript, "./event.ffi.mjs", "setupCoordinateEventWithOptions")
 fn setup_coordinate_event_with_options(
-  _selector: String,
-  _event_name: String,
-  _options: #(Int, Int, Bool, Bool, Bool),
-  _handler: fn(Int, Int) -> Nil,
-) -> Nil {
-  Nil
-}
+  selector: String,
+  event_name: String,
+  options: #(Int, Int, Bool, Bool, Bool),
+  handler: fn(Int, Int) -> Nil,
+) -> Nil
 
 @target(javascript)
-@external(javascript, "./event.ffi.mjs", "setupElementEvent")
-fn setup_element_event(
-  _selector: String,
-  _event_name: String,
-  _make_element_data: fn(List(#(String, String))) -> ElementData,
-  _handler: fn(ElementData) -> Nil,
-) -> Nil {
-  Nil
-}
+@external(javascript, "./event.ffi.mjs", "setupElementEventWithOptions")
+fn setup_element_event_with_options(
+  selector: String,
+  event_name: String,
+  options: #(Int, Int, Bool, Bool, Bool),
+  make_element_data: fn(List(#(String, String))) -> ElementData,
+  handler: fn(ElementData) -> Nil,
+) -> Nil
 
 @target(javascript)
-@external(javascript, "./event.ffi.mjs", "setupFormChangeEvent")
-fn setup_form_change_event(
-  _selector: String,
-  _handler: fn(List(#(String, String))) -> Nil,
-) -> Nil {
-  Nil
-}
+@external(javascript, "./event.ffi.mjs", "setupFocus")
+fn setup_focus(selector: String) -> Nil
+
+@target(javascript)
+@external(javascript, "./event.ffi.mjs", "setupFocusTrap")
+fn setup_focus_trap(
+  within: String,
+  release_on: fn(String) -> Bool,
+  on_exit: fn() -> Nil,
+) -> Nil
+
+@target(javascript)
+@external(javascript, "./event.ffi.mjs", "setupFormChangeEventWithOptions")
+fn setup_form_change_event_with_options(
+  selector: String,
+  options: #(Int, Int, Bool, Bool, Bool),
+  handler: fn(List(#(String, String))) -> Nil,
+) -> Nil
 
 @target(javascript)
 @external(javascript, "./event.ffi.mjs", "setupKeyFullEventWithOptions")
 fn setup_key_full_event_with_options(
-  _selector: String,
-  _event_name: String,
-  _options: #(Int, Int, Bool, Bool, Bool),
-  _make_key_event: fn(String, Bool, Bool, Bool, Bool) -> KeyEvent,
-  _handler: fn(KeyEvent) -> Nil,
-) -> Nil {
-  Nil
-}
+  selector: String,
+  event_name: String,
+  options: #(Int, Int, Bool, Bool, Bool),
+  make_key_event: fn(String, Bool, Bool, Bool, Bool) -> KeyEvent,
+  handler: fn(KeyEvent) -> Nil,
+) -> Nil
 
 @target(javascript)
 @external(javascript, "./event.ffi.mjs", "setupScrollPositionEventWithOptions")
 fn setup_scroll_position_event_with_options(
-  _selector: String,
-  _options: #(Int, Int, Bool, Bool, Bool),
-  _handler: fn(Int, Int) -> Nil,
-) -> Nil {
-  Nil
-}
-
-@target(javascript)
-@external(javascript, "./event.ffi.mjs", "setupSimpleEventWithPreventDefault")
-fn setup_simple_event_prevent_default(
-  _selector: String,
-  _event_name: String,
-  _handler: fn() -> Nil,
-) -> Nil {
-  Nil
-}
+  selector: String,
+  options: #(Int, Int, Bool, Bool, Bool),
+  handler: fn(Int, Int) -> Nil,
+) -> Nil
 
 @target(javascript)
 @external(javascript, "./event.ffi.mjs", "setupSimpleEventWithOptions")
 fn setup_simple_event_with_options(
-  _selector: String,
-  _event_name: String,
-  _options: #(Int, Int, Bool, Bool, Bool),
-  _handler: fn() -> Nil,
-) -> Nil {
-  Nil
-}
+  selector: String,
+  event_name: String,
+  options: #(Int, Int, Bool, Bool, Bool),
+  handler: fn() -> Nil,
+) -> Nil
 
 @target(javascript)
-@external(javascript, "./event.ffi.mjs", "setupSubmitFormEvent")
-fn setup_submit_form_event(
-  _selector: String,
-  _handler: fn(List(#(String, String))) -> Nil,
-) -> Nil {
-  Nil
-}
+@external(javascript, "./event.ffi.mjs", "setupSubmitFormEventWithOptions")
+fn setup_submit_form_event_with_options(
+  selector: String,
+  options: #(Int, Int, Bool, Bool, Bool),
+  handler: fn(List(#(String, String))) -> Nil,
+) -> Nil
 
 @target(javascript)
 @external(javascript, "./event.ffi.mjs", "setupValueEventWithOptions")
 fn setup_value_event_with_options(
-  _selector: String,
-  _event_name: String,
-  _options: #(Int, Int, Bool, Bool, Bool),
-  _handler: fn(String) -> Nil,
-) -> Nil {
-  Nil
-}
+  selector: String,
+  event_name: String,
+  options: #(Int, Int, Bool, Bool, Bool),
+  handler: fn(String) -> Nil,
+) -> Nil
 
 @target(javascript)
 @external(javascript, "./event.ffi.mjs", "setupWheelEventWithOptions")
 fn setup_wheel_event_with_options(
-  _selector: String,
-  _options: #(Int, Int, Bool, Bool, Bool),
-  _handler: fn(Float, Float) -> Nil,
-) -> Nil {
-  Nil
-}
+  selector: String,
+  options: #(Int, Int, Bool, Bool, Bool),
+  handler: fn(Float, Float) -> Nil,
+) -> Nil

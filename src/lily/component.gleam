@@ -4,15 +4,15 @@
 //// it's closer to React than Lustre, with smaller, more modular components
 //// being preferable as components themselves don't hold states.
 ////
-//// Lily provides five component types with different performance
-//// characteristics
+//// Lily provides six component types, each with different performance
+//// characteristics:
 ////
 //// 1. [`static`](#static) renders once and never updates
-//// 2. [`simple`](#simple) uses innerHTML re-renders when the slice changes
-//// 3. [`live`](#live) uses patch-based updates to prevent full re-renders
+//// 2. [`simple`](#simple) re-renders via innerHTML when the slice changes
+//// 3. [`live`](#live) applies targeted patches instead of full re-renders
 //// 4. [`each`](#each) handles keyed lists with innerHTML rendering
 //// 5. [`each_live`](#each_live) handles keyed lists with patch-based rendering
-//// 6. [`fragment`](#fragment) is essentially a collection of other components
+//// 6. [`fragment`](#fragment) groups other components into one slot
 ////
 //// `simple` replaces the component's entire DOM on every slice change, which
 //// destroys focus, selection, and any in-progress user input. `live` applies
@@ -65,7 +65,7 @@
 //// your chosen library's types to strings. We recommend
 //// [Lustre elements](https://hexdocs.pm/lustre/lustre/element/html.html).
 ////
-//// To use nesting, also supply `to_slot` at mount — a zero-argument function
+//// To use nesting, also supply `to_slot` at mount, a zero-argument function
 //// that returns an `html` placeholder value that serialises to
 //// `<lily-slot></lily-slot>`. For Lustre:
 ////
@@ -105,14 +105,22 @@
 //// import lustre/element
 //// import lustre/element/html
 ////
+//// fn decrement_button() {
+////   html.button([attribute.data("msg", "decrement")], [html.text("-")])
+//// }
+////
+//// fn increment_button() {
+////   html.button([attribute.data("msg", "increment")], [html.text("+")])
+//// }
+////
 //// fn app(_model: Model) {
 ////   component.simple(
 ////     slice: fn(m: Model) { m.count },
 ////     render: fn(count, _) {
 ////       html.div([], [
-////         html.button([attribute.data("msg", "decrement")], [html.text("-")]),
+////         decrement_button(),
 ////         html.p([], [html.text(int.to_string(count))]),
-////         html.button([attribute.data("msg", "increment")], [html.text("+")]),
+////         increment_button(),
 ////       ])
 ////     },
 ////   )
@@ -121,7 +129,7 @@
 //// pub fn main() {
 ////   let runtime =
 ////     store.new(Model(count: 0), with: update)
-////     |> client.start
+////     |> client.start(shared.wiring())
 ////
 ////   runtime
 ////   |> component.mount(
@@ -130,7 +138,11 @@
 ////     to_slot: fn() { element.element("lily-slot", [], []) },
 ////     view: app,
 ////   )
-////   |> event.on_click(selector: "#app", decoder: parse_click)
+////   |> event.on_decoded(
+////     event: event.click,
+////     selector: "#app",
+////     decoder: parse_click,
+////   )
 //// }
 //// ```
 ////
@@ -144,8 +156,6 @@
 @target(javascript)
 import gleam/dynamic.{type Dynamic}
 @target(javascript)
-import gleam/list
-@target(javascript)
 import gleam/string
 @target(javascript)
 import lily/client.{type Runtime}
@@ -153,22 +163,6 @@ import lily/client.{type Runtime}
 // =============================================================================
 // PUBLIC TYPES
 // =============================================================================
-
-@target(javascript)
-/// Comparison strategy for detecting slice changes. By default, the comparison
-/// strategy uses reference equality which is more efficient. However,
-/// reference equality can cause unnecessary re-renders for some data types if
-/// the value remains the same but the reference changes, which means that
-/// structural equality may be preferred. For a rule of thumb, use the default
-/// behaviour unless the slice listened to is a `List`, `Tuple`, or a record.
-/// See [`component.structural`](#structural) for specifying structural
-/// reference.
-pub type CompareStrategy {
-  /// Reference equality (JavaScript `===`, O(1)), default
-  ReferenceEqual
-  /// Structural equality (Gleam `==`, O(n)), use for tuples/lists
-  StructuralEqual
-}
 
 @target(javascript)
 /// A function that accepts a child `Component` and returns a placeholder
@@ -181,9 +175,15 @@ pub type Slotter(model, message, html) =
 
 @target(javascript)
 /// Component is the core type representing renderable content in Lily. The
-/// constructors for Component is kept opaque – use the associated functions to
+/// constructors for Component is kept opaque, use the associated functions to
 /// create components instead. The `html` type parameter is user-provided and
 /// can be any type that represents HTML markup.
+///
+/// Each dynamic variant carries a `compare_structural` flag. `False` (the
+/// default) means slice changes are detected by reference equality (`===`,
+/// O(1)); `True` means structural equality (`==`, O(n)) and is set by
+/// piping a component through [`structural`](#structural). Use structural
+/// when the slice constructs new tuples, lists, or records on every call.
 pub opaque type Component(model, message, html) {
   /// Keyed list with innerHTML rendering for each child. Carries the primitive
   /// slice, key, and render functions directly so the FFI can evaluate only
@@ -192,18 +192,19 @@ pub opaque type Component(model, message, html) {
     slice: fn(model) -> List(Dynamic),
     key: fn(Dynamic) -> String,
     render: fn(Dynamic) -> Component(model, message, html),
-    compare: CompareStrategy,
+    compare_structural: Bool,
   )
 
-  /// Keyed list with patch-based rendering for each child. Carries the primitive
-  /// slice, key, initial, and patch functions so the FFI calls `initial` only
-  /// for items whose key first appears, not for the whole list.
+  /// Keyed list with patch-based rendering for each child. Carries the
+  /// primitive slice, key, initial, and patch functions so the FFI calls
+  /// `initial` only for items whose key first appears, not for the whole
+  /// list.
   EachLive(
     slice: fn(model) -> List(Dynamic),
     key: fn(Dynamic) -> String,
     initial: fn(Dynamic) -> Component(model, message, html),
     patch: fn(Dynamic) -> List(Patch),
-    compare: CompareStrategy,
+    compare_structural: Bool,
   )
 
   /// Container for multiple components (no wrapper element created)
@@ -214,7 +215,7 @@ pub opaque type Component(model, message, html) {
     slice: fn(model) -> Dynamic,
     initial: fn(Slotter(model, message, html)) -> html,
     apply: fn(Dynamic) -> List(Patch),
-    compare: CompareStrategy,
+    compare_structural: Bool,
   )
 
   /// Wraps a component to disable it when the connection status is `False`.
@@ -230,7 +231,7 @@ pub opaque type Component(model, message, html) {
   Simple(
     slice: fn(model) -> Dynamic,
     render: fn(Dynamic, Slotter(model, message, html)) -> html,
-    compare: CompareStrategy,
+    compare_structural: Bool,
   )
 
   /// Static content that renders once with no subscription to model changes
@@ -267,7 +268,7 @@ pub type Patch {
 /// the HTML element instead of patches.
 ///
 /// Avoid using `each` for list items that contain `<input>`, `<textarea>`,
-/// or `<select>` elements — each changed item replaces its DOM via
+/// or `<select>` elements, each changed item replaces its DOM via
 /// `innerHTML`, destroying focus and in-progress user input. Use
 /// [`each_live`](#each_live) with targeted patches instead.
 ///
@@ -299,10 +300,10 @@ pub fn each(
   render render: fn(item) -> Component(model, message, html),
 ) -> Component(model, message, html) {
   Each(
-    slice: fn(model) { list.map(slice(model), to_dynamic) },
+    slice: fn(model) { list_dynamic(slice(model)) },
     key: fn(item) { string.inspect(key(from_dynamic(item))) },
     render: fn(item) { render(from_dynamic(item)) },
-    compare: ReferenceEqual,
+    compare_structural: False,
   )
 }
 
@@ -347,18 +348,18 @@ pub fn each_live(
   patch patch: fn(item) -> List(Patch),
 ) -> Component(model, message, html) {
   EachLive(
-    slice: fn(model) { list.map(slice(model), to_dynamic) },
+    slice: fn(model) { list_dynamic(slice(model)) },
     key: fn(item) { string.inspect(key(from_dynamic(item))) },
     initial: fn(item) { initial(from_dynamic(item)) },
     patch: fn(item) { patch(from_dynamic(item)) },
-    compare: ReferenceEqual,
+    compare_structural: False,
   )
 }
 
 @target(javascript)
-/// Fragments allow you to return multiple components from a single function.
-/// The children are rendered in order and concatenated into the parent's HTML.
-/// This is similar to Lustre's [`element.fragment`][https://hexdocs.pm/lustre/lustre/element.html#fragment].
+/// Fragments allow you to return multiple components from a single
+/// function. The children are rendered in order and concatenated into the
+/// parent's HTML. Similar to Lustre's `element.fragment`.
 ///
 /// ```gleam
 /// fn app(_model: Model) -> Component(Model, Message, Element(Message)) {
@@ -390,7 +391,7 @@ pub fn fragment(
 /// The `patch` function returns a list of `Patch` values. Each patch targets
 /// an element relative to the component's root using a CSS selector.
 ///
-/// The first parameter of `initial` is a [`Slotter`](#Slotter) — call
+/// The first parameter of `initial` is a [`Slotter`](#Slotter), call
 /// `slot(child_component)` wherever you want a nested component to appear.
 /// Ignore it with `_` if no children are needed.
 ///
@@ -422,7 +423,7 @@ pub fn live(
     slice: fn(model) { to_dynamic(slice(model)) },
     initial: initial,
     apply: fn(data) { patch(from_dynamic(data)) },
-    compare: ReferenceEqual,
+    compare_structural: False,
   )
 }
 
@@ -460,7 +461,7 @@ pub fn mount(
   // Initial render - this sets up all component subscriptions
   let model = get_model(runtime)
   let tree = view(model)
-  render_tree(runtime, selector, tree, model, to_html, to_slot, runtime, 0)
+  render_tree(runtime, selector, tree, model, to_html, to_slot)
 
   runtime
 }
@@ -501,7 +502,7 @@ pub fn require_connection(
 /// or ignore the slot parameter with `_` if no children are needed.
 ///
 /// Avoid using `simple` for components that contain `<input>`, `<textarea>`,
-/// or `<select>` elements — every slice change replaces the component's
+/// or `<select>` elements, every slice change replaces the component's
 /// entire DOM via `innerHTML`, which destroys focus and any in-progress user
 /// input. Use [`live`](#live) with targeted patches instead.
 ///
@@ -520,7 +521,7 @@ pub fn simple(
   Simple(
     slice: fn(model) { to_dynamic(slice(model)) },
     render: fn(data, slot) { render(from_dynamic(data), slot) },
-    compare: ReferenceEqual,
+    compare_structural: False,
   )
 }
 
@@ -549,7 +550,9 @@ pub fn static(
 /// Use `structural()` when your slice function returns new tuples, lists, or
 /// other constructed values on every call.
 ///
-/// Also see [`component.CompareStrategy`](#CompareStrategy).
+/// `Static` and `Fragment` components don't compare slices, so this returns
+/// them unchanged. `RequireConnection` recurses into the wrapped inner
+/// component.
 ///
 /// ```gleam
 /// component.simple(
@@ -562,29 +565,13 @@ pub fn structural(
   component: Component(model, message, html),
 ) -> Component(model, message, html) {
   case component {
-    Static(content) -> Static(content)
-    Simple(slice, render, _) ->
-      Simple(slice: slice, render: render, compare: StructuralEqual)
-    Live(slice, initial, apply, _) ->
-      Live(
-        slice: slice,
-        initial: initial,
-        apply: apply,
-        compare: StructuralEqual,
-      )
-    Each(slice, key, render, _) ->
-      Each(slice: slice, key: key, render: render, compare: StructuralEqual)
-    EachLive(slice, key, initial, patch, _) ->
-      EachLive(
-        slice: slice,
-        key: key,
-        initial: initial,
-        patch: patch,
-        compare: StructuralEqual,
-      )
-    Fragment(children) -> Fragment(children)
-    RequireConnection(inner, connected) ->
-      RequireConnection(inner: structural(inner), connected: connected)
+    Simple(..) -> Simple(..component, compare_structural: True)
+    Live(..) -> Live(..component, compare_structural: True)
+    Each(..) -> Each(..component, compare_structural: True)
+    EachLive(..) -> EachLive(..component, compare_structural: True)
+    RequireConnection(inner:, connected:) ->
+      RequireConnection(inner: structural(inner), connected:)
+    Static(..) | Fragment(..) -> component
   }
 }
 
@@ -594,7 +581,7 @@ pub fn structural(
 
 @target(javascript)
 /// Casts a Dynamic value back to the slice type. On JavaScript this is an
-/// identity function — the value is already the correct type at runtime.
+/// identity function, the value is already the correct type at runtime.
 /// Used to pass the already-extracted slice result to render/patch functions
 /// without calling the user's slice function a second time.
 @external(javascript, "./component.ffi.mjs", "identity")
@@ -613,8 +600,21 @@ fn get_model(_runtime: Runtime(model, message)) -> model {
 }
 
 @target(javascript)
+/// Type-erases a `List(item)` to `List(Dynamic)` without allocating. On
+/// JavaScript this is an identity function, the same list reference is
+/// returned. Used by [`each`](#each) and [`each_live`](#each_live) so the
+/// FFI handler can short-circuit when the user's slice returns the same
+/// list reference as last time.
+@external(javascript, "./component.ffi.mjs", "identity")
+fn list_dynamic(value: List(a)) -> List(Dynamic) {
+  let _ = value
+  panic as "This should never be called - JavaScript only"
+}
+
+@target(javascript)
 /// Renders a component tree to HTML and creates subscriptions for dynamic
-/// components. This is called on initial render and on every model update.
+/// components. Called once at mount time; subsequent updates flow through
+/// the registered per-component handlers.
 @external(javascript, "./component.ffi.mjs", "renderTree")
 fn render_tree(
   _runtime: Runtime(model, message),
@@ -623,18 +623,14 @@ fn render_tree(
   _model: model,
   _to_html: fn(html) -> String,
   _to_slot: fn() -> html,
-  _store: Runtime(model, message),
-  _depth: Int,
 ) -> Nil {
   Nil
 }
 
 @target(javascript)
 /// Wraps any value as Dynamic for use as a comparison key. On JavaScript this
-/// is an identity function as the runtime doesn't distinguish types. This
-/// replaces the old `dynamic.from` in gleam_stdlib. As much as I hate doing
-/// this, this is necessary as the slice type is not known at library
-/// compilation time.
+/// is an identity function, the runtime doesn't distinguish types. Necessary
+/// because the slice type is not known at library compilation time.
 @external(javascript, "./component.ffi.mjs", "identity")
 fn to_dynamic(value: a) -> Dynamic {
   // This will never run

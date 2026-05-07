@@ -1,5 +1,5 @@
-// Tests for lily/component — DOM rendering.
-// All functions are @target(javascript) — skipped on Erlang.
+// Tests for lily/component, DOM rendering.
+// All functions are @target(javascript), skipped on Erlang.
 
 @target(javascript)
 import gleam/int
@@ -37,7 +37,7 @@ fn to_slot() -> String {
 @target(javascript)
 fn new_runtime() -> client.Runtime(Model, Message) {
   store.new(test_fixtures.initial_model(), with: test_fixtures.update)
-  |> client.start
+  |> client.start(store.wiring())
 }
 
 @target(javascript)
@@ -245,10 +245,11 @@ pub fn component_fragment_renders_children_test() {
 pub fn component_each_renders_keyed_list_test() {
   test_setup.reset_dom()
   let runtime =
-    store.new(test_fixtures.WithList(items: [1, 2, 3]), with: fn(model, _msg) {
-      model
-    })
-    |> client.start
+    store.new(
+      test_fixtures.WithList(items: [1, 2, 3]),
+      with: fn(model, _message) { model },
+    )
+    |> client.start(store.wiring())
   let _r =
     mount(runtime, fn(_model) {
       component.each(
@@ -295,7 +296,7 @@ pub fn component_require_connection_removes_disabled_when_connected_test() {
       test_fixtures.Model(count: 0, name: "", connected: True),
       with: test_fixtures.update,
     )
-    |> client.start
+    |> client.start(store.wiring())
   let _r =
     mount(runtime, fn(_model) {
       component.simple(slice: fn(m: Model) { m.count }, render: fn(count, _) {

@@ -1,5 +1,5 @@
-// Tests for client session persistence — localStorage session persistence.
-// All functions are @target(javascript) — skipped on Erlang.
+// Tests for client session persistence, localStorage session persistence.
+// All functions are @target(javascript), skipped on Erlang.
 
 @target(javascript)
 import gleam/dynamic/decode
@@ -23,7 +23,7 @@ import lily/test_setup
 @target(javascript)
 fn new_runtime() -> client.Runtime(Model, Message) {
   store.new(test_fixtures.initial_model(), with: test_fixtures.update)
-  |> client.start
+  |> client.start(store.wiring())
 }
 
 @target(javascript)
@@ -54,7 +54,7 @@ pub fn session_attach_with_empty_localstorage_test() {
       get: fn(m) { m },
       set: fn(_model, session) { session },
     )
-  // No keys in localStorage — model unchanged
+  // No keys in localStorage, model unchanged
   client.get_current_model(runtime).name
   |> should.equal("")
 }
@@ -80,7 +80,7 @@ pub fn session_attach_hydrates_from_localstorage_test() {
 @target(javascript)
 pub fn session_attach_with_invalid_json_test() {
   test_setup.reset_dom()
-  // Corrupted data — should be gracefully ignored
+  // Corrupted data, should be gracefully ignored
   write_local_storage("lily_session_name", "not-valid-json{{")
   let runtime = new_runtime()
   let _r =
@@ -90,7 +90,7 @@ pub fn session_attach_with_invalid_json_test() {
       get: fn(m) { m },
       set: fn(_model, session) { session },
     )
-  // Invalid JSON ignored — name stays as initial ""
+  // Invalid JSON ignored, name stays as initial ""
   client.get_current_model(runtime).name
   |> should.equal("")
 }
@@ -126,7 +126,7 @@ pub fn session_only_writes_changed_fields_test() {
       get: fn(m) { m },
       set: fn(_model, session) { session },
     )
-  // Dispatch SetName — changes name, does NOT change count
+  // Dispatch SetName, changes name, does NOT change count
   client.dispatch(runtime)(test_fixtures.SetName("Alice"))
   // name was changed → should be persisted
   read_local_storage("lily_session_name")
@@ -159,10 +159,10 @@ pub fn session_skips_write_when_field_unchanged_test() {
   // First dispatch writes the field
   client.dispatch(runtime)(test_fixtures.SetName("Alice"))
   let after_first = read_local_storage("lily_session_name")
-  // Second dispatch with same value — field unchanged, no re-write
+  // Second dispatch with same value, field unchanged, no re-write
   client.dispatch(runtime)(test_fixtures.SetName("Alice"))
   let after_second = read_local_storage("lily_session_name")
-  // Both reads should equal the same value ("Alice") — the key was set
+  // Both reads should equal the same value ("Alice"), the key was set
   after_first
   |> should.equal(after_second)
 }
