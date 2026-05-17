@@ -23,8 +23,9 @@ import lily/internal/message_pack.{
   ValueMap, ValueNil, ValueString,
 }
 import lily/internal/reflection.{
-  type Reflected, ReflectedBool, ReflectedConstructor, ReflectedFloat,
-  ReflectedInteger, ReflectedList, ReflectedNil, ReflectedString,
+  type Reflected, ReflectedBool, ReflectedConstructor, ReflectedDict,
+  ReflectedFloat, ReflectedInteger, ReflectedList, ReflectedNil, ReflectedSet,
+  ReflectedString, ReflectedTuple,
 }
 
 // =============================================================================
@@ -64,6 +65,46 @@ fn reflected_to_message_pack(reflected: Reflected) -> BitArray {
     ReflectedList(items) ->
       list.map(items, reflected_to_message_pack)
       |> message_pack.encode_array
+    ReflectedTuple(fields:) -> {
+      // Tag-less map with positional keys. The absence of "_" is what
+      // tells the decoder to rebuild a tuple rather than look the name
+      // up in the constructor registry.
+      let field_entries =
+        list.index_map(fields, fn(field, index) {
+          #(
+            message_pack.encode_string(int.to_string(index)),
+            reflected_to_message_pack(field),
+          )
+        })
+      message_pack.encode_map(field_entries)
+    }
+    ReflectedDict(entries:) -> {
+      // Encode as a tagged sentinel `{"_":"$dict","0":[[k,v],...]}`
+      // matching the JSON path. Each pair becomes a 2-element array so
+      // non-string keys round-trip.
+      let pairs =
+        list.map(entries, fn(entry) {
+          let #(k, v) = entry
+          message_pack.encode_array([
+            reflected_to_message_pack(k),
+            reflected_to_message_pack(v),
+          ])
+        })
+      message_pack.encode_map([
+        #(message_pack.encode_string("0"), message_pack.encode_array(pairs)),
+        #(message_pack.encode_string("_"), message_pack.encode_string("$dict")),
+      ])
+    }
+    ReflectedSet(members:) -> {
+      let encoded_members = list.map(members, reflected_to_message_pack)
+      message_pack.encode_map([
+        #(
+          message_pack.encode_string("0"),
+          message_pack.encode_array(encoded_members),
+        ),
+        #(message_pack.encode_string("_"), message_pack.encode_string("$set")),
+      ])
+    }
     ReflectedConstructor(name:, fields:) -> {
       // Layout matches the previous Erlang/JS FFI codecs byte-for-byte:
       // positional fields first, constructor name tag last. Zero-field
@@ -110,11 +151,66 @@ fn message_pack_value_to_reflected(value: Value) -> Result(Reflected, Nil) {
 }
 
 fn map_to_reflected(entries: List(#(Value, Value))) -> Result(Reflected, Nil) {
-  // Constructor maps carry a "_" key with the constructor name. Anything
-  // else is a decode error: the auto-format never produces plain maps.
-  use name <- result.try(extract_constructor_name(entries))
-  use fields <- result.try(extract_constructor_fields(entries, 0, []))
-  Ok(ReflectedConstructor(name:, fields:))
+  // Maps in the auto-format are one of:
+  //   1. Custom-type maps with a `_` tag (the normal case)
+  //   2. Tag-less maps with numeric keys (raw Gleam tuples)
+  //   3. Special-cased `_:"$dict"` or `_:"$set"` (collection types)
+  case extract_constructor_name(entries) {
+    Ok("$dict") -> decode_dict(entries)
+    Ok("$set") -> decode_set(entries)
+    Ok(name) -> {
+      use fields <- result.try(extract_constructor_fields(entries, 0, []))
+      Ok(ReflectedConstructor(name:, fields:))
+    }
+    Error(_) -> {
+      // No `_` tag, so this must be a raw tuple. Pull the positional
+      // fields and reconstruct as ReflectedTuple.
+      use fields <- result.try(extract_constructor_fields(entries, 0, []))
+      case fields {
+        [] -> Error(Nil)
+        _ -> Ok(ReflectedTuple(fields:))
+      }
+    }
+  }
+}
+
+fn decode_dict(entries: List(#(Value, Value))) -> Result(Reflected, Nil) {
+  use pairs_value <- result.try(lookup_string_key(entries, "0"))
+  case pairs_value {
+    ValueArray(pair_values) -> {
+      use pair_reflected_list <- result.try(list.try_map(
+        pair_values,
+        decode_dict_pair,
+      ))
+      Ok(ReflectedDict(entries: pair_reflected_list))
+    }
+    _ -> Error(Nil)
+  }
+}
+
+fn decode_dict_pair(pair: Value) -> Result(#(Reflected, Reflected), Nil) {
+  case pair {
+    ValueArray([k_value, v_value]) -> {
+      use k <- result.try(message_pack_value_to_reflected(k_value))
+      use v <- result.try(message_pack_value_to_reflected(v_value))
+      Ok(#(k, v))
+    }
+    _ -> Error(Nil)
+  }
+}
+
+fn decode_set(entries: List(#(Value, Value))) -> Result(Reflected, Nil) {
+  use members_value <- result.try(lookup_string_key(entries, "0"))
+  case members_value {
+    ValueArray(member_values) -> {
+      use members <- result.try(list.try_map(
+        member_values,
+        message_pack_value_to_reflected,
+      ))
+      Ok(ReflectedSet(members:))
+    }
+    _ -> Error(Nil)
+  }
 }
 
 fn extract_constructor_name(

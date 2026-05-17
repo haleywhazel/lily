@@ -154,7 +154,7 @@ pub fn websocket_connect_receives_messages_test() {
   let ws = test_setup.get_last_websocket()
   test_setup.trigger_websocket_open(ws)
   let snapshot_json =
-    "{\"type\":\"snapshot\",\"target\":{\"kind\":\"session\"},\"sequence\":0,\"state\":{\"count\":5,\"name\":\"Bob\",\"connected\":false,\"active_tab\":\"TabA\",\"secondary_count\":0,\"transition_items\":[]}}"
+    "{\"type\":\"snapshot\",\"target\":{\"kind\":\"session\"},\"sequence\":0,\"state\":{\"count\":5,\"name\":\"Bob\",\"connected\":false,\"active_tab\":\"TabA\",\"secondary_count\":0,\"transition_item\":null}}"
   test_setup.trigger_websocket_message(ws, snapshot_json)
   client.get_current_model(runtime).count
   |> should.equal(5)

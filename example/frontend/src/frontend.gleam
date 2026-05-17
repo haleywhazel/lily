@@ -139,9 +139,7 @@ fn parse_click(message_name: String) -> Result(shared.Message, Nil) {
   }
 }
 
-fn parse_submit(
-  fields: List(#(String, String)),
-) -> Result(shared.Message, Nil) {
+fn parse_submit(fields: List(#(String, String))) -> Result(shared.Message, Nil) {
   case list.key_find(fields, "body"), list.key_find(fields, "sender_id") {
     Ok(body), Ok(sender_id) ->
       case string.trim(body) {

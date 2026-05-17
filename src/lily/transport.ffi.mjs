@@ -19,9 +19,14 @@
 // IMPORTS
 // =============================================================================
 
-import { Ok, Error, NonEmpty, Empty, BitArray } from "../gleam.mjs";
+import { Ok, Error, NonEmpty, Empty, BitArray, toList } from "../gleam.mjs";
 import { Local } from "./store.mjs";
 import { registerModule as registerReflectionModule } from "./internal/reflection.ffi.mjs";
+import GleamDict, {
+  from as dictFrom,
+  fold as dictFold,
+} from "../../gleam_stdlib/dict.mjs";
+import { from_list as setFromList } from "../../gleam_stdlib/gleam/set.mjs";
 
 // =============================================================================
 // EXPORT FUNCTIONS
@@ -51,19 +56,63 @@ export function autoEncode(value) {
   if (typeof value === "string") return value;
   if (typeof value === "number") return value;
 
-  if (
-    value &&
-    typeof value === "object" &&
-    "head" in value &&
-    "tail" in value
-  ) {
+  // Gleam lists: encode as JSON arrays regardless of length. Without the
+  // explicit `Empty` check, the empty singleton falls through to the
+  // CustomType branch below and gets encoded as `{"_":"Empty"}`, while
+  // Erlang's auto-encoder emits a JSON array `[]` for the same value.
+  // The mismatch breaks wire-format round-trips across targets.
+  if (value instanceof Empty || value instanceof NonEmpty) {
     const result = [];
     let current = value;
-    while (current && current.head !== undefined) {
+    while (current instanceof NonEmpty) {
       result.push(autoEncode(current.head));
       current = current.tail;
     }
     return result;
+  }
+
+  // Gleam tuples (`#(a, b)`) compile to plain JS arrays on this target.
+  // Distinguish from CustomTypes (which are class instances with `_`-style
+  // tagging) and from Lists (which are Empty/NonEmpty classes, handled
+  // above). Tuples have no constructor name to record, so we encode as a
+  // tag-less JSON object with numeric keys, which the decoder
+  // distinguishes from a tagged CustomType by the absence of `_`.
+  if (Array.isArray(value)) {
+    const encoded = {};
+    for (let i = 0; i < value.length; i++) {
+      encoded[String(i)] = autoEncode(value[i]);
+    }
+    return encoded;
+  }
+
+  // Gleam Dict (gleam_stdlib `dict.Dict`). Encoded as a tagged shape so
+  // the decoder can reconstruct a Dict (not a custom type). Entries are a
+  // list of [key, value] pairs, where keys themselves go through the
+  // encoder so non-string keys round-trip.
+  if (value instanceof GleamDict) {
+    const entries = [];
+    dictFold(value, undefined, (_acc, k, v) => {
+      entries.push([autoEncode(k), autoEncode(v)]);
+      return undefined;
+    });
+    return { _: "$dict", "0": entries };
+  }
+
+  // Gleam Set (gleam_stdlib `set.Set`). Implemented internally as
+  // `Set(dict: Dict(member, Token))`, so the class instance has a
+  // `.dict` field that's a `GleamDict`. Encode the members as an array.
+  if (
+    value &&
+    value.constructor &&
+    value.constructor.name === "Set" &&
+    value.dict instanceof GleamDict
+  ) {
+    const members = [];
+    dictFold(value.dict, undefined, (_acc, k, _v) => {
+      members.push(autoEncode(k));
+      return undefined;
+    });
+    return { _: "$set", "0": members };
   }
 
   if (value && typeof value === "object" && value.constructor) {
@@ -371,6 +420,24 @@ function autoDecodeInner(json) {
 
   if (json && typeof json === "object" && "_" in json) {
     const tag = json._;
+
+    // Reserved sentinel tags for collection types that don't fit the
+    // plain CustomType shape. Decoded into the corresponding gleam_stdlib
+    // structures so round-trips preserve type.
+    if (tag === "$dict") {
+      const pairs = json["0"] || [];
+      const decoded = pairs.map((pair) => [
+        autoDecodeInner(pair[0]),
+        autoDecodeInner(pair[1]),
+      ]);
+      return dictFrom(decoded);
+    }
+    if (tag === "$set") {
+      const members = json["0"] || [];
+      const decoded = members.map(autoDecodeInner);
+      return setFromList(toList(decoded));
+    }
+
     const ctor = constructorRegistry.get(tag);
     if (!ctor) {
       throw new globalThis.Error(
@@ -384,6 +451,22 @@ function autoDecodeInner(json) {
       fieldIndex++;
     }
     return new ctor(...fields);
+  }
+
+  // Tag-less JSON object with numeric keys = Gleam tuple. CustomTypes
+  // always have a `_` field, so the absence of `_` plus all-numeric keys
+  // is the unambiguous signal. Decoded back to a JS array to match
+  // Gleam's tuple representation on this target.
+  if (json && typeof json === "object") {
+    const keys = Object.keys(json);
+    if (keys.length > 0 && keys.every((k) => /^\d+$/.test(k))) {
+      const fields = [];
+      for (let i = 0; i < keys.length; i++) {
+        if (!(String(i) in json)) break;
+        fields.push(autoDecodeInner(json[String(i)]));
+      }
+      return fields;
+    }
   }
 
   return json;

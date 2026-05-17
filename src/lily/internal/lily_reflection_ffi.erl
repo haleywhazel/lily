@@ -47,12 +47,36 @@ reflect(List) when is_list(List) ->
 reflect(Value) when is_atom(Value) ->
     Name = snake_to_pascal(atom_to_binary(Value, utf8)),
     {reflected_constructor, Name, []};
-reflect(Value) when is_tuple(Value) ->
-    Tag = element(1, Value),
-    Name = snake_to_pascal(atom_to_binary(Tag, utf8)),
-    Size = tuple_size(Value),
-    Fields = collect_fields(Value, 2, Size, []),
-    {reflected_constructor, Name, Fields};
+reflect({set, Inner}) when is_map(Inner) ->
+    %% Gleam Set is `{set, Dict}` on this target, where the inner Dict
+    %% holds members as keys (values are the `Token` sentinel). Match
+    %% before the general tuple branch since `set` is an atom and would
+    %% otherwise look like a custom-type tag.
+    Members = [reflect(K) || K <- maps:keys(Inner)],
+    {reflected_set, Members};
+reflect(Value) when is_tuple(Value), tuple_size(Value) > 0 ->
+    %% Two cases share `is_tuple`: a Gleam custom type (first element is
+    %% the constructor atom) and a raw Gleam tuple `#(a, b)` (first
+    %% element is a value of any non-atom type). Discriminate by whether
+    %% the first element is an atom. Gleam custom-type tags are always
+    %% atoms; raw tuples never start with a bare atom in well-typed Gleam
+    %% code.
+    First = element(1, Value),
+    case is_atom(First) of
+        true ->
+            Name = snake_to_pascal(atom_to_binary(First, utf8)),
+            Size = tuple_size(Value),
+            Fields = collect_fields(Value, 2, Size, []),
+            {reflected_constructor, Name, Fields};
+        false ->
+            Size = tuple_size(Value),
+            Fields = collect_fields(Value, 1, Size, []),
+            {reflected_tuple, Fields}
+    end;
+reflect(Map) when is_map(Map) ->
+    %% Gleam Dict compiles to a native Erlang map on this target.
+    Entries = [{reflect(K), reflect(V)} || {K, V} <- maps:to_list(Map)],
+    {reflected_dict, Entries};
 reflect(_) ->
     {reflected_nil}.
 
@@ -79,6 +103,20 @@ construct_inner({reflected_string, Value}) ->
     Value;
 construct_inner({reflected_list, Items}) ->
     [construct_inner(Item) || Item <- Items];
+construct_inner({reflected_tuple, Fields}) ->
+    %% Raw Gleam tuples compile to native Erlang tuples on this target.
+    list_to_tuple([construct_inner(F) || F <- Fields]);
+construct_inner({reflected_dict, Entries}) ->
+    %% Gleam Dict is a native Erlang map. Each entry's key and value are
+    %% reflected separately so non-string keys survive the round-trip.
+    maps:from_list(
+        [{construct_inner(K), construct_inner(V)} || {K, V} <- Entries]
+    );
+construct_inner({reflected_set, Members}) ->
+    %% Gleam Set is `{set, Dict}` where the Dict uses `[]` as the token
+    %% value for every member. Use gleam_stdlib's `set:from_list` so the
+    %% Token representation stays in sync if it ever changes.
+    'gleam@set':from_list([construct_inner(M) || M <- Members]);
 construct_inner({reflected_constructor, Name, Fields}) ->
     SnakeName = pascal_to_snake(Name),
     Tag = binary_to_existing_atom(SnakeName, utf8),

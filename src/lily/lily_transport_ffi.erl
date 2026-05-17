@@ -63,8 +63,46 @@ encode_value(Value) when is_atom(Value) ->
     AtomName = atom_to_binary(Value, utf8),
     PascalName = snake_to_pascal(AtomName),
     'gleam@json':object([{<<"_">>, 'gleam@json':string(PascalName)}]);
-encode_value(Value) when is_tuple(Value) ->
-    %% Tagged tuple (custom type with fields).
+encode_value({set, Inner}) when is_map(Inner) ->
+    %% Gleam Set is represented as `{set, Dict}` with a map as the inner
+    %% dict. Encode just the members (keys), matching the cross-target
+    %% `{"_":"$set","0":[...]}` wire shape.
+    Members = lists:map(fun encode_value/1, maps:keys(Inner)),
+    'gleam@json':object([
+        {<<"_">>, 'gleam@json':string(<<"$set">>)},
+        {<<"0">>, 'gleam@json':array(Members, fun(X) -> X end)}
+    ]);
+encode_value(Value) when is_tuple(Value), tuple_size(Value) > 0 ->
+    %% Two cases share `is_tuple`: a tagged custom type (first element is
+    %% the constructor atom) and a raw Gleam tuple `#(a, b)` (first
+    %% element is a value of any type). We discriminate by whether the
+    %% first element is an atom. This is unambiguous because Gleam atoms
+    %% can't be standalone values in user types, they only appear as
+    %% constructor tags.
+    First = element(1, Value),
+    case is_atom(First) of
+        true -> encode_custom_type(Value);
+        false -> encode_tuple(Value)
+    end;
+encode_value(Value) when is_map(Value) ->
+    %% Gleam Dict compiles to a native Erlang map. Encode as a tagged
+    %% list of [key, value] pairs so non-string keys round-trip. The JS
+    %% side does the same.
+    Pairs = lists:map(
+        fun({K, V}) ->
+            'gleam@json':preprocessed_array([encode_value(K), encode_value(V)])
+        end,
+        maps:to_list(Value)
+    ),
+    'gleam@json':object([
+        {<<"_">>, 'gleam@json':string(<<"$dict">>)},
+        {<<"0">>, 'gleam@json':preprocessed_array(Pairs)}
+    ]);
+encode_value(_Value) ->
+    %% Fallback for unknown types. Pass through as null.
+    'gleam@json':null().
+
+encode_custom_type(Value) ->
     Tag = element(1, Value),
     TagName = atom_to_binary(Tag, utf8),
     PascalName = snake_to_pascal(TagName),
@@ -80,16 +118,44 @@ encode_value(Value) when is_tuple(Value) ->
                     end,
                     [{<<"_">>, 'gleam@json':string(PascalName)}],
                     lists:seq(Size - 1, 1, -1)),
-    'gleam@json':object(Fields);
-encode_value(_Value) ->
-    %% Fallback for unknown types. Pass through as null.
-    'gleam@json':null().
+    'gleam@json':object(Fields).
+
+encode_tuple(Value) ->
+    %% Raw Gleam tuple `#(a, b, c)`. Encode as a tag-less object with
+    %% numeric keys; the decoder uses the absence of `_` to know this is
+    %% a tuple and not a custom type.
+    Size = tuple_size(Value),
+    Fields =
+        lists:foldl(fun(Index, Acc) ->
+                       FieldValue = element(Index + 1, Value),
+                       EncodedValue = encode_value(FieldValue),
+                       FieldKey = integer_to_binary(Index),
+                       [{FieldKey, EncodedValue} | Acc]
+                    end,
+                    [],
+                    lists:seq(Size - 1, 0, -1)),
+    'gleam@json':object(Fields).
 
 %%% ============================================================================
 %%% PRIVATE DECODING FUNCTIONS
 %%% ============================================================================
 
-%% Decode a custom type from a map with "_" tag.
+%% Decode a custom type from a map with "_" tag. Handles the reserved
+%% sentinel tags ("$dict", "$set") that map to collection types rather
+%% than to a registered constructor.
+decode_custom_type(<<"$dict">>, Map) ->
+    Pairs = maps:get(<<"0">>, Map, []),
+    Decoded = lists:map(
+        fun([K, V]) -> {decode_value(K), decode_value(V)} end,
+        Pairs
+    ),
+    maps:from_list(Decoded);
+decode_custom_type(<<"$set">>, Map) ->
+    Members = maps:get(<<"0">>, Map, []),
+    Decoded = lists:map(fun decode_value/1, Members),
+    %% Reuse gleam_stdlib's set:from_list so the internal Token
+    %% representation matches whatever the current version uses.
+    'gleam@set':from_list(Decoded);
 decode_custom_type(TagBinary, Map) ->
     SnakeName = pascal_to_snake(TagBinary),
     Tag = binary_to_existing_atom(SnakeName, utf8),
@@ -115,11 +181,35 @@ decode_value(List) when is_list(List) ->
     [decode_value(Item) || Item <- List];
 decode_value(Map) when is_map(Map) ->
     case maps:get(<<"_">>, Map, undefined) of
-        undefined -> Map;
+        undefined ->
+            case is_tuple_shape(Map) of
+                true -> decode_tuple(Map);
+                false -> Map
+            end;
         TagBinary -> decode_custom_type(TagBinary, Map)
     end;
 decode_value(Value) ->
     Value.
+
+%% True if every key is a numeric binary like <<"0">>, <<"1">>, ... and
+%% there is at least one key. The encoder produces this shape for raw
+%% Gleam tuples, so the decoder rebuilds an Erlang tuple from it.
+is_tuple_shape(Map) ->
+    case maps:size(Map) of
+        0 -> false;
+        _ ->
+            lists:all(
+                fun(K) ->
+                    is_binary(K) andalso
+                    re:run(K, <<"^[0-9]+$">>) =/= nomatch
+                end,
+                maps:keys(Map)
+            )
+    end.
+
+decode_tuple(Map) ->
+    Fields = extract_fields(Map, 0, []),
+    list_to_tuple(Fields).
 
 extract_fields(Map, Index, Acc) ->
     FieldKey = integer_to_binary(Index),

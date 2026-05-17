@@ -316,6 +316,43 @@ type WsHandle
 /// `transport.ffi.mjs`. Multiple modules are supported by calling
 /// `registerModule` once per file. See the module documentation for the
 /// full pattern.
+///
+/// ## Supported value shapes
+///
+/// The auto-serialiser handles every Gleam value the model and message
+/// types are likely to contain:
+///
+/// - **Primitives:** `Int`, `Float`, `String`, `Bool`, `Nil`.
+/// - **Custom types:** records and variants, encoded as a tagged map
+///   whose `_` field carries the PascalCase constructor name.
+/// - **Lists:** encoded as arrays.
+/// - **Tuples:** `#(a, b)` encoded as tag-less maps with positional
+///   keys (`{"0":a,"1":b}`), distinguishable from CustomTypes by the
+///   absence of `_`.
+/// - **`gleam/dict.Dict`:** encoded as `{"_":"$dict","0":[[k,v],...]}`.
+/// - **`gleam/set.Set`:** encoded as `{"_":"$set","0":[v,...]}`.
+///
+/// ## Not supported: `BitArray`
+///
+/// `BitArray` fields in synced types are not auto-encoded. The Erlang
+/// runtime represents both `String` and `BitArray` as native binaries,
+/// so the reflection layer cannot distinguish them at runtime: a byte
+/// sequence like `<<104,101,108,108,111>>` is simultaneously a valid
+/// `String` and a valid `BitArray`. Encoding the wrong type would
+/// silently corrupt data.
+///
+/// If your model needs raw bytes, wrap them in a marker CustomType and
+/// encode them yourself with [`custom_binary`](#custom_binary) or
+/// [`custom_json`](#custom_json):
+///
+/// ```gleam
+/// pub type Bytes {
+///   Bytes(data: BitArray)
+/// }
+/// ```
+///
+/// Then provide custom encode/decode functions that base64-encode the
+/// inner field.
 pub fn automatic() -> Serialiser(model, message) {
   Auto(
     format: AutoJson,

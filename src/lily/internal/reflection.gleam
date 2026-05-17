@@ -27,6 +27,16 @@ import gleam/dynamic.{type Dynamic}
 /// positional fields. Zero-field constructors compile to atoms on Erlang and
 /// to instances of an empty class on JavaScript; both round-trip through
 /// `ReflectedConstructor(name, [])`.
+///
+/// `ReflectedTuple` is for raw Gleam tuples like `#(a, b)`, which have no
+/// constructor name and so encode as a tag-less map with positional keys.
+///
+/// `ReflectedDict` and `ReflectedSet` cover `gleam/dict` and `gleam/set`.
+/// Their natural runtime shapes (a JS class, an Erlang tagged map, etc.)
+/// don't fit ReflectedConstructor cleanly, so they get their own
+/// variants. On the wire they look like a CustomType with the reserved
+/// sentinel names `$dict` / `$set` so the format stays consistent with
+/// the JSON path.
 @internal
 pub type Reflected {
   ReflectedNil
@@ -35,6 +45,9 @@ pub type Reflected {
   ReflectedFloat(Float)
   ReflectedString(String)
   ReflectedList(List(Reflected))
+  ReflectedTuple(fields: List(Reflected))
+  ReflectedDict(entries: List(#(Reflected, Reflected)))
+  ReflectedSet(members: List(Reflected))
   ReflectedConstructor(name: String, fields: List(Reflected))
 }
 

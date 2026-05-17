@@ -6,6 +6,8 @@ import gleam/int
 @target(javascript)
 import gleam/javascript/promise
 @target(javascript)
+import gleam/option.{None, Some}
+@target(javascript)
 import gleam/string
 @target(javascript)
 import gleeunit/should
@@ -26,6 +28,19 @@ import lily/test_fixtures.{
 }
 @target(javascript)
 import lily/test_setup
+
+@target(javascript)
+/// Converts the model's `Option(Int)` transition_item to a `List(Int)`
+/// for each_live's slice. Using Option in the model keeps the wire
+/// format consistent across JS/Erlang (lists serialise differently);
+/// the slice constructs a list every call but each_live keys items by
+/// id, so reconciliation is stable.
+fn transition_items_list(model: Model) -> List(Int) {
+  case model.transition_item {
+    Some(id) -> [id]
+    None -> []
+  }
+}
 
 // =============================================================================
 // HELPERS
@@ -300,10 +315,7 @@ pub fn component_require_connection_removes_disabled_when_connected_test() {
   test_setup.reset_dom()
   let runtime =
     store.new(
-      test_fixtures.Model(
-        ..test_fixtures.initial_model(),
-        connected: True,
-      ),
+      test_fixtures.Model(..test_fixtures.initial_model(), connected: True),
       with: test_fixtures.update,
     )
     |> client.start(store.wiring())
@@ -524,10 +536,7 @@ pub fn switch_inside_require_connection_test() {
     })
   // Default initial_model has connected: False, so the wrapper should be
   // marked disabled.
-  test_dom.has_attribute(
-    "[data-lily-component=\"c0\"]",
-    "data-lily-disabled",
-  )
+  test_dom.has_attribute("[data-lily-component=\"c0\"]", "data-lily-disabled")
   |> should.be_true
 }
 
@@ -542,11 +551,9 @@ pub fn switch_events_inside_build_are_ignored_test() {
     mount(runtime, fn(_model) {
       component.switch(on: fn(m: Model) { m.active_tab }, case_of: fn(_tab) {
         component.static(fn(_) { "<button id=\"ignored\">+</button>" })
-        |> event.on(
-          event: event.click,
-          selector: "#ignored",
-          handler: fn(_) { Increment },
-        )
+        |> event.on(event: event.click, selector: "#ignored", handler: fn(_) {
+          Increment
+        })
       })
     })
   test_dom.click("#ignored")
@@ -599,11 +606,9 @@ pub fn event_on_fragment_root_test() {
           "<button id=\"frag\" data-msg=\"go\">+</button>"
         }),
       ])
-      |> event.on_decoded(
-        event: event.click,
-        selector: "#frag",
-        decoder: fn(_) { Ok(Increment) },
-      )
+      |> event.on_decoded(event: event.click, selector: "#frag", decoder: fn(_) {
+        Ok(Increment)
+      })
     })
   test_dom.click("#frag")
   client.get_current_model(runtime).count
@@ -701,15 +706,13 @@ pub fn event_inside_each_live_initial_ignored_test() {
   let _r =
     mount(runtime, fn(_model) {
       component.each_live(
-        slice: fn(m: Model) { m.transition_items },
+        slice: fn(m: Model) { transition_items_list(m) },
         key: fn(id: Int) { int.to_string(id) },
         initial: fn(_id) {
           component.static(fn(_) { "<button id=\"inner\">+</button>" })
-          |> event.on(
-            event: event.click,
-            selector: "#inner",
-            handler: fn(_) { Increment },
-          )
+          |> event.on(event: event.click, selector: "#inner", handler: fn(_) {
+            Increment
+          })
         },
         patch: fn(_) { [] },
       )
@@ -831,7 +834,7 @@ pub fn transition_enter_class_applied_on_mount_test() {
   let _r =
     mount(runtime, fn(_model) {
       component.each_live(
-        slice: fn(m: Model) { m.transition_items },
+        slice: fn(m: Model) { transition_items_list(m) },
         key: fn(id: Int) { int.to_string(id) },
         initial: fn(id) {
           component.transition(
@@ -862,7 +865,7 @@ pub fn transition_exit_defers_removal_test() -> promise.Promise(Nil) {
   let _r =
     mount(runtime, fn(_model) {
       component.each_live(
-        slice: fn(m: Model) { m.transition_items },
+        slice: fn(m: Model) { transition_items_list(m) },
         key: fn(id: Int) { int.to_string(id) },
         initial: fn(id) {
           component.transition(
@@ -882,8 +885,7 @@ pub fn transition_exit_defers_removal_test() -> promise.Promise(Nil) {
   // removed yet.
   let mid_html = test_dom.inner_html("#app")
   let mid_contains_item =
-    string.contains(mid_html, "item-1")
-    && string.contains(mid_html, "tx-exit")
+    string.contains(mid_html, "item-1") && string.contains(mid_html, "tx-exit")
   mid_contains_item
   |> should.be_true
   // After the duration timer fires, the element is gone.
@@ -906,7 +908,7 @@ pub fn transition_re_add_mid_exit_cancels_test() -> promise.Promise(Nil) {
   let _r =
     mount(runtime, fn(_model) {
       component.each_live(
-        slice: fn(m: Model) { m.transition_items },
+        slice: fn(m: Model) { transition_items_list(m) },
         key: fn(id: Int) { int.to_string(id) },
         initial: fn(id) {
           component.transition(
@@ -955,7 +957,7 @@ pub fn transition_inside_each_live_keeps_item_attribute_test() {
   let _r =
     mount(runtime, fn(_model) {
       component.each_live(
-        slice: fn(m: Model) { m.transition_items },
+        slice: fn(m: Model) { transition_items_list(m) },
         key: fn(id: Int) { int.to_string(id) },
         initial: fn(id) {
           component.transition(

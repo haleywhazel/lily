@@ -32,12 +32,12 @@ fn new_runtime() -> client.Runtime(Model, Message) {
   client.start(s, store.wiring())
 }
 
+@target(javascript)
 /// Wraps an empty static component in the caller's event attachments and
 /// registers the bindings without mounting. Bypassing `component.mount`
 /// means the DOM container is left untouched, which matters for the events
 /// that attach listeners directly to a queried element (resize, scroll,
 /// copy/cut/paste, value events) rather than via document delegation.
-@target(javascript)
 fn mount_event(
   runtime: client.Runtime(Model, Message),
   attach: fn(component.Component(Model, Message, String)) ->
@@ -574,9 +574,12 @@ pub fn event_on_paste_fires_test() {
   let runtime = new_runtime()
   test_dom.set_inner_html("#app", "<div id=\"paste-el\"></div>")
   mount_event(runtime, fn(component) {
-    event.on(component, event: event.paste, selector: "#paste-el", handler: fn(_) {
-      Increment
-    })
+    event.on(
+      component,
+      event: event.paste,
+      selector: "#paste-el",
+      handler: fn(_) { Increment },
+    )
   })
   test_dom.simple_event("#paste-el", "paste")
   client.get_current_model(runtime).count

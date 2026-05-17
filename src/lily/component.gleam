@@ -758,11 +758,11 @@ pub fn transition(
 // =============================================================================
 
 @target(javascript)
-@internal
 /// Attach an event binding to a component. Wraps the component in a
 /// `WithEvents` variant; if the component is already wrapped, appends to its
 /// binding list instead. Intended to be called from `lily/event`, not by
 /// users.
+@internal
 pub fn attach_event(
   component component: Component(model, message, html),
   binding binding: EventBinding(model, message),
@@ -783,7 +783,6 @@ pub fn attach_event(
 }
 
 @target(javascript)
-@internal
 /// Walk the component tree, invoking every event binding declared via
 /// `event.on*`. Recurses through wrappers (WithEvents, RequireConnection)
 /// and into Fragment children. Stops at Each/EachLive: their per-item
@@ -794,6 +793,7 @@ pub fn attach_event(
 /// Called from [`mount`](#mount) before the FFI render pass. Exposed as
 /// `@internal` so tests can register bindings without mounting (and thus
 /// without wiping the DOM container).
+@internal
 pub fn register_bindings(
   runtime: Runtime(model, message),
   component: Component(model, message, html),
@@ -805,8 +805,7 @@ pub fn register_bindings(
     }
     Fragment(children:) ->
       list.each(children, fn(child) { register_bindings(runtime, child) })
-    RequireConnection(inner:, connected: _) ->
-      register_bindings(runtime, inner)
+    RequireConnection(inner:, connected: _) -> register_bindings(runtime, inner)
     Transition(child:, ..) -> register_bindings(runtime, child)
     Each(..) | EachLive(..) | Live(..) | Simple(..) | Static(..) | Switch(..) ->
       Nil

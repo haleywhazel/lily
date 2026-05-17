@@ -72,7 +72,13 @@ pub fn encode_topic_update_test() {
 }
 
 pub fn encode_snapshot_test() {
-  let model = test_fixtures.Model(..test_fixtures.initial_model(), count: 5, name: "Bob", connected: True)
+  let model =
+    test_fixtures.Model(
+      ..test_fixtures.initial_model(),
+      count: 5,
+      name: "Bob",
+      connected: True,
+    )
   let result =
     transport.encode(
       Snapshot(target: Session, sequence: 2, state: model),
@@ -80,7 +86,7 @@ pub fn encode_snapshot_test() {
     )
   result
   |> should.equal(bit_array.from_string(
-    "{\"type\":\"snapshot\",\"target\":{\"kind\":\"session\"},\"sequence\":2,\"state\":{\"count\":5,\"name\":\"Bob\",\"connected\":true,\"active_tab\":\"TabA\",\"secondary_count\":0,\"transition_items\":[]}}",
+    "{\"type\":\"snapshot\",\"target\":{\"kind\":\"session\"},\"sequence\":2,\"state\":{\"count\":5,\"name\":\"Bob\",\"connected\":true,\"active_tab\":\"TabA\",\"secondary_count\":0,\"transition_item\":null}}",
   ))
 }
 
@@ -151,7 +157,7 @@ pub fn decode_topic_update_test() {
 pub fn decode_snapshot_test() {
   let bytes =
     bit_array.from_string(
-      "{\"type\":\"snapshot\",\"target\":{\"kind\":\"session\"},\"sequence\":2,\"state\":{\"count\":0,\"name\":\"\",\"connected\":false,\"active_tab\":\"TabA\",\"secondary_count\":0,\"transition_items\":[]}}",
+      "{\"type\":\"snapshot\",\"target\":{\"kind\":\"session\"},\"sequence\":2,\"state\":{\"count\":0,\"name\":\"\",\"connected\":false,\"active_tab\":\"TabA\",\"secondary_count\":0,\"transition_item\":null}}",
     )
   let result = transport.decode(bytes, serialiser: ser())
   result
@@ -165,7 +171,13 @@ pub fn decode_snapshot_test() {
 }
 
 pub fn decode_snapshot_with_complex_model_test() {
-  let model = test_fixtures.Model(..test_fixtures.initial_model(), count: 42, name: "Eve", connected: True)
+  let model =
+    test_fixtures.Model(
+      ..test_fixtures.initial_model(),
+      count: 42,
+      name: "Eve",
+      connected: True,
+    )
   let encoded =
     transport.encode(
       Snapshot(target: Session, sequence: 10, state: model),
@@ -369,7 +381,15 @@ fn binary_serialiser() -> transport.Serialiser(Model, Message) {
     encode_model: fn(m: Model) { <<m.count>> },
     decode_model: fn(bytes) {
       case bytes {
-        <<n>> -> Ok(test_fixtures.Model(..test_fixtures.initial_model(), count: n, name: "", connected: False))
+        <<n>> ->
+          Ok(
+            test_fixtures.Model(
+              ..test_fixtures.initial_model(),
+              count: n,
+              name: "",
+              connected: False,
+            ),
+          )
         _ -> Error(Nil)
       }
     },
@@ -399,7 +419,13 @@ pub fn custom_binary_roundtrip_set_name_test() {
 
 pub fn custom_binary_roundtrip_snapshot_test() {
   let ser = binary_serialiser()
-  let model = test_fixtures.Model(..test_fixtures.initial_model(), count: 7, name: "", connected: False)
+  let model =
+    test_fixtures.Model(
+      ..test_fixtures.initial_model(),
+      count: 7,
+      name: "",
+      connected: False,
+    )
   transport.encode(
     Snapshot(target: Session, sequence: 3, state: model),
     serialiser: ser,

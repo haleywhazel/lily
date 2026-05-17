@@ -1,8 +1,11 @@
 // Shared test types, update function, and serialisers used across all
 // test files.
 
+import gleam/dict.{type Dict}
 import gleam/dynamic/decode.{type Decoder}
 import gleam/json.{type Json}
+import gleam/option.{type Option, None, Some}
+import gleam/set.{type Set}
 import lily/transport.{type Serialiser}
 
 // =============================================================================
@@ -15,11 +18,18 @@ pub type Model {
     name: String,
     connected: Bool,
     // Switch tests subscribe to active_tab; secondary_count and
-    // transition_items give disjoint slices for multi-mount and
-    // each_live transition tests.
+    // transition_item give disjoint slices for multi-mount and
+    // each_live transition tests. `transition_item` is `Option(Int)`
+    // (None or Some(id)) rather than `List(Int)` because the JS and
+    // Erlang auto-serialisers encode empty Gleam lists differently
+    // (JS uses the `Empty` constructor wrapper, Erlang uses
+    // MessagePack array length 0), so a `List` field here would break
+    // the cross-target wire-format snapshot tests. Each_live tests
+    // map this Option to a list inside the slice, which is fine since
+    // slice return values are not serialised.
     active_tab: Tab,
     secondary_count: Int,
-    transition_items: List(Int),
+    transition_item: Option(Int),
   )
 }
 
@@ -57,6 +67,18 @@ pub type WithFloat {
   WithFloat(value: Float)
 }
 
+pub type WithTuple {
+  WithTuple(pair: #(Int, String))
+}
+
+pub type WithDict {
+  WithDict(entries: Dict(String, Int))
+}
+
+pub type WithSet {
+  WithSet(members: Set(Int))
+}
+
 // =============================================================================
 // STORE HELPERS
 // =============================================================================
@@ -68,7 +90,7 @@ pub fn initial_model() -> Model {
     connected: False,
     active_tab: TabA,
     secondary_count: 0,
-    transition_items: [],
+    transition_item: None,
   )
 }
 
@@ -82,25 +104,11 @@ pub fn update(model: Model, message: Message) -> Model {
     SetTab(tab) -> Model(..model, active_tab: tab)
     IncrementSecondary ->
       Model(..model, secondary_count: model.secondary_count + 1)
-    AddTransitionItem(id) ->
-      Model(..model, transition_items: [id, ..model.transition_items])
+    AddTransitionItem(id) -> Model(..model, transition_item: Some(id))
     RemoveTransitionItem(id) ->
-      Model(
-        ..model,
-        transition_items: list_filter(model.transition_items, fn(other) {
-          other != id
-        }),
-      )
-  }
-}
-
-fn list_filter(items: List(a), keep: fn(a) -> Bool) -> List(a) {
-  case items {
-    [] -> []
-    [first, ..rest] ->
-      case keep(first) {
-        True -> [first, ..list_filter(rest, keep)]
-        False -> list_filter(rest, keep)
+      case model.transition_item {
+        Some(current) if current == id -> Model(..model, transition_item: None)
+        _ -> model
       }
   }
 }
@@ -178,16 +186,17 @@ pub fn message_decoder() -> Decoder(Message) {
 }
 
 pub fn encode_model(model: Model) -> Json {
+  let transition_item = case model.transition_item {
+    Some(id) -> json.int(id)
+    None -> json.null()
+  }
   json.object([
     #("count", json.int(model.count)),
     #("name", json.string(model.name)),
     #("connected", json.bool(model.connected)),
     #("active_tab", json.string(tab_to_string(model.active_tab))),
     #("secondary_count", json.int(model.secondary_count)),
-    #(
-      "transition_items",
-      json.array(model.transition_items, of: json.int),
-    ),
+    #("transition_item", transition_item),
   ])
 }
 
@@ -197,9 +206,9 @@ pub fn model_decoder() -> Decoder(Model) {
   use connected <- decode.field("connected", decode.bool)
   use active_tab <- decode.field("active_tab", decode.string)
   use secondary_count <- decode.field("secondary_count", decode.int)
-  use transition_items <- decode.field(
-    "transition_items",
-    decode.list(decode.int),
+  use transition_item <- decode.field(
+    "transition_item",
+    decode.optional(decode.int),
   )
   decode.success(Model(
     count:,
@@ -207,7 +216,7 @@ pub fn model_decoder() -> Decoder(Model) {
     connected:,
     active_tab: tab_from_string(active_tab),
     secondary_count:,
-    transition_items:,
+    transition_item:,
   ))
 }
 
