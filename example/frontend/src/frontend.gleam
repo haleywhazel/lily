@@ -54,35 +54,6 @@ pub fn main() {
     to_slot: fn() { element.element("lily-slot", [], []) },
     view: app,
   )
-  |> event.on_decoded(
-    event: event.click,
-    selector: "#app",
-    decoder: parse_click,
-  )
-  |> event.on(event: event.input, selector: "#chat-input", handler: fn(text) {
-    shared.Session(shared.UpdateDraft(text))
-  })
-  |> event.on_decoded(
-    event: event.form_submit,
-    selector: "#chat-form",
-    decoder: fn(fields) {
-      parse_submit(fields, client.get_current_model(runtime).session.username)
-    },
-  )
-  |> event.on_decoded(
-    event: event.form_submit,
-    selector: "#username-form",
-    decoder: fn(fields) {
-      case list.key_find(fields, "name") {
-        Ok(name) ->
-          case string.trim(name) {
-            "" -> Error(Nil)
-            trimmed -> Ok(shared.Session(shared.SetUsername(trimmed)))
-          }
-        Error(Nil) -> Error(Nil)
-      }
-    },
-  )
   |> client.connection_status(set: fn(model: shared.Model, status) {
     shared.Model(
       ..model,
@@ -170,14 +141,26 @@ fn parse_click(message_name: String) -> Result(shared.Message, Nil) {
 
 fn parse_submit(
   fields: List(#(String, String)),
-  sender_id: String,
 ) -> Result(shared.Message, Nil) {
-  case list.key_find(fields, "body") {
-    Ok(body) ->
+  case list.key_find(fields, "body"), list.key_find(fields, "sender_id") {
+    Ok(body), Ok(sender_id) ->
       case string.trim(body) {
         "" -> Error(Nil)
         trimmed ->
           Ok(shared.Chat(shared.SendMessage(body: trimmed, sender_id:)))
+      }
+    _, _ -> Error(Nil)
+  }
+}
+
+fn parse_username_submit(
+  fields: List(#(String, String)),
+) -> Result(shared.Message, Nil) {
+  case list.key_find(fields, "name") {
+    Ok(name) ->
+      case string.trim(name) {
+        "" -> Error(Nil)
+        trimmed -> Ok(shared.Session(shared.SetUsername(trimmed)))
       }
     Error(Nil) -> Error(Nil)
   }
@@ -278,6 +261,13 @@ fn app(
     patch: fn(theme: String) {
       [SetAttribute(".app-root", "data-theme", theme)]
     },
+  )
+  // Click delegation, every actionable element carries a `data-msg`
+  // attribute. Sits on the root component so it covers the whole app.
+  |> event.on_decoded(
+    event: event.click,
+    selector: "#app",
+    decoder: parse_click,
   )
 }
 
@@ -557,10 +547,26 @@ fn chat_area() -> component.Component(
       html.div([attribute.class("chat-area")], [
         case username {
           "" -> username_form()
-          _ -> message_form()
+          _ -> message_form(username)
         },
       ])
     },
+  )
+  |> event.on(event: event.input, selector: "#chat-input", handler: fn(text) {
+    shared.Session(shared.UpdateDraft(text))
+  })
+  // Reads `sender_id` from a hidden input baked into the form (see
+  // `message_form`), so the decoder stays stateless: no runtime access
+  // needed at handler time.
+  |> event.on_decoded(
+    event: event.form_submit,
+    selector: "#chat-form",
+    decoder: parse_submit,
+  )
+  |> event.on_decoded(
+    event: event.form_submit,
+    selector: "#username-form",
+    decoder: parse_username_submit,
   )
 }
 
@@ -591,7 +597,7 @@ fn username_form() -> Element(shared.Message) {
   ])
 }
 
-fn message_form() -> Element(shared.Message) {
+fn message_form(username: String) -> Element(shared.Message) {
   html.form([attribute.id("chat-form"), attribute.class("chat-form")], [
     html.label(
       [
@@ -600,6 +606,11 @@ fn message_form() -> Element(shared.Message) {
       ],
       [html.text("Message")],
     ),
+    html.input([
+      attribute.attribute("type", "hidden"),
+      attribute.attribute("name", "sender_id"),
+      attribute.attribute("value", username),
+    ]),
     html.input([
       attribute.id("chat-input"),
       attribute.attribute("name", "body"),

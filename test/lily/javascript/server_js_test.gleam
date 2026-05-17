@@ -283,7 +283,7 @@ pub fn js_server_resync_after_session_messages_test() {
   case get_c1() {
     [bytes, ..] -> {
       let expected_model =
-        test_fixtures.Model(count: 0, name: "Alice", connected: False)
+        test_fixtures.Model(..test_fixtures.initial_model(), count: 0, name: "Alice", connected: False)
       transport.decode(bytes, serialiser: ser())
       |> should.equal(
         Ok(transport.Snapshot(

@@ -7,18 +7,44 @@
 //// [`on_decoded()`](#on_decoded), paired with one constant per DOM event
 //// (`event.click`, `event.mouse_down`, `event.key_down`, etc.). The
 //// constant fixes the payload type, so the compiler enforces that the
-//// handler matches.
+//// handler matches. Bindings live on the [`Component`](./component.html#Component)
+//// they relate to and are registered once at
+//// [`component.mount()`](./component.html#mount).
 ////
-//// Selectors are standard CSS. Lily uses event delegation under the hood,
-//// so patterns like `on(event.click, selector: "#app")` paired with
-//// `data-msg` attributes keep working as you patch the DOM. Handlers are
-//// set up once and persist until page unload.
+//// Selectors are standard CSS, matched globally via document-level event
+//// delegation. Locality is organisational, the framework does not scope
+//// matches to the component the binding is attached to. Patterns like
+//// `on(event.click, selector: "#app")` paired with `data-msg` attributes
+//// keep working as you patch the DOM. Bindings declared inside
+//// [`each`](./component.html#each) and
+//// [`each_live`](./component.html#each_live) item bodies are not collected,
+//// place them on the each/each_live wrapper or any static ancestor.
 ////
 //// ```gleam
 //// import lily/client
 //// import lily/component
 //// import lily/event
 //// import lily/store
+////
+//// fn app(_model: Model) {
+////   component.fragment([
+////     component.simple(
+////       slice: fn(m: Model) { m.search },
+////       render: fn(value, _) { html.input([attribute.value(value)]) },
+////     )
+////     |> event.on(event: event.input, selector: "#search", handler: Search),
+////   ])
+////   |> event.on_decoded(
+////     event: event.click,
+////     selector: "#app",
+////     decoder: parse_click,
+////   )
+////   |> event.on(
+////     event: event.key_down,
+////     selector: "document",
+////     handler: fn(ke) { KeyPressed(ke.key) },
+////   )
+//// }
 ////
 //// pub fn main() {
 ////   let runtime =
@@ -31,17 +57,6 @@
 ////     to_html: element.to_string,
 ////     to_slot: fn() { element.element("lily-slot", [], []) },
 ////     view: app,
-////   )
-////   |> event.on_decoded(
-////     event: event.click,
-////     selector: "#app",
-////     decoder: parse_click,
-////   )
-////   |> event.on(event: event.input, selector: "#search", handler: Search)
-////   |> event.on(
-////     event: event.key_down,
-////     selector: "document",
-////     handler: fn(ke) { KeyPressed(ke.key) },
 ////   )
 //// }
 ////
@@ -60,7 +75,7 @@
 //// or [`on_decoded_with_options()`](#on_decoded_with_options).
 ////
 //// ```gleam
-//// runtime
+//// component.simple(slice: ..., render: ...)
 //// |> event.on_with_options(
 ////   event: event.input,
 ////   selector: "#search",
@@ -80,6 +95,8 @@
 import gleam/option.{type Option}
 @target(javascript)
 import lily/client.{type Runtime}
+@target(javascript)
+import lily/component.{type Component}
 
 // =============================================================================
 // PUBLIC TYPES
@@ -186,12 +203,22 @@ pub fn focus_trap(
 }
 
 @target(javascript)
-/// Bind an event handler that always dispatches a message. The `event`
-/// argument fixes the payload type, so the handler's signature is
-/// checked at compile time.
+/// Bind an event handler to a component. The handler always dispatches a
+/// message; the `event` argument fixes the payload type so the handler
+/// signature is checked at compile time. The binding is registered during
+/// [`component.mount()`](./component.html#mount), and a single registration
+/// covers every DOM element matching `selector` via document-level
+/// delegation.
+///
+/// Selectors are global CSS selectors, not scoped to the component the
+/// binding is attached to. Locality is organisational, the framework does
+/// not constrain which elements the listener matches. Bindings declared
+/// inside [`each`](./component.html#each) and
+/// [`each_live`](./component.html#each_live) item bodies are ignored,
+/// attach them to the each/each_live wrapper or any static ancestor.
 ///
 /// ```gleam
-/// runtime
+/// component.simple(slice: ..., render: ...)
 /// |> event.on(event: event.input, selector: "#search", handler: Search)
 /// |> event.on(
 ///   event: event.mouse_down,
@@ -203,12 +230,12 @@ pub fn focus_trap(
 /// )
 /// ```
 pub fn on(
-  runtime: Runtime(model, message),
+  component: Component(model, message, html),
   event event: Event(payload),
   selector selector: String,
   handler handler: fn(payload) -> message,
-) -> Runtime(model, message) {
-  on_with_options(runtime, event, selector, options(), handler)
+) -> Component(model, message, html) {
+  on_with_options(component, event, selector, options(), handler)
 }
 
 @target(javascript)
@@ -218,7 +245,7 @@ pub fn on(
 /// failure should skip dispatching).
 ///
 /// ```gleam
-/// runtime
+/// component.fragment([...])
 /// |> event.on_decoded(
 ///   event: event.click,
 ///   selector: "#app",
@@ -231,32 +258,34 @@ pub fn on(
 /// )
 /// ```
 pub fn on_decoded(
-  runtime: Runtime(model, message),
+  component: Component(model, message, html),
   event event: Event(payload),
   selector selector: String,
   decoder decoder: fn(payload) -> Result(message, Nil),
-) -> Runtime(model, message) {
-  on_decoded_with_options(runtime, event, selector, options(), decoder)
+) -> Component(model, message, html) {
+  on_decoded_with_options(component, event, selector, options(), decoder)
 }
 
 @target(javascript)
 /// Like [`on_decoded`](#on_decoded) with an extra
 /// [`EventOptions`](#EventOptions) parameter. See [`options()`](#options).
 pub fn on_decoded_with_options(
-  runtime: Runtime(model, message),
+  component: Component(model, message, html),
   event event: Event(payload),
   selector selector: String,
   options options: EventOptions,
   decoder decoder: fn(payload) -> Result(message, Nil),
-) -> Runtime(model, message) {
-  let dispatch = fn(payload: payload) {
-    case decoder(payload) {
-      Ok(message) -> client.send_message(runtime, message)
-      Error(Nil) -> Nil
+) -> Component(model, message, html) {
+  let binding = fn(runtime: Runtime(model, message)) {
+    let dispatch = fn(payload: payload) {
+      case decoder(payload) {
+        Ok(message) -> client.send_message(runtime, message)
+        Error(Nil) -> Nil
+      }
     }
+    register_event(event, selector, options, dispatch)
   }
-  register_event(event, selector, options, dispatch)
-  runtime
+  component.attach_event(component, binding)
 }
 
 @target(javascript)
@@ -264,7 +293,7 @@ pub fn on_decoded_with_options(
 /// parameter. See [`options()`](#options).
 ///
 /// ```gleam
-/// runtime
+/// component.simple(slice: ..., render: ...)
 /// |> event.on_with_options(
 ///   event: event.input,
 ///   selector: "#search",
@@ -273,17 +302,19 @@ pub fn on_decoded_with_options(
 /// )
 /// ```
 pub fn on_with_options(
-  runtime: Runtime(model, message),
+  component: Component(model, message, html),
   event event: Event(payload),
   selector selector: String,
   options options: EventOptions,
   handler handler: fn(payload) -> message,
-) -> Runtime(model, message) {
-  let dispatch = fn(payload: payload) {
-    client.send_message(runtime, handler(payload))
+) -> Component(model, message, html) {
+  let binding = fn(runtime: Runtime(model, message)) {
+    let dispatch = fn(payload: payload) {
+      client.send_message(runtime, handler(payload))
+    }
+    register_event(event, selector, options, dispatch)
   }
-  register_event(event, selector, options, dispatch)
-  runtime
+  component.attach_event(component, binding)
 }
 
 @target(javascript)

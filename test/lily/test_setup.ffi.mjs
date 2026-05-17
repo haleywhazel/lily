@@ -14,7 +14,7 @@ import { NonEmpty, Empty } from "../gleam.mjs";
 // =============================================================================
 
 const dom = new JSDOM(
-  '<!DOCTYPE html><html><body><div id="app"></div></body></html>',
+  '<!DOCTYPE html><html><body><div id="app"></div><div id="overlays"></div></body></html>',
   { url: "http://localhost:8080", pretendToBeVisual: true },
 );
 
@@ -108,7 +108,8 @@ export function setup() {
 }
 
 export function resetDom() {
-  dom.window.document.body.innerHTML = '<div id="app"></div>';
+  dom.window.document.body.innerHTML =
+    '<div id="app"></div><div id="overlays"></div>';
   dom.window.localStorage.clear();
 }
 

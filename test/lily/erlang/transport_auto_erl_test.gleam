@@ -91,14 +91,14 @@ pub fn auto_erl_roundtrip_empty_string_test() {
 
 @target(erlang)
 pub fn auto_erl_roundtrip_multi_field_test() {
-  let model = test_fixtures.Model(count: 5, name: "Bob", connected: False)
+  let model = test_fixtures.Model(..test_fixtures.initial_model(), count: 5, name: "Bob", connected: False)
   roundtrip_snapshot(model, 1)
   |> should.equal(Ok(Snapshot(target: Session, sequence: 1, state: model)))
 }
 
 @target(erlang)
 pub fn auto_erl_roundtrip_boolean_field_test() {
-  let model = test_fixtures.Model(count: 0, name: "", connected: True)
+  let model = test_fixtures.Model(..test_fixtures.initial_model(), count: 0, name: "", connected: True)
   roundtrip_snapshot(model, 0)
   |> should.equal(Ok(Snapshot(target: Session, sequence: 0, state: model)))
 }
@@ -144,7 +144,7 @@ pub fn auto_erl_roundtrip_acknowledge_test() {
 
 @target(erlang)
 pub fn auto_erl_roundtrip_nested_test() {
-  let inner = test_fixtures.Model(count: 3, name: "Eve", connected: False)
+  let inner = test_fixtures.Model(..test_fixtures.initial_model(), count: 3, name: "Eve", connected: False)
   let nested = test_fixtures.Nested(inner:)
   let nested_ser: transport.Serialiser(
     test_fixtures.Nested,

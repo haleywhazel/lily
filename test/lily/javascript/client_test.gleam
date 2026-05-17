@@ -252,6 +252,108 @@ pub fn client_connect_sends_client_message_on_dispatch_test() {
 }
 
 @target(javascript)
+pub fn client_dispatch_with_topic_wiring_sends_topic_message_test() {
+  // Regression for the welcome example: a message routed to a topic
+  // via the wiring must be sent as a TopicMessage on the wire (not a
+  // SessionMessage), so the server's topic actor can broadcast it.
+  test_setup.reset_dom()
+  test_setup.reset_mocks()
+
+  // Wiring with a topic that catches every message.
+  let wiring =
+    store.wiring()
+    |> store.topic(
+      id: "chat",
+      extract: fn(_message) { Ok(Nil) },
+      update: fn(model: Model, _inner: Nil) { model },
+      field_get: fn(model: Model) { model },
+      field_set: fn(_model, m) { m },
+    )
+
+  let runtime =
+    store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+    |> client.start(wiring)
+
+  let sent_ref: test_ref.Ref(List(BitArray)) = test_ref.new([])
+  let connector =
+    transport.make_connector(fn(_handler: transport.Handler) {
+      transport.new(
+        send: fn(bytes) {
+          test_ref.set(sent_ref, [bytes, ..test_ref.get(sent_ref)])
+        },
+        close: fn() { Nil },
+      )
+    })
+
+  let _r =
+    client.connect(
+      runtime,
+      with: connector,
+      serialiser: test_fixtures.custom_serialiser(),
+    )
+
+  client.dispatch(runtime)(Increment)
+
+  // The most-recently-sent frame should be a topic_message (the chat
+  // topic caught Increment), not a session_message.
+  let sent = test_ref.get(sent_ref)
+  case sent {
+    [bytes, ..] ->
+      case bit_array.to_string(bytes) {
+        Ok(text) -> {
+          text |> string.contains("topic_message") |> should.be_true
+          text |> string.contains("\"topic_id\":\"chat\"") |> should.be_true
+        }
+        Error(_) -> should.fail()
+      }
+    [] -> should.fail()
+  }
+}
+
+@target(javascript)
+pub fn client_subscribe_sends_subscribe_frame_test() {
+  // Regression: the welcome example's chat broadcast relies on the
+  // Subscribe frame reaching the server. If subscribe were silently
+  // dropped (sendFrameFn null, or transport not yet set), Tab B would
+  // never register for "chat" and miss broadcasts.
+  test_setup.reset_dom()
+  test_setup.reset_mocks()
+  let runtime = new_runtime()
+
+  let sent_ref: test_ref.Ref(List(BitArray)) = test_ref.new([])
+  let connector =
+    transport.make_connector(fn(_handler: transport.Handler) {
+      transport.new(
+        send: fn(bytes) {
+          test_ref.set(sent_ref, [bytes, ..test_ref.get(sent_ref)])
+        },
+        close: fn() { Nil },
+      )
+    })
+
+  let _r =
+    client.connect(
+      runtime,
+      with: connector,
+      serialiser: test_fixtures.custom_serialiser(),
+    )
+
+  let _r2 = client.subscribe(runtime, "chat")
+
+  let sent = test_ref.get(sent_ref)
+  sent
+  |> should.not_equal([])
+  case sent {
+    [bytes, ..] ->
+      case bit_array.to_string(bytes) {
+        Ok(text) -> text |> string.contains("subscribe") |> should.be_true
+        Error(_) -> should.fail()
+      }
+    [] -> should.fail()
+  }
+}
+
+@target(javascript)
 pub fn client_connect_sends_resync_on_reconnect_test() {
   test_setup.reset_dom()
   test_setup.reset_mocks()

@@ -42,17 +42,42 @@ export function identity(value) {
 export function renderTree(runtime, rootSelector, component, model, toHtml, toSlot) {
   const handle = runtime.handle;
 
-  handle.resetComponentCounter();
-  handle.clearRegistry();
+  // The binding closures take a Runtime, not just a handle, so stash
+  // it on the handle for renderWithEvents to grab. Idempotent across
+  // mounts since the same runtime drives every mount.
+  handle.setRuntime(runtime);
+
+  // Start a mount segment keyed by selector. This tears down the prior
+  // segment for the same selector (so re-mounts replace) while leaving
+  // other mount points alone, which is what makes overlay-style portals
+  // work without a separate variant. Component IDs continue counting
+  // across mounts; only the segment is selector-scoped.
+  handle.startMountSegment(rootSelector);
 
   const html = renderComponent(handle, component, model, toHtml, toSlot);
 
   handle.setInnerHtml(rootSelector, html);
 
-  // Trigger all component handlers to populate dynamic content
-  for (const handler of handle.getComponentRegistry().values()) {
-    handler(model);
+  // Trigger only this mount's handlers, not the global registry.
+  // Otherwise a second mount would re-fire every previously-mounted
+  // tree's handlers; harmless (they're idempotent) but wasteful.
+  // Handlers fire before bindings drain because the first handler call
+  // for a `simple` / `switch` wraps innerHTML on its component root,
+  // which would wipe any element-scoped listener that was attached to
+  // the prior subtree. Letting handlers stabilise the DOM first means
+  // bindings attach to the final tree.
+  const segmentIds = handle.endMountSegment();
+  const registry = handle.getComponentRegistry();
+  for (const id of segmentIds) {
+    const handler = registry.get(id);
+    if (handler) handler(model);
   }
+
+  // Bindings get queued during renderComponent (every WithEvents in the
+  // tree, including ones reached via slot children). Fire them now that
+  // the DOM has stabilised so element-scoped listeners attach to the
+  // post-handler subtree.
+  handle.drainBindings();
 
   return null;
 }
@@ -218,6 +243,10 @@ function createEachHandler(
         const oldIds = childIdsByKey.get(keyStr);
         if (oldIds) unregisterChildHandlers(handle, oldIds);
 
+        // Bindings declared inside the item body are ignored, matching
+        // the documented placement rule. Attach per-list events on the
+        // each component itself or an ancestor instead.
+        const was = handle.suppressBindings();
         const { html, newIds } = renderChildAndCaptureIds(
           handle,
           render(item),
@@ -225,6 +254,7 @@ function createEachHandler(
           toHtml,
           toSlot,
         );
+        handle.restoreBindings(was);
         element.innerHTML = html;
         childIdsByKey.set(keyStr, newIds);
       }
@@ -281,7 +311,9 @@ function createEachLiveHandler(
       model,
     }) {
       if (isNew) {
-        // Only call initial() for this specific new item, not the whole list
+        // Suppress binding collection inside the item body, matching the
+        // each_live placement rule (events go on the wrapper or above).
+        const was = handle.suppressBindings();
         const { html, newIds } = renderChildAndCaptureIds(
           handle,
           initial(item),
@@ -289,6 +321,7 @@ function createEachLiveHandler(
           toHtml,
           toSlot,
         );
+        handle.restoreBindings(was);
         element.innerHTML = html;
         childIdsByKey.set(keyStr, newIds);
         // Defer until all items are positioned so child handlers' queries
@@ -350,12 +383,20 @@ function createKeyedListHandler({ handle, selector, slice, getKey, onDrop, onIte
       currentKeySet.add(getKey(items[i]));
     }
 
-    // Drop children whose keys are no longer in the list.
+    // Drop children whose keys are no longer in the list. If a child
+    // carries transition data attributes, removeWithTransition defers
+    // the actual removal until the exit animation completes (or aborts
+    // when the same key reappears mid-exit).
     for (const [keyStr, element] of children) {
       if (!currentKeySet.has(keyStr)) {
-        container.removeChild(element);
-        children.delete(keyStr);
-        onDrop(keyStr);
+        // Skip if already mid-exit, the in-flight removeWithTransition
+        // will tear it down. Without this guard, a second render before
+        // the duration elapses would start a duplicate timer.
+        if (handle.getPendingExit(element)) continue;
+        removeWithTransition(handle, container, element, () => {
+          children.delete(keyStr);
+          onDrop(keyStr);
+        });
       }
     }
 
@@ -375,6 +416,19 @@ function createKeyedListHandler({ handle, selector, slice, getKey, onDrop, onIte
         element = document.createElement("div");
         element.setAttribute("data-lily-key", keyStr);
         children.set(keyStr, element);
+      } else if (handle.getPendingExit(element)) {
+        // Re-add mid-exit: cancel the pending removal and strip the
+        // exit class synchronously. The abort branch inside
+        // removeWithTransition would strip it too, but that runs as a
+        // microtask after the current dispatch returns; doing it here
+        // means subsequent synchronous DOM reads see the cleaned-up
+        // element immediately.
+        handle.cancelPendingExit(element);
+        const transitionElement = findTransitionElement(element);
+        if (transitionElement) {
+          const exitClass = transitionElement.dataset.lilyTransitionExit;
+          if (exitClass) transitionElement.classList.remove(exitClass);
+        }
       }
 
       onItem({
@@ -625,6 +679,227 @@ function renderStatic(handle, component, model, toHtml, toSlot) {
   return html;
 }
 
+/** Renders a Switch component */
+function renderSwitch(handle, component, model, toHtml, toSlot) {
+  const componentId = handle.nextComponentId();
+  const selector = `[data-lily-component="${componentId}"]`;
+
+  const { slice, build, compare_structural } = component;
+  const compareStrategy = compare_structural ? isEqual : referenceEqual;
+
+  let cachedElement = null;
+  let previousChildIds = [];
+
+  const handler = createSelective(slice, compareStrategy, (data) => {
+    // Old child first, so its handlers stop firing before we render the
+    // replacement. Otherwise a quick re-dispatch could hit a handler
+    // whose root no longer exists in the DOM.
+    unregisterChildHandlers(handle, previousChildIds);
+
+    // Suppress binding collection while rendering the case body: events
+    // declared inside `build`'s returned Component are ignored by
+    // design (consistent with each / each_live item bodies). Without
+    // this, every switch swap would register fresh listeners on top of
+    // the old ones.
+    const was = handle.suppressBindings();
+    const child = build(data);
+    const { html, newIds } = renderChildAndCaptureIds(
+      handle,
+      child,
+      model,
+      toHtml,
+      toSlot,
+    );
+    handle.restoreBindings(was);
+    previousChildIds = newIds;
+
+    cachedElement = ensureCached(cachedElement, selector);
+    if (cachedElement) {
+      cachedElement.innerHTML = html;
+      runChildHandlers(handle, newIds, model);
+    }
+  });
+
+  handle.registerComponent(componentId, handler);
+
+  // Initial render. The child's handlers are registered as a side effect
+  // of renderChildAndCaptureIds; the outer registry trigger in
+  // renderTree runs them with the model.
+  const wasInitial = handle.suppressBindings();
+  const initialChild = build(slice(model));
+  const { html: initialHtml, newIds: initialIds } = renderChildAndCaptureIds(
+    handle,
+    initialChild,
+    model,
+    toHtml,
+    toSlot,
+  );
+  handle.restoreBindings(wasInitial);
+  previousChildIds = initialIds;
+
+  return `<div data-lily-component="${componentId}">${initialHtml}</div>`;
+}
+
+/**
+ * Renders a Transition wrapper. The enter class is applied via the
+ * initial HTML and scheduled for removal after the duration. The exit
+ * class and duration are stored as data attributes so removeWithTransition
+ * can find them when the surrounding each / each_live / switch removal
+ * path runs. Transition has no reactive content of its own, so we don't
+ * register a handler, the wrapper's component ID is just a DOM marker
+ * for the CSS selector.
+ */
+function renderTransition(handle, component, model, toHtml, toSlot) {
+  const componentId = handle.nextComponentId();
+  const selector = `[data-lily-component="${componentId}"]`;
+  const { enter, exit, duration_milliseconds: durationMs, child } =
+    component;
+
+  const { html } = renderChildAndCaptureIds(
+    handle,
+    child,
+    model,
+    toHtml,
+    toSlot,
+  );
+
+  scheduleEnterClassRemoval(selector, enter, durationMs);
+
+  return (
+    `<div data-lily-component="${componentId}" ` +
+    `data-lily-transition-exit="${exit}" ` +
+    `data-lily-transition-duration="${durationMs}" ` +
+    `class="${enter}">${html}</div>`
+  );
+}
+
+/**
+ * Renders a WithEvents wrapper. Queues each binding to fire after the
+ * surrounding renderTree finishes its innerHTML pass, so listeners that
+ * attach to specific elements (e.g. `event.click` on `#app`) find their
+ * target in the DOM. Queuing instead of firing inline matters for slot
+ * children too: a parent's renderComponent call may produce HTML that
+ * isn't in the DOM yet.
+ *
+ * Suppressed inside `each` / `each_live` / `switch` per-item bodies
+ * (those renderers toggle `handle.suppressBindings()` around their child
+ * renders), which keeps event-binding semantics the same as the
+ * documented placement rule.
+ */
+function renderWithEvents(handle, component, model, toHtml, toSlot) {
+  const runtime = handle.getRuntime();
+  for (const binding of component.bindings.toArray()) {
+    handle.queueBinding(() => binding(runtime));
+  }
+  return renderComponent(handle, component.inner, model, toHtml, toSlot);
+}
+
+// --- TRANSITION HELPERS ---
+
+/**
+ * Schedules removal of the enter class on the next animation frame.
+ * Using requestAnimationFrame (two-frame dance) so the class outlives
+ * the initial paint, otherwise the animation can be skipped on some
+ * browsers when the class is removed mid-frame. Falls back to the
+ * duration timer so the class is gone even when the element is
+ * offscreen and rAF is throttled.
+ */
+function scheduleEnterClassRemoval(selector, enterClass, durationMs) {
+  const remove = () => {
+    const element = document.querySelector(selector);
+    if (element) element.classList.remove(enterClass);
+  };
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(() => requestAnimationFrame(remove));
+  }
+  setTimeout(remove, durationMs);
+}
+
+/**
+ * Finds the Transition wrapper inside or at `element`. When a
+ * Transition is placed as the top-level component of an each_live /
+ * each item, the framework's key wrapper (`<div data-lily-key>`) sits
+ * one level above it; for `switch`, the switch wrapper sits above it.
+ * Returns null when the subtree doesn't include a Transition (so the
+ * removal proceeds synchronously).
+ */
+function findTransitionElement(element) {
+  if (element.dataset?.lilyTransitionExit) return element;
+  const child = element.firstElementChild;
+  if (child?.dataset?.lilyTransitionExit) return child;
+  return null;
+}
+
+/**
+ * Performs a transition-aware removal of `element` from `parent`.
+ * If the subtree includes a Transition wrapper (own dataset attrs or
+ * first child's), applies the exit class to that wrapper, races
+ * animationend vs the duration timer, then removes `element` from
+ * `parent` and calls `onComplete`. If not, removes immediately. Async
+ * because the await is genuine; callers don't have to await unless
+ * ordering matters.
+ *
+ * The pendingExits map on the handle is keyed by the outer `element`
+ * (the one the caller wants to remove) so the each_live reconciler
+ * can find a pending exit by the same handle it has, even when the
+ * Transition attrs live one level down.
+ */
+async function removeWithTransition(handle, parent, element, onComplete) {
+  const transitionElement = findTransitionElement(element);
+
+  if (!transitionElement) {
+    if (element.parentNode === parent) parent.removeChild(element);
+    onComplete();
+    return;
+  }
+
+  const exitClass = transitionElement.dataset.lilyTransitionExit;
+  const durationMs =
+    parseInt(transitionElement.dataset.lilyTransitionDuration ?? "0", 10) || 0;
+  const controller = new AbortController();
+  handle.registerPendingExit(element, controller);
+
+  transitionElement.classList.add(exitClass);
+
+  // Race animationend (the user's CSS finishing) vs the duration timer
+  // (fallback for headless test environments and CSS that doesn't
+  // animate). Abort short-circuits both.
+  await new Promise((resolve) => {
+    const cleanup = () => {
+      transitionElement.removeEventListener("animationend", onAnimationEnd);
+      controller.signal.removeEventListener("abort", onAbort);
+      clearTimeout(timer);
+    };
+    const onAnimationEnd = () => {
+      cleanup();
+      resolve();
+    };
+    const onAbort = () => {
+      cleanup();
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, durationMs);
+    transitionElement.addEventListener("animationend", onAnimationEnd, {
+      once: true,
+    });
+    controller.signal.addEventListener("abort", onAbort, { once: true });
+  });
+
+  if (controller.signal.aborted) {
+    // Re-add mid-exit cancelled us. Strip the exit class so the
+    // element looks normal again.
+    transitionElement.classList.remove(exitClass);
+    return;
+  }
+
+  handle.clearPendingExit(element);
+  if (element.parentNode === parent) parent.removeChild(element);
+  onComplete();
+}
+
 // =============================================================================
 // PRIVATE CONSTANTS
 // =============================================================================
@@ -640,6 +915,9 @@ const RENDERERS = {
   RequireConnection: renderRequireConnection,
   Simple: renderSimple,
   Static: renderStatic,
+  Switch: renderSwitch,
+  Transition: renderTransition,
+  WithEvents: renderWithEvents,
 };
 
 // Regex matching a single `<lily-slot></lily-slot>` placeholder (with

@@ -72,6 +72,30 @@ export function createRuntime(store, apply) {
   // Per-target sequence tracking (in-memory; keyed by target key string)
   const sequences = new Map();
 
+  // Per-mount-selector tracking so multi-mount works. Each mount call
+  // routes its newly-allocated component IDs into the segment for its
+  // selector; remounting the same selector tears down the prior segment
+  // before the new render runs. Mounting a different selector appends.
+  const mountSegments = new Map();
+  let currentMountSegment = null;
+
+  // Pending transition exits, keyed by element. Lets the each/each_live
+  // reconciler cancel an in-flight exit when the same key reappears
+  // before the duration elapses.
+  const pendingExits = new Map();
+
+  // Bindings collected during render that need to fire after the
+  // innerHTML pass. Pushed to by renderWithEvents (in component.ffi.mjs);
+  // drained by renderTree. The `collectingBindings` flag is toggled
+  // off by renderEach / renderEachLive / renderSwitch around their
+  // per-item / per-case child renders, so events declared inside those
+  // bodies are ignored by design.
+  let pendingBindings = [];
+  let collectingBindings = true;
+  // Stashed at mount so renderWithEvents can pass it to the binding
+  // closures (which take a Runtime, not just the handle).
+  let runtimeRef = null;
+
   function flushNotify() {
     const model = currentStore.model;
     for (const handler of componentRegistry.values()) {
@@ -157,12 +181,79 @@ export function createRuntime(store, apply) {
     },
     registerComponent(id, handler) {
       componentRegistry.set(id, handler);
+      // Record into the active mount segment so this mount knows which
+      // IDs belong to it, used to tear down on re-mount of the same
+      // selector.
+      if (currentMountSegment) currentMountSegment.add(id);
     },
     unregisterComponent(id) {
       componentRegistry.delete(id);
+      // Cheap, segments are small. Avoids leaking removed IDs into a
+      // segment's teardown set.
+      for (const segment of mountSegments.values()) segment.delete(id);
     },
     resetComponentCounter() {
       componentCounter = 0;
+    },
+    startMountSegment(selector) {
+      // Tear down the prior segment for this selector if any, so a
+      // re-mount on the same selector replaces rather than accumulates.
+      const prior = mountSegments.get(selector);
+      if (prior) {
+        for (const id of prior) componentRegistry.delete(id);
+      }
+      const fresh = new Set();
+      mountSegments.set(selector, fresh);
+      currentMountSegment = fresh;
+    },
+    endMountSegment() {
+      // Returns the IDs that were registered during this mount so the
+      // caller can trigger their handlers once with the initial model.
+      // Clearing the tracker stops subsequent renders from leaking into
+      // this segment.
+      const ids = currentMountSegment
+        ? Array.from(currentMountSegment)
+        : [];
+      currentMountSegment = null;
+      return ids;
+    },
+    registerPendingExit(element, controller) {
+      pendingExits.set(element, controller);
+    },
+    setRuntime(runtime) {
+      runtimeRef = runtime;
+    },
+    getRuntime() {
+      return runtimeRef;
+    },
+    queueBinding(fire) {
+      if (collectingBindings) pendingBindings.push(fire);
+    },
+    drainBindings() {
+      const queued = pendingBindings;
+      pendingBindings = [];
+      for (const fire of queued) fire();
+    },
+    suppressBindings() {
+      const was = collectingBindings;
+      collectingBindings = false;
+      return was;
+    },
+    restoreBindings(was) {
+      collectingBindings = was;
+    },
+    cancelPendingExit(element) {
+      const controller = pendingExits.get(element);
+      if (controller) {
+        controller.abort();
+        pendingExits.delete(element);
+      }
+    },
+    clearPendingExit(element) {
+      pendingExits.delete(element);
+    },
+    getPendingExit(element) {
+      return pendingExits.get(element);
     },
     sendMessage(message) {
       currentStore = applyMessage(currentStore, message);

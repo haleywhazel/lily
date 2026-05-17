@@ -107,9 +107,9 @@ pub fn snapshot_snapshot_session_test() {
     Snapshot(
       target: Session,
       sequence: 7,
-      state: test_fixtures.Model(count: 5, name: "Bob", connected: True),
+      state: test_fixtures.Model(..test_fixtures.initial_model(), count: 5, name: "Bob", connected: True),
     ),
-    "84A474797065A8736E617073686F74A674617267657481A46B696E64A773657373696F6EA873657175656E636507A57374617465C41584A13005A131A3426F62A132C3A15FA54D6F64656C",
+    "84A474797065A8736E617073686F74A674617267657481A46B696E64A773657373696F6EA873657175656E636507A57374617465C42D87A13005A131A3426F62A132C3A13381A15FA454616241A13400A13581A15FA5456D707479A15FA54D6F64656C",
   )
 }
 
@@ -171,7 +171,7 @@ pub fn roundtrip_snapshot_test() {
   assert_roundtrip(Snapshot(
     target: Session,
     sequence: 7,
-    state: test_fixtures.Model(count: 5, name: "Bob", connected: True),
+    state: test_fixtures.Model(..test_fixtures.initial_model(), count: 5, name: "Bob", connected: True),
   ))
 }
 

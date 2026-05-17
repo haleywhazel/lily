@@ -293,7 +293,7 @@ pub fn server_resync_after_session_messages_test() {
   case recv(s1) {
     Ok(bytes) -> {
       let expected_model =
-        test_fixtures.Model(count: 1, name: "", connected: False)
+        test_fixtures.Model(..test_fixtures.initial_model(), count: 1, name: "", connected: False)
       transport.decode(bytes, serialiser: ser())
       |> should.equal(
         Ok(transport.Snapshot(
@@ -368,7 +368,7 @@ pub fn server_on_message_hook_receives_updated_model_test() {
   server.incoming(srv, client_id: "c1", bytes: encode_session(Increment))
   let _ = recv(s1)
   process.receive(model_subj, within: 200)
-  |> should.equal(Ok(test_fixtures.Model(count: 1, name: "", connected: False)))
+  |> should.equal(Ok(test_fixtures.Model(..test_fixtures.initial_model(), count: 1, name: "", connected: False)))
 }
 
 // =============================================================================

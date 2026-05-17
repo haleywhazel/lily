@@ -4,7 +4,7 @@
 //// it's closer to React than Lustre, with smaller, more modular components
 //// being preferable as components themselves don't hold states.
 ////
-//// Lily provides six component types, each with different performance
+//// Lily provides eight component types, each with different performance
 //// characteristics:
 ////
 //// 1. [`static`](#static) renders once and never updates
@@ -13,6 +13,12 @@
 //// 4. [`each`](#each) handles keyed lists with innerHTML rendering
 //// 5. [`each_live`](#each_live) handles keyed lists with patch-based rendering
 //// 6. [`fragment`](#fragment) groups other components into one slot
+//// 7. [`switch`](#switch) renders one of several children based on a
+////    discriminator, preserving DOM identity when the discriminator is
+////    unchanged
+//// 8. [`transition`](#transition) wraps a child with CSS classes timed to
+////    a duration, with deferred DOM removal so exit animations finish
+////    before the element is gone
 ////
 //// `simple` replaces the component's entire DOM on every slice change, which
 //// destroys focus, selection, and any in-progress user input. `live` applies
@@ -124,6 +130,11 @@
 ////       ])
 ////     },
 ////   )
+////   |> event.on_decoded(
+////     event: event.click,
+////     selector: "#app",
+////     decoder: parse_click,
+////   )
 //// }
 ////
 //// pub fn main() {
@@ -138,13 +149,15 @@
 ////     to_slot: fn() { element.element("lily-slot", [], []) },
 ////     view: app,
 ////   )
-////   |> event.on_decoded(
-////     event: event.click,
-////     selector: "#app",
-////     decoder: parse_click,
-////   )
 //// }
 //// ```
+////
+//// Event handlers are pipelined onto the component they relate to via
+//// [`event.on()`](./event.html#on) and friends. The walk in
+//// [`mount`](#mount) registers each binding once at startup. Events
+//// declared inside [`each`](#each) and [`each_live`](#each_live) item
+//// bodies are not collected, place them on the each/each_live wrapper or
+//// any static ancestor instead.
 ////
 //// All components are JavaScript-only (`@target(javascript)`).
 ////
@@ -155,6 +168,8 @@
 
 @target(javascript)
 import gleam/dynamic.{type Dynamic}
+@target(javascript)
+import gleam/list
 @target(javascript)
 import gleam/string
 @target(javascript)
@@ -236,6 +251,39 @@ pub opaque type Component(model, message, html) {
 
   /// Static content that renders once with no subscription to model changes
   Static(content: fn(Slotter(model, message, html)) -> html)
+
+  /// Single-slot dynamic switching. The slice picks a discriminator and
+  /// `build` produces the Component to render. Identity is preserved when
+  /// the slice is unchanged; on change, the old subtree is torn down and
+  /// the new one rendered. Event bindings inside `build`'s result are not
+  /// collected by [`mount`](#mount), attach switch-related events to the
+  /// `Switch` itself or any ancestor.
+  Switch(
+    slice: fn(model) -> Dynamic,
+    build: fn(Dynamic) -> Component(model, message, html),
+    compare_structural: Bool,
+  )
+
+  /// Wraps a child with enter/exit CSS classes timed to a duration. The
+  /// enter class is applied on mount and removed after the duration; the
+  /// exit class is applied when the surrounding `each` / `each_live` /
+  /// `switch` removal path runs, and DOM removal is deferred by the same
+  /// duration (with `animationend` taking precedence if the user's CSS
+  /// fires it first).
+  Transition(
+    enter: String,
+    exit: String,
+    duration_milliseconds: Int,
+    child: Component(model, message, html),
+  )
+
+  /// Wraps a component with a list of event bindings. Bindings are
+  /// `fn(Runtime) -> Nil` closures that register their own DOM event when
+  /// invoked. The walk in [`mount`](#mount) triggers them once per mount.
+  WithEvents(
+    inner: Component(model, message, html),
+    bindings: List(EventBinding(model, message)),
+  )
 }
 
 @target(javascript)
@@ -281,6 +329,10 @@ pub type Patch {
 /// The `render` function is called for each item and returns a `Component`.
 /// For plain HTML items, wrap with [`component.static`](#static).
 ///
+/// Event bindings declared inside `render` are not collected. Attach
+/// per-list events to this `each` component or any ancestor (selectors are
+/// global, so one handler on `.card` covers every card).
+///
 /// ```gleam
 /// component.each(
 ///   slice: fn(model) { model.counters },
@@ -324,6 +376,10 @@ pub fn each(
 /// The `initial` function returns a `Component` for each item's first render.
 /// Wrap plain HTML with [`component.static`](#static). The `patch`
 /// function returns patches applied on updates (the item's root must remain).
+///
+/// Event bindings declared inside `initial` are not collected. Attach
+/// per-list events to this `each_live` component or any ancestor (selectors
+/// are global, so one handler covers every item).
 ///
 /// ```gleam
 /// component.each_live(
@@ -429,8 +485,9 @@ pub fn live(
 
 @target(javascript)
 /// This is the entry point for rendering, mounting a component tree to a
-/// specific DOM element. It creates a subscription to the store and renders
-/// the entire component tree whenever the model changes.
+/// specific DOM element. It creates a subscription to the store, renders
+/// the entire component tree, and walks the tree to register every event
+/// binding attached via [`event.on()`](./event.html#on) and friends.
 ///
 /// - `selector`: CSS selector for the mount point (e.g., `"#app"`)
 /// - `to_html`: Function to convert `html` type to `String` (e.g.,
@@ -441,6 +498,13 @@ pub fn live(
 ///   `fn() { element.element("lily-slot", [], []) }`. For raw HTML strings:
 ///   `fn() { "<lily-slot></lily-slot>" }`.
 /// - `view`: Function that takes the model and returns the root component tree
+///
+/// `mount` can be called more than once on a shared runtime, with
+/// different selectors, to drive multiple DOM roots from one model. This
+/// is how overlays / portals work: mount your main view at `#app` and a
+/// secondary overlays view at `#overlays`. Both views subscribe to the
+/// same model and update on every dispatch. Calling `mount` twice on the
+/// same selector tears down the previous mount and replaces it.
 ///
 /// ```gleam
 /// runtime
@@ -458,9 +522,14 @@ pub fn mount(
   to_slot to_slot: fn() -> html,
   view view: fn(model) -> Component(model, message, html),
 ) -> Runtime(model, message) {
-  // Initial render - this sets up all component subscriptions
   let model = get_model(runtime)
   let tree = view(model)
+  // Render handles binding registration too: renderComponent on the JS
+  // side queues every WithEvents wrapper's bindings (including those
+  // inside slot children, which the Gleam-side tree walk can't reach
+  // because slot children are constructed via the slotter callback at
+  // render time). render_tree drains the queue after innerHTML, so
+  // element-scoped listeners find their target in the DOM.
   render_tree(runtime, selector, tree, model, to_html, to_slot)
 
   runtime
@@ -514,6 +583,10 @@ pub fn require_connection(
 ///   }
 /// )
 /// ```
+///
+/// Pipe through [`event.on()`](./event.html#on) and friends to attach DOM
+/// event handlers to the rendered subtree, registered once at
+/// [`mount`](#mount).
 pub fn simple(
   slice slice: fn(model) -> a,
   render render: fn(a, Slotter(model, message, html)) -> html,
@@ -543,6 +616,48 @@ pub fn static(
 }
 
 @target(javascript)
+/// Single-slot dynamic switching with identity preservation. `slice` picks a
+/// discriminator from the model; `build` turns that discriminator into a
+/// Component. When the slice value is unchanged across renders, the wrapper
+/// and child DOM are not touched, so focus, selection, and in-progress
+/// input survive. When the slice changes, the old child's handlers are
+/// unregistered, the new Component is built and rendered, and the wrapper's
+/// innerHTML is replaced.
+///
+/// Switch compares by reference equality by default, pipe through
+/// [`structural`](#structural) when the slice constructs new values on
+/// every call (tuples, records). Pair with
+/// [`event.on()`](./event.html#on) on the Switch itself to bind events:
+/// bindings declared inside `build`'s returned Component are not collected
+/// at mount and never fire. Selectors are global, so one handler on
+/// `.panel-close` covers every panel rendered by the switch.
+///
+/// ## Example
+///
+/// ```gleam
+/// component.switch(
+///   on: fn(m: Model) { m.route },
+///   case_of: fn(route) {
+///     case route {
+///       Home -> home_page()
+///       Profile -> profile_page()
+///       Settings -> settings_page()
+///     }
+///   },
+/// )
+/// ```
+pub fn switch(
+  on slice: fn(model) -> a,
+  case_of build: fn(a) -> Component(model, message, html),
+) -> Component(model, message, html) {
+  Switch(
+    slice: fn(model) { to_dynamic(slice(model)) },
+    build: fn(data) { build(from_dynamic(data)) },
+    compare_structural: False,
+  )
+}
+
+@target(javascript)
 /// Switch a component's comparison strategy from reference to structural
 /// equality. By default, components use reference equality (`===`) to detect
 /// slice changes. This works well for primitives and unchanged references.
@@ -551,8 +666,8 @@ pub fn static(
 /// other constructed values on every call.
 ///
 /// `Static` and `Fragment` components don't compare slices, so this returns
-/// them unchanged. `RequireConnection` recurses into the wrapped inner
-/// component.
+/// them unchanged. `RequireConnection`, `Transition`, and `WithEvents`
+/// recurse into the wrapped inner component.
 ///
 /// ```gleam
 /// component.simple(
@@ -569,11 +684,146 @@ pub fn structural(
     Live(..) -> Live(..component, compare_structural: True)
     Each(..) -> Each(..component, compare_structural: True)
     EachLive(..) -> EachLive(..component, compare_structural: True)
+    Switch(..) -> Switch(..component, compare_structural: True)
     RequireConnection(inner:, connected:) ->
       RequireConnection(inner: structural(inner), connected:)
+    Transition(enter:, exit:, duration_milliseconds:, child:) ->
+      Transition(
+        enter:,
+        exit:,
+        duration_milliseconds:,
+        child: structural(child),
+      )
+    WithEvents(inner:, bindings:) ->
+      WithEvents(inner: structural(inner), bindings:)
     Static(..) | Fragment(..) -> component
   }
 }
+
+@target(javascript)
+/// Wrap a child with enter and exit CSS classes timed to a duration. On
+/// mount, the wrapper carries `enter` for `duration_milliseconds`, then
+/// the class is removed. On unmount (when an enclosing `each`, `each_live`,
+/// or `switch` removes the wrapper), `exit` is applied and DOM removal is
+/// deferred by the same duration, with `animationend` taking precedence if
+/// the CSS fires it first.
+///
+/// The CSS contract is keyframes-based:
+///
+/// ```css
+/// .dialog-enter { animation: dialog-enter 200ms; }
+/// .dialog-exit  { animation: dialog-exit 200ms forwards; }
+/// @keyframes dialog-enter { from { opacity: 0 } to { opacity: 1 } }
+/// @keyframes dialog-exit  { from { opacity: 1 } to { opacity: 0 } }
+/// ```
+///
+/// `forwards` on exit keeps the final state visible while the framework
+/// holds the element in the DOM, preventing a flicker before removal.
+///
+/// **Placement rule**: transitions fire only when the framework's
+/// removal path runs through them. That happens for `each`, `each_live`,
+/// and `switch` child removal. Placing a Transition inside a `simple`'s
+/// render does not run exits on parent re-render, since `simple`'s
+/// innerHTML wipe is synchronous. Hoist the Transition to an `each_live`
+/// item or a `switch` child if you need exits to fire.
+///
+/// ## Example
+///
+/// ```gleam
+/// component.each_live(
+///   slice: fn(m) { m.toasts },
+///   key: fn(t) { int.to_string(t.id) },
+///   initial: fn(toast) {
+///     component.transition(
+///       enter: "toast-enter",
+///       exit: "toast-exit",
+///       duration_milliseconds: 200,
+///       child: component.static(fn(_) { render_toast(toast) }),
+///     )
+///   },
+///   patch: fn(_) { [] },
+/// )
+/// ```
+pub fn transition(
+  enter enter: String,
+  exit exit: String,
+  duration_milliseconds duration_milliseconds: Int,
+  child child: Component(model, message, html),
+) -> Component(model, message, html) {
+  Transition(enter:, exit:, duration_milliseconds:, child:)
+}
+
+// =============================================================================
+// INTERNAL FUNCTIONS
+// =============================================================================
+
+@target(javascript)
+@internal
+/// Attach an event binding to a component. Wraps the component in a
+/// `WithEvents` variant; if the component is already wrapped, appends to its
+/// binding list instead. Intended to be called from `lily/event`, not by
+/// users.
+pub fn attach_event(
+  component component: Component(model, message, html),
+  binding binding: EventBinding(model, message),
+) -> Component(model, message, html) {
+  case component {
+    WithEvents(inner:, bindings:) ->
+      WithEvents(inner:, bindings: [binding, ..bindings])
+    Each(..)
+    | EachLive(..)
+    | Fragment(..)
+    | Live(..)
+    | RequireConnection(..)
+    | Simple(..)
+    | Static(..)
+    | Switch(..)
+    | Transition(..) -> WithEvents(inner: component, bindings: [binding])
+  }
+}
+
+@target(javascript)
+@internal
+/// Walk the component tree, invoking every event binding declared via
+/// `event.on*`. Recurses through wrappers (WithEvents, RequireConnection)
+/// and into Fragment children. Stops at Each/EachLive: their per-item
+/// render bodies are not inspected, so events declared inside item
+/// components are ignored by design (see the `each` / `each_live`
+/// docstrings).
+///
+/// Called from [`mount`](#mount) before the FFI render pass. Exposed as
+/// `@internal` so tests can register bindings without mounting (and thus
+/// without wiping the DOM container).
+pub fn register_bindings(
+  runtime: Runtime(model, message),
+  component: Component(model, message, html),
+) -> Nil {
+  case component {
+    WithEvents(inner:, bindings:) -> {
+      list.each(bindings, fn(binding) { binding(runtime) })
+      register_bindings(runtime, inner)
+    }
+    Fragment(children:) ->
+      list.each(children, fn(child) { register_bindings(runtime, child) })
+    RequireConnection(inner:, connected: _) ->
+      register_bindings(runtime, inner)
+    Transition(child:, ..) -> register_bindings(runtime, child)
+    Each(..) | EachLive(..) | Live(..) | Simple(..) | Static(..) | Switch(..) ->
+      Nil
+  }
+}
+
+// =============================================================================
+// PRIVATE TYPES
+// =============================================================================
+
+@target(javascript)
+/// A self-contained event binding. Built by the `event.on*` functions, which
+/// capture the event constant, selector, options, and handler inside the
+/// closure. Invoked with the runtime during `mount` to register the
+/// underlying DOM listener.
+type EventBinding(model, message) =
+  fn(Runtime(model, message)) -> Nil
 
 // =============================================================================
 // PRIVATE FFI
