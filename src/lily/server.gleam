@@ -119,6 +119,45 @@ pub fn disconnect(
   platform_disconnect(server.handle, client_id)
 }
 
+/// Apply `message` to the session store of one connected client and send a
+/// `SessionUpdate` frame back to that client. Use for server-initiated
+/// per-client updates: pushing a fresh slice after authentication, server
+/// timers that affect one user, async DB results, and so on.
+///
+/// No-op if no client with `client_id` is currently connected. Safe to call
+/// from any process, including spawned tasks, so it composes with async
+/// work patterns: spawn a process to do the slow thing, then call
+/// `dispatch_to` when the result is ready.
+///
+/// ```gleam
+/// server.on_connect(srv, fn(client_id) {
+///   server.dispatch_to(srv, client_id:, message: WelcomeUser(client_id))
+/// })
+/// ```
+pub fn dispatch_to(
+  server: Server(model, message),
+  client_id client_id: String,
+  message message: message,
+) -> Nil {
+  platform_dispatch_to(server.handle, client_id, message)
+}
+
+/// Apply `message` to every connected client's session store and send each
+/// of them a `SessionUpdate` frame. Use for server-wide announcements that
+/// also mutate session state, such as forcing a feature-flag refresh. For
+/// fire-and-forget broadcasts without session mutation, use a topic
+/// instead.
+///
+/// ```gleam
+/// server.dispatch_to_all(srv, message: SystemBannerUpdated(banner))
+/// ```
+pub fn dispatch_to_all(
+  server: Server(model, message),
+  message message: message,
+) -> Nil {
+  platform_dispatch_to_all(server.handle, message)
+}
+
 /// Generate a cryptographically random 32-character hex client identifier.
 /// Pair with [`connect`](#connect) so every connection carries a stable,
 /// server-issued id.
@@ -160,6 +199,38 @@ pub fn new(
   wiring wiring: store.Wiring(model, message),
 ) -> Builder(model, message) {
   Builder(initial_model: initial, serialiser:, wiring:)
+}
+
+/// Register a hook that runs after a client successfully connects, receiving
+/// the client id assigned by the server. Use for presence tracking, audit
+/// logging, or seeding the client's session via
+/// [`dispatch_to`](#dispatch_to).
+///
+/// ```gleam
+/// server.on_connect(srv, fn(client_id) {
+///   logging.info("client connected: " <> client_id)
+/// })
+/// ```
+pub fn on_connect(
+  server: Server(model, message),
+  hook: fn(String) -> Nil,
+) -> Nil {
+  platform_set_connect_hook(server.handle, hook)
+}
+
+/// Register a hook that runs after a client disconnects, receiving the client
+/// id that just left. Use for presence cleanup or audit logging.
+///
+/// ```gleam
+/// server.on_disconnect(srv, fn(client_id) {
+///   logging.info("client disconnected: " <> client_id)
+/// })
+/// ```
+pub fn on_disconnect(
+  server: Server(model, message),
+  hook: fn(String) -> Nil,
+) -> Nil {
+  platform_set_disconnect_hook(server.handle, hook)
 }
 
 /// Register a hook that runs after each session message is applied. Receives
@@ -223,6 +294,8 @@ pub fn start(
       sessions: dict.new(),
       topics: dict.new(),
       topic_kinds: [],
+      on_connect_hook: fn(_) { Nil },
+      on_disconnect_hook: fn(_) { Nil },
       on_message_hook: fn(_, _, _) { Nil },
       on_topic_message_hook: fn(_, _, _) { Nil },
     )
@@ -321,7 +394,11 @@ type ServerHandle(model, message) =
 type InternalEvent(model, message) {
   ClientConnected(client_id: String, send: fn(BitArray) -> Nil)
   ClientDisconnected(client_id: String)
+  DispatchToClient(client_id: String, message: message)
+  DispatchToAllClients(message: message)
   Incoming(client_id: String, bytes: BitArray)
+  SetConnectHook(hook: fn(String) -> Nil)
+  SetDisconnectHook(hook: fn(String) -> Nil)
   SetHook(hook: fn(message, model, String) -> Nil)
   SetTopicMessageHook(hook: fn(message, String, String) -> Nil)
   RegisterTopic(
@@ -359,6 +436,8 @@ type ServerState(model, message) {
     sessions: Dict(String, ConnectionState(model, message)),
     topics: Dict(String, ServerTopicEntry(model, message)),
     topic_kinds: List(TopicKindEntry(model, message)),
+    on_connect_hook: fn(String) -> Nil,
+    on_disconnect_hook: fn(String) -> Nil,
     on_message_hook: fn(message, model, String) -> Nil,
     on_topic_message_hook: fn(message, String, String) -> Nil,
   )
@@ -380,6 +459,7 @@ fn handle_connect_logic(
     transport.Connected(client_id:),
     serialiser: state.serialiser,
   ))
+  state.on_connect_hook(client_id)
   ServerState(..state, clients:, sessions:)
 }
 
@@ -390,7 +470,50 @@ fn handle_disconnect_logic(
   dict.each(state.topics, fn(_id, entry) { entry.unsubscribe(client_id) })
   let clients = dict.delete(state.clients, client_id)
   let sessions = dict.delete(state.sessions, client_id)
+  state.on_disconnect_hook(client_id)
   ServerState(..state, clients:, sessions:)
+}
+
+fn handle_dispatch_to_logic(
+  state: ServerState(model, message),
+  client_id: String,
+  message: message,
+) -> ServerState(model, message) {
+  case dict.get(state.sessions, client_id), dict.get(state.clients, client_id)
+  {
+    Ok(connection), Ok(send) -> {
+      let new_model = case state.session_apply {
+        option.None -> connection.model
+        option.Some(apply) -> apply(connection.model, message)
+      }
+      let new_sequence = connection.sequence + 1
+      let frame =
+        transport.encode(
+          transport.SessionUpdate(sequence: new_sequence, payload: message),
+          serialiser: state.serialiser,
+        )
+      send(frame)
+      let sessions =
+        dict.insert(
+          state.sessions,
+          client_id,
+          ConnectionState(model: new_model, sequence: new_sequence),
+        )
+      ServerState(..state, sessions:)
+    }
+    _, _ -> state
+  }
+}
+
+fn handle_dispatch_to_all_logic(
+  state: ServerState(model, message),
+  message: message,
+) -> ServerState(model, message) {
+  // Fold across every connected client; each iteration produces an updated
+  // ServerState whose sessions dict reflects the dispatch for that client.
+  dict.fold(state.clients, state, fn(acc, client_id, _send) {
+    handle_dispatch_to_logic(acc, client_id, message)
+  })
 }
 
 fn handle_incoming_logic(
@@ -419,6 +542,7 @@ fn handle_incoming_logic(
     | Ok(transport.Connected(_))
     | Ok(transport.Push(_, _))
     | Ok(transport.Rejected(_, _))
+    | Ok(transport.SessionUpdate(_, _))
     | Ok(transport.Snapshot(_, _, _))
     | Ok(transport.TopicUpdate(_, _, _)) -> state
 
@@ -623,6 +747,20 @@ fn handle_unregister_topic_logic(
   ServerState(..state, topics:)
 }
 
+fn handle_set_connect_hook_logic(
+  state: ServerState(model, message),
+  hook: fn(String) -> Nil,
+) -> ServerState(model, message) {
+  ServerState(..state, on_connect_hook: hook)
+}
+
+fn handle_set_disconnect_hook_logic(
+  state: ServerState(model, message),
+  hook: fn(String) -> Nil,
+) -> ServerState(model, message) {
+  ServerState(..state, on_disconnect_hook: hook)
+}
+
 fn handle_set_hook_logic(
   state: ServerState(model, message),
   hook: fn(message, model, String) -> Nil,
@@ -683,8 +821,20 @@ fn handle_message(
     ClientDisconnected(client_id:) ->
       handle_disconnect_logic(state, client_id) |> actor.continue
 
+    DispatchToClient(client_id:, message:) ->
+      handle_dispatch_to_logic(state, client_id, message) |> actor.continue
+
+    DispatchToAllClients(message:) ->
+      handle_dispatch_to_all_logic(state, message) |> actor.continue
+
     Incoming(client_id:, bytes:) ->
       handle_incoming_logic(state, client_id, bytes) |> actor.continue
+
+    SetConnectHook(hook:) ->
+      handle_set_connect_hook_logic(state, hook) |> actor.continue
+
+    SetDisconnectHook(hook:) ->
+      handle_set_disconnect_hook_logic(state, hook) |> actor.continue
 
     SetHook(hook:) -> handle_set_hook_logic(state, hook) |> actor.continue
 
@@ -735,6 +885,23 @@ fn platform_disconnect(
 }
 
 @target(erlang)
+fn platform_dispatch_to(
+  handle: ServerHandle(model, message),
+  client_id: String,
+  message: message,
+) -> Nil {
+  actor.send(handle, DispatchToClient(client_id:, message:))
+}
+
+@target(erlang)
+fn platform_dispatch_to_all(
+  handle: ServerHandle(model, message),
+  message: message,
+) -> Nil {
+  actor.send(handle, DispatchToAllClients(message:))
+}
+
+@target(erlang)
 fn platform_do_subscribe(
   handle: ServerHandle(model, message),
   client_id: String,
@@ -770,6 +937,22 @@ fn platform_register_topic_kind(
   process.call(handle, 5000, fn(reply) {
     RegisterTopicKind(prefix:, create:, reply:)
   })
+}
+
+@target(erlang)
+fn platform_set_connect_hook(
+  handle: ServerHandle(model, message),
+  hook: fn(String) -> Nil,
+) -> Nil {
+  actor.send(handle, SetConnectHook(hook:))
+}
+
+@target(erlang)
+fn platform_set_disconnect_hook(
+  handle: ServerHandle(model, message),
+  hook: fn(String) -> Nil,
+) -> Nil {
+  actor.send(handle, SetDisconnectHook(hook:))
 }
 
 @target(erlang)
@@ -858,6 +1041,23 @@ fn platform_disconnect(
 }
 
 @target(javascript)
+fn platform_dispatch_to(
+  handle: ServerHandle(model, message),
+  client_id: String,
+  message: message,
+) -> Nil {
+  modify(handle, handle_dispatch_to_logic(_, client_id, message))
+}
+
+@target(javascript)
+fn platform_dispatch_to_all(
+  handle: ServerHandle(model, message),
+  message: message,
+) -> Nil {
+  modify(handle, handle_dispatch_to_all_logic(_, message))
+}
+
+@target(javascript)
 fn platform_do_subscribe(
   handle: ServerHandle(model, message),
   client_id: String,
@@ -899,6 +1099,22 @@ fn platform_register_topic_kind(
     handle_register_kind_logic(_, prefix, create),
     Error(Nil),
   )
+}
+
+@target(javascript)
+fn platform_set_connect_hook(
+  handle: ServerHandle(model, message),
+  hook: fn(String) -> Nil,
+) -> Nil {
+  modify(handle, handle_set_connect_hook_logic(_, hook))
+}
+
+@target(javascript)
+fn platform_set_disconnect_hook(
+  handle: ServerHandle(model, message),
+  hook: fn(String) -> Nil,
+) -> Nil {
+  modify(handle, handle_set_disconnect_hook_logic(_, hook))
 }
 
 @target(javascript)

@@ -189,6 +189,12 @@ pub type Protocol(model, message) {
   /// of the originating connection.
   SessionMessage(payload: message)
 
+  /// Carries an applied session-store update from the server to a single
+  /// targeted client, sent by [`server.dispatch_to`](./server.html#dispatch_to)
+  /// or [`server.dispatch_to_all`](./server.html#dispatch_to_all).
+  /// Sequence is the client's session sequence after applying.
+  SessionUpdate(sequence: Int, payload: message)
+
   /// Sent by the server in response to `Resync` (per target) and to a
   /// `Subscribe` (for the subscribed topic).
   Snapshot(target: Target, sequence: Int, state: model)
@@ -440,6 +446,51 @@ pub fn encode(
       encode_json(protocol, encode_message, encode_model)
     CustomBinary(codec:) -> encode_message_pack_protocol(protocol, codec)
   }
+}
+
+/// Encode a model as an inline hydration payload to embed inside
+/// server-rendered HTML. Returns
+/// `<script type="application/json" id="lily-snapshot">...</script>` with
+/// a JSON-encoded `Snapshot(Session, 0, model)` frame inside.
+/// [`client.hydrate`](./client.html#hydrate) reads this on mount and uses
+/// the embedded model as the initial state, avoiding a round-trip on
+/// first paint.
+///
+/// Always uses JSON regardless of the serialiser's `automatic` format
+/// toggle, since binary MessagePack is not safe to inline inside HTML.
+/// `CustomBinary` serialisers will produce a snapshot whose payload is a
+/// base16-encoded representation of the binary bytes; prefer `automatic`
+/// or `custom_json` for SSR.
+///
+/// ```gleam
+/// let body = "<!DOCTYPE html><html><body>"
+///   <> "<div id=\"app\">" <> rendered_html <> "</div>"
+///   <> transport.encode_initial_snapshot(
+///     serialiser: shared.serialiser(),
+///     model: initial_model,
+///   )
+///   <> "</body></html>"
+/// ```
+pub fn encode_initial_snapshot(
+  serialiser serialiser: Serialiser(model, message),
+  model model: model,
+) -> String {
+  let frame = Snapshot(target: Session, sequence: 0, state: model)
+  // Force JSON for the inline payload; MessagePack is binary and not
+  // HTML-safe. `CustomJson` is already JSON, and `Auto` flips to JSON
+  // regardless of its current format toggle. `CustomBinary` users keep
+  // their binary codec and accept that the embedded bytes may not be
+  // HTML-safe (documented in the function docstring).
+  let json_serialiser = case serialiser {
+    Auto(_, codec) -> Auto(AutoJson, codec)
+    CustomJson(_, _, _, _) -> serialiser
+    CustomBinary(_) -> serialiser
+  }
+  let bytes = encode(frame, serialiser: json_serialiser)
+  let json_text = bit_array.to_string(bytes) |> result.unwrap("")
+  "<script type=\"application/json\" id=\"lily-snapshot\">"
+  <> json_text
+  <> "</script>"
 }
 
 @target(javascript)
@@ -748,6 +799,13 @@ fn encode_json(
         #("payload", encode_message(payload)),
       ])
 
+    SessionUpdate(sequence:, payload:) ->
+      json.object([
+        #("type", json.string("session_update")),
+        #("sequence", json.int(sequence)),
+        #("payload", encode_message(payload)),
+      ])
+
     Snapshot(target:, sequence:, state:) ->
       json.object([
         #("type", json.string("snapshot")),
@@ -811,6 +869,7 @@ fn protocol_decoder(
     "rejected" -> rejected_decoder()
     "resync" -> resync_decoder()
     "session_message" -> session_message_decoder(decode_message)
+    "session_update" -> session_update_decoder(decode_message)
     "snapshot" -> snapshot_decoder(decode_model)
     "subscribe" -> subscribe_decoder()
     "topic_message" -> topic_message_decoder(decode_message)
@@ -854,6 +913,15 @@ fn session_message_decoder(
 ) -> decode.Decoder(Protocol(model, message)) {
   use payload <- decode.field("payload", decode_message)
   decode.success(SessionMessage(payload:))
+}
+
+/// Decoder for `SessionUpdate`
+fn session_update_decoder(
+  decode_message: decode.Decoder(message),
+) -> decode.Decoder(Protocol(model, message)) {
+  use sequence <- decode.field("sequence", decode.int)
+  use payload <- decode.field("payload", decode_message)
+  decode.success(SessionUpdate(sequence:, payload:))
 }
 
 /// Decoder for `Snapshot`
@@ -973,6 +1041,13 @@ fn encode_message_pack_protocol(
         #(str("payload"), bin(codec.encode_message(payload))),
       ])
 
+    SessionUpdate(sequence:, payload:) ->
+      message_pack.encode_map([
+        #(str("type"), str("session_update")),
+        #(str("sequence"), int_bytes(sequence)),
+        #(str("payload"), bin(codec.encode_message(payload))),
+      ])
+
     Snapshot(target:, sequence:, state:) ->
       message_pack.encode_map([
         #(str("type"), str("snapshot")),
@@ -1088,6 +1163,15 @@ fn decode_message_pack_envelope(
       use payload_bytes <- result.try(value_bytes(payload_value))
       use payload <- result.try(codec.decode_message(payload_bytes))
       Ok(SessionMessage(payload:))
+    }
+
+    "session_update" -> {
+      use sequence_value <- result.try(envelope_get(entries, "sequence"))
+      use sequence <- result.try(value_int(sequence_value))
+      use payload_value <- result.try(envelope_get(entries, "payload"))
+      use payload_bytes <- result.try(value_bytes(payload_value))
+      use payload <- result.try(codec.decode_message(payload_bytes))
+      Ok(SessionUpdate(sequence:, payload:))
     }
 
     "snapshot" -> {

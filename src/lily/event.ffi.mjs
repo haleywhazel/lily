@@ -1,7 +1,9 @@
 /**
- * This mjs file attaches event listeners to DOM elements. Events are attached
- * once and persist for the lifetime of the page. Handlers call back into Gleam
- * code which sends messages to the store.
+ * This mjs file attaches event listeners to DOM elements. Every setup*
+ * function delegates from the document (or window for window-only events
+ * like resize) and filters by selector inside the listener, so a handler
+ * survives any number of innerHTML re-renders of its target. The selector
+ * scopes WHICH clicks match, not WHERE the listener lives.
  *
  * The *WithOptions variants accept an options array [debounceMs, throttleMs,
  * once, stopPropagation, preventDefault] (debounceMs and throttleMs are -1
@@ -10,13 +12,10 @@
  * fires on every event even when debounce/throttle would skip the inner
  * handler.
  *
- * setupElementEventWithOptions / setupCoordinateElementEventWithOptions use
- * event delegation and attach to document rather than a single queried
- * element, so they work correctly with dynamically-rendered lists (e.g.
- * each/each_live). Non-bubbling events (mouseenter/mouseleave, focus/blur)
- * are mapped to their bubbling equivalents (mouseover/mouseout,
- * focusin/focusout) with a relatedTarget guard to preserve enter/leave
- * semantics.
+ * Non-bubbling events (mouseenter/mouseleave, focus/blur) are mapped to
+ * their bubbling equivalents (mouseover/mouseout, focusin/focusout) with a
+ * relatedTarget guard to preserve enter/leave semantics. Scroll uses
+ * capture-phase delegation because scroll does not bubble.
  */
 
 import { NonEmpty, Empty } from "../gleam.mjs";
@@ -25,11 +24,21 @@ import { NonEmpty, Empty } from "../gleam.mjs";
 // HELPERS
 // =============================================================================
 
-/** Resolves a selector to a DOM target (handles "document" and "window") */
-function resolveTarget(selector) {
-  if (selector === "document") return document;
-  if (selector === "window") return window;
-  return document.querySelector(selector);
+/**
+ * Pick the delegation root for a selector. Window-only events listen on
+ * window; everything else delegates from document.
+ */
+function delegationRoot(selector) {
+  return selector === "window" ? window : document;
+}
+
+/**
+ * Returns true when the event happened inside an element matching the
+ * selector, treating "document" and "window" as "anywhere on the page".
+ */
+function matchesSelectorScope(event, selector) {
+  if (selector === "document" || selector === "window") return true;
+  return event.target.closest?.(selector) !== null;
 }
 
 /**
@@ -173,53 +182,86 @@ const FOCUSABLE_SELECTOR = [
   '[contenteditable]:not([contenteditable="false"])',
 ].join(",");
 
-// Singleton trap state, holds the keydown listener so releaseFocusTrap can
-// detach it. Only one trap is active at a time; nested-modal scenarios fall
-// outside the current scope.
-let activeTrap = null;
+// Stack of focus traps. Each entry is { within, releaseOn, onExit }. The
+// top of the stack is the active trap; entries below are suspended until
+// the entries above them are popped. A single document-level keydown
+// listener (trapKeydownHandler) consults the top entry on every keypress,
+// so nested overlays each get deterministic focus behaviour without
+// listener races.
+const trapStack = [];
+let trapKeydownHandler = null;
 
-/** Attach the trap keydown listener once the container has rendered. */
-function activateTrap(within, releaseOn, onExit) {
-  const container = document.querySelector(within);
+/** Return the top of the trap stack, or null if empty. */
+function topTrap() {
+  return trapStack.length === 0 ? null : trapStack[trapStack.length - 1];
+}
+
+/** Install the document keydown listener if not already installed. */
+function installTrapKeydownHandler() {
+  if (trapKeydownHandler !== null) return;
+  trapKeydownHandler = (event) => {
+    const trap = topTrap();
+    if (trap !== null) handleTrapKeydown(event, trap);
+  };
+  // Capture phase so the trap sees Tab before any element-level handlers.
+  document.addEventListener("keydown", trapKeydownHandler, true);
+}
+
+/** Remove the document keydown listener if installed. */
+function uninstallTrapKeydownHandler() {
+  if (trapKeydownHandler === null) return;
+  document.removeEventListener("keydown", trapKeydownHandler, true);
+  trapKeydownHandler = null;
+}
+
+/**
+ * Handle a keydown event against the given trap. Runs releaseOn first so a
+ * user-defined exit (e.g. Escape) wins over Tab cycling. The container is
+ * re-queried on every keydown so DOM swaps from a parent component.simple
+ * re-render do not strand the trap on a detached node. Focusables are
+ * re-enumerated on every Tab press for dynamic content inside the container.
+ */
+function handleTrapKeydown(event, trap) {
+  if (trap.releaseOn(event.key)) {
+    event.preventDefault();
+    popFocusTrap();
+    trap.onExit();
+    return;
+  }
+  if (event.key !== "Tab") return;
+
+  const container = document.querySelector(trap.within);
   if (!container) return;
 
-  const handler = (event) => {
-    // User-defined exit, runs first so it wins over Tab cycling
-    if (releaseOn(event.key)) {
-      event.preventDefault();
-      releaseFocusTrap();
-      onExit();
-      return;
-    }
-    if (event.key !== "Tab") return;
+  const focusables = Array.from(
+    container.querySelectorAll(FOCUSABLE_SELECTOR),
+  ).filter((element) => element.offsetParent !== null);
+  if (focusables.length === 0) {
+    event.preventDefault();
+    return;
+  }
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  const current = document.activeElement;
 
-    const focusables = Array.from(
-      container.querySelectorAll(FOCUSABLE_SELECTOR),
-    ).filter((element) => element.offsetParent !== null);
-    if (focusables.length === 0) {
-      event.preventDefault();
-      return;
-    }
-    const first = focusables[0];
-    const last = focusables[focusables.length - 1];
-    const current = document.activeElement;
+  if (event.shiftKey && current === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && current === last) {
+    event.preventDefault();
+    first.focus();
+  } else if (!container.contains(current)) {
+    // Focus drifted outside (e.g. window blurred and refocused), pull back.
+    event.preventDefault();
+    first.focus();
+  }
+}
 
-    if (event.shiftKey && current === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && current === last) {
-      event.preventDefault();
-      first.focus();
-    } else if (!container.contains(current)) {
-      // Focus drifted outside (e.g. window blurred and refocused), pull back
-      event.preventDefault();
-      first.focus();
-    }
-  };
-
-  // Capture phase so the trap sees Tab before any element-level handlers
-  document.addEventListener("keydown", handler, true);
-  activeTrap = handler;
+/** Pop the top trap. Uninstall the document listener if the stack empties. */
+function popFocusTrap() {
+  if (trapStack.length === 0) return;
+  trapStack.pop();
+  if (trapStack.length === 0) uninstallTrapKeydownHandler();
 }
 
 // =============================================================================
@@ -234,9 +276,8 @@ function activateTrap(within, releaseOn, onExit) {
  */
 export function setupClickEventWithOptions(selector, options, handler) {
   const [debounceMs, throttleMs, once, stopPropagation, preventDefault] = options;
-  const target = resolveTarget(selector);
-  if (!target) return;
   let listener = (event) => {
+    if (!matchesSelectorScope(event, selector)) return;
     if (event.target.closest("[data-lily-disabled]")) return;
     const matched = event.target.closest("[data-msg]");
     if (!matched) return;
@@ -244,7 +285,7 @@ export function setupClickEventWithOptions(selector, options, handler) {
   };
   listener = applyOptions(listener, debounceMs, throttleMs, once, stopPropagation);
   if (preventDefault) listener = preventDefaultFirst(listener);
-  target.addEventListener("click", listener);
+  document.addEventListener("click", listener);
 }
 
 // coordinate events (coords only, no element data)
@@ -255,15 +296,14 @@ export function setupClickEventWithOptions(selector, options, handler) {
  */
 export function setupCoordinateEventWithOptions(selector, eventName, options, handler) {
   const [debounceMs, throttleMs, once, stopPropagation, preventDefault] = options;
-  const target = resolveTarget(selector);
-  if (!target) return;
   let listener = (event) => {
+    if (!matchesSelectorScope(event, selector)) return;
     if (event.target.closest("[data-lily-disabled]")) return;
     handler(event.clientX, event.clientY);
   };
   listener = applyOptions(listener, debounceMs, throttleMs, once, stopPropagation);
   if (preventDefault) listener = preventDefaultFirst(listener);
-  target.addEventListener(eventName, listener);
+  delegationRoot(selector).addEventListener(eventName, listener);
 }
 
 // coordinate + element data events
@@ -337,24 +377,28 @@ export function setupFocus(selector) {
   });
 }
 
-/** Activate Tab-cycling focus trap; releases on releaseOn(key) === true. */
+/**
+ * Push a new focus trap onto the stack. Tab cycles within `within` while
+ * this trap is the top of the stack; releaseOn runs on every keydown and
+ * returning true pops the trap and dispatches onExit. Activation is
+ * deferred by two frames so a dispatch that just rendered the container
+ * has a chance to flush, mirrors the rAF strategy in setupFocus.
+ */
 export function setupFocusTrap(within, releaseOn, onExit) {
-  releaseFocusTrap();
-
-  // Defer activation by two frames so a dispatch that just rendered the
-  // container has a chance to flush, mirrors the rAF strategy in setupFocus.
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
-      activateTrap(within, releaseOn, onExit);
+      trapStack.push({ within, releaseOn, onExit });
+      installTrapKeydownHandler();
     });
   });
 }
 
-/** Remove the active focus trap (no on_exit dispatch). */
+/**
+ * Pop the top focus trap. If another trap is below it, that trap becomes
+ * active again. No on_exit dispatched. No-op when the stack is empty.
+ */
 export function releaseFocusTrap() {
-  if (activeTrap === null) return;
-  document.removeEventListener("keydown", activeTrap, true);
-  activeTrap = null;
+  popFocusTrap();
 }
 
 // form events
@@ -420,20 +464,21 @@ export function setupKeyFullEventWithOptions(
 
 /**
  * Attaches a scroll event that passes the element's scrollTop and scrollLeft
- * values (not delta, absolute position), with options.
+ * values (not delta, absolute position), with options. Scroll does not
+ * bubble so we listen in the capture phase at the delegation root and read
+ * the scroll position from the originating element.
  */
 export function setupScrollPositionEventWithOptions(selector, options, handler) {
   const [debounceMs, throttleMs, once, stopPropagation, preventDefault] = options;
-  const target = resolveTarget(selector);
-  if (!target) return;
   let listener = (event) => {
+    if (!matchesSelectorScope(event, selector)) return;
     if (event.target.closest?.("[data-lily-disabled]")) return;
     const element = event.target;
     handler(element.scrollTop ?? 0, element.scrollLeft ?? 0);
   };
   listener = applyOptions(listener, debounceMs, throttleMs, once, stopPropagation);
   if (preventDefault) listener = preventDefaultFirst(listener);
-  target.addEventListener("scroll", listener);
+  delegationRoot(selector).addEventListener("scroll", listener, true);
 }
 
 // simple events (no data)
@@ -441,15 +486,14 @@ export function setupScrollPositionEventWithOptions(selector, options, handler) 
 /** Attaches a simple event with no event data, with options */
 export function setupSimpleEventWithOptions(selector, eventName, options, handler) {
   const [debounceMs, throttleMs, once, stopPropagation, preventDefault] = options;
-  const target = resolveTarget(selector);
-  if (!target) return;
   let listener = (event) => {
-    if (event.target.closest("[data-lily-disabled]")) return;
+    if (!matchesSelectorScope(event, selector)) return;
+    if (event.target.closest?.("[data-lily-disabled]")) return;
     handler();
   };
   listener = applyOptions(listener, debounceMs, throttleMs, once, stopPropagation);
   if (preventDefault) listener = preventDefaultFirst(listener);
-  target.addEventListener(eventName, listener);
+  delegationRoot(selector).addEventListener(eventName, listener);
 }
 
 // submit events
@@ -488,15 +532,14 @@ export function setupSubmitFormEventWithOptions(selector, options, handler) {
 /** Attaches an input/change event with input value, with options */
 export function setupValueEventWithOptions(selector, eventName, options, handler) {
   const [debounceMs, throttleMs, once, stopPropagation, preventDefault] = options;
-  const target = resolveTarget(selector);
-  if (!target) return;
   let listener = (event) => {
+    if (!matchesSelectorScope(event, selector)) return;
     if (event.target.closest("[data-lily-disabled]")) return;
     handler(event.target.value || "");
   };
   listener = applyOptions(listener, debounceMs, throttleMs, once, stopPropagation);
   if (preventDefault) listener = preventDefaultFirst(listener);
-  target.addEventListener(eventName, listener);
+  document.addEventListener(eventName, listener);
 }
 
 // wheel events
@@ -504,13 +547,12 @@ export function setupValueEventWithOptions(selector, eventName, options, handler
 /** Attaches a wheel event with deltaX and deltaY values, with options */
 export function setupWheelEventWithOptions(selector, options, handler) {
   const [debounceMs, throttleMs, once, stopPropagation, preventDefault] = options;
-  const target = resolveTarget(selector);
-  if (!target) return;
   let listener = (event) => {
+    if (!matchesSelectorScope(event, selector)) return;
     if (event.target.closest("[data-lily-disabled]")) return;
     handler(event.deltaX, event.deltaY);
   };
   listener = applyOptions(listener, debounceMs, throttleMs, once, stopPropagation);
   if (preventDefault) listener = preventDefaultFirst(listener);
-  target.addEventListener("wheel", listener);
+  document.addEventListener("wheel", listener);
 }

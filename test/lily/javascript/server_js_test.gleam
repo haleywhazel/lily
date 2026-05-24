@@ -325,6 +325,102 @@ pub fn js_server_resync_reflects_own_session_only_test() {
 }
 
 // =============================================================================
+// DISPATCH-TO
+// =============================================================================
+
+@target(javascript)
+pub fn js_server_dispatch_to_sends_session_update_test() {
+  let srv = new_server()
+  let get_c1 = connect_client(srv, "c1")
+  server.dispatch_to(srv, client_id: "c1", message: Increment)
+  let msgs = get_c1()
+  msgs |> list.length |> should.equal(1)
+  case msgs {
+    [bytes] ->
+      transport.decode(bytes, serialiser: ser())
+      |> should.equal(
+        Ok(transport.SessionUpdate(sequence: 1, payload: Increment)),
+      )
+    _ -> should.fail()
+  }
+}
+
+@target(javascript)
+pub fn js_server_dispatch_to_unknown_client_is_noop_test() {
+  let srv = new_server()
+  let get_c1 = connect_client(srv, "c1")
+  server.dispatch_to(srv, client_id: "ghost", message: Increment)
+  get_c1() |> list.length |> should.equal(0)
+}
+
+@target(javascript)
+pub fn js_server_dispatch_to_does_not_reach_other_clients_test() {
+  let srv = new_server()
+  let get_c1 = connect_client(srv, "c1")
+  let get_c2 = connect_client(srv, "c2")
+  server.dispatch_to(srv, client_id: "c1", message: Increment)
+  get_c1() |> list.length |> should.equal(1)
+  get_c2() |> list.length |> should.equal(0)
+}
+
+@target(javascript)
+pub fn js_server_dispatch_to_all_reaches_every_client_test() {
+  let srv = new_server()
+  let get_c1 = connect_client(srv, "c1")
+  let get_c2 = connect_client(srv, "c2")
+  server.dispatch_to_all(srv, message: Increment)
+  get_c1() |> list.length |> should.equal(1)
+  get_c2() |> list.length |> should.equal(1)
+}
+
+// =============================================================================
+// ON-CONNECT / ON-DISCONNECT HOOKS
+// =============================================================================
+
+@target(javascript)
+pub fn js_server_on_connect_fires_with_client_id_test() {
+  let srv = new_server()
+  let captured = test_ref.new([])
+  server.on_connect(srv, fn(client_id) {
+    test_ref.set(captured, [client_id, ..test_ref.get(captured)])
+  })
+  let _ = connect_client(srv, "c1")
+  test_ref.get(captured) |> should.equal(["c1"])
+}
+
+@target(javascript)
+pub fn js_server_on_connect_fires_once_per_connect_test() {
+  let srv = new_server()
+  let captured = test_ref.new([])
+  server.on_connect(srv, fn(client_id) {
+    test_ref.set(captured, [client_id, ..test_ref.get(captured)])
+  })
+  let _ = connect_client(srv, "c1")
+  let _ = connect_client(srv, "c2")
+  test_ref.get(captured) |> list.reverse |> should.equal(["c1", "c2"])
+}
+
+@target(javascript)
+pub fn js_server_on_disconnect_fires_with_client_id_test() {
+  let srv = new_server()
+  let captured = test_ref.new([])
+  server.on_disconnect(srv, fn(client_id) {
+    test_ref.set(captured, [client_id, ..test_ref.get(captured)])
+  })
+  let _ = connect_client(srv, "c1")
+  server.disconnect(srv, client_id: "c1")
+  test_ref.get(captured) |> should.equal(["c1"])
+}
+
+@target(javascript)
+pub fn js_server_no_connect_hook_does_not_crash_test() {
+  let srv = new_server()
+  let _ = connect_client(srv, "c1")
+  server.disconnect(srv, client_id: "c1")
+  True |> should.be_true
+}
+
+// =============================================================================
 // ON-MESSAGE HOOK
 // =============================================================================
 

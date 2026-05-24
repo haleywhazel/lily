@@ -17,4 +17,4 @@
 // =============================================================================
 
 /// The current version of Lily.
-pub const version: String = "0.5.0"
+pub const version: String = "0.6.0"

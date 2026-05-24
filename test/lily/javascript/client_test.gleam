@@ -4,7 +4,11 @@
 @target(javascript)
 import gleam/bit_array
 @target(javascript)
+import gleam/list
+@target(javascript)
 import gleam/string
+@target(javascript)
+import gleam/uri.{type Uri}
 @target(javascript)
 import gleeunit/should
 @target(javascript)
@@ -19,6 +23,16 @@ import lily/test_ref
 import lily/test_setup
 @target(javascript)
 import lily/transport
+
+@target(javascript)
+fn uri_path(u: Uri) -> String {
+  u.path
+}
+
+@target(javascript)
+fn history_length() -> Int {
+  test_setup.history_length()
+}
 
 // =============================================================================
 // HELPERS
@@ -206,6 +220,387 @@ pub fn client_connection_status_tracks_disconnect_test() {
 
   client.get_current_model(runtime).connected
   |> should.be_false
+}
+
+// =============================================================================
+// URL / NAVIGATE / REPLACE
+// =============================================================================
+
+@target(javascript)
+pub fn client_url_setter_fires_on_attach_test() {
+  test_setup.reset_dom()
+  test_setup.reset_url()
+  let runtime = new_runtime()
+  let captured: test_ref.Ref(List(String)) = test_ref.new([])
+
+  let _r =
+    client.url(runtime, set: fn(model, uri) {
+      test_ref.set(captured, [
+        uri |> uri_path,
+        ..test_ref.get(captured)
+      ])
+      model
+    })
+
+  test_ref.get(captured) |> should.equal(["/"])
+}
+
+@target(javascript)
+pub fn client_navigate_pushes_history_and_fires_setter_test() {
+  test_setup.reset_dom()
+  test_setup.reset_url()
+  let runtime = new_runtime()
+  let captured: test_ref.Ref(List(String)) = test_ref.new([])
+
+  let _r =
+    client.url(runtime, set: fn(model, uri) {
+      test_ref.set(captured, [
+        uri |> uri_path,
+        ..test_ref.get(captured)
+      ])
+      model
+    })
+
+  client.navigate(runtime, "/projects/42")
+
+  test_ref.get(captured)
+  |> list.reverse
+  |> should.equal(["/", "/projects/42"])
+}
+
+@target(javascript)
+pub fn client_replace_does_not_push_history_test() {
+  test_setup.reset_dom()
+  test_setup.reset_url()
+  let runtime = new_runtime()
+  let captured: test_ref.Ref(List(String)) = test_ref.new([])
+
+  let _r =
+    client.url(runtime, set: fn(model, uri) {
+      test_ref.set(captured, [
+        uri |> uri_path,
+        ..test_ref.get(captured)
+      ])
+      model
+    })
+
+  let history_before = history_length()
+  client.replace(runtime, "/projects?sort=newest")
+  let history_after = history_length()
+
+  history_before |> should.equal(history_after)
+  test_ref.get(captured)
+  |> list.reverse
+  |> should.equal(["/", "/projects"])
+}
+
+// =============================================================================
+// HYDRATE
+// =============================================================================
+
+@target(javascript)
+pub fn client_hydrate_uses_embedded_snapshot_test() {
+  test_setup.reset_dom()
+  // Build a snapshot whose model differs from the store's initial model
+  // so we can prove hydrate read from the embed and not the store.
+  let server_rendered_model =
+    test_fixtures.Model(..test_fixtures.initial_model(), count: 7, name: "Hi")
+  let frame_bytes =
+    transport.encode(
+      transport.Snapshot(
+        target: transport.Session,
+        sequence: 0,
+        state: server_rendered_model,
+      ),
+      serialiser: test_fixtures.custom_serialiser(),
+    )
+  let assert Ok(json_text) = bit_array.to_string(frame_bytes)
+  test_setup.inject_snapshot_script(json_text)
+
+  let runtime =
+    store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+    |> client.hydrate(
+      wiring: store.wiring(),
+      serialiser: test_fixtures.custom_serialiser(),
+    )
+
+  let model = client.get_current_model(runtime)
+  model.count |> should.equal(7)
+  model.name |> should.equal("Hi")
+}
+
+@target(javascript)
+pub fn client_hydrate_falls_back_to_store_when_snapshot_missing_test() {
+  test_setup.reset_dom()
+  // No lily-snapshot script in the DOM; hydrate should silently use the
+  // store's initial model.
+  let runtime =
+    store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+    |> client.hydrate(
+      wiring: store.wiring(),
+      serialiser: test_fixtures.custom_serialiser(),
+    )
+
+  let model = client.get_current_model(runtime)
+  model.count |> should.equal(0)
+  model.name |> should.equal("")
+}
+
+// =============================================================================
+// INBOUND SESSION-UPDATE
+// =============================================================================
+
+@target(javascript)
+pub fn client_session_update_applies_to_session_test() {
+  test_setup.reset_dom()
+  test_setup.reset_mocks()
+  let runtime = new_runtime()
+
+  let handler_ref: test_ref.Ref(transport.Handler) =
+    test_ref.new(
+      transport.Handler(
+        on_receive: fn(_) { Nil },
+        on_reconnect: fn() { Nil },
+        on_disconnect: fn() { Nil },
+      ),
+    )
+  let connector =
+    transport.make_connector(fn(handler: transport.Handler) {
+      test_ref.set(handler_ref, handler)
+      transport.new(send: fn(_) { Nil }, close: fn() { Nil })
+    })
+  let _r =
+    client.connect(
+      runtime,
+      with: connector,
+      serialiser: test_fixtures.custom_serialiser(),
+    )
+
+  // Server dispatches Increment to this client's session
+  let handler = test_ref.get(handler_ref)
+  let frame =
+    transport.encode(
+      transport.SessionUpdate(sequence: 1, payload: Increment),
+      serialiser: test_fixtures.custom_serialiser(),
+    )
+  handler.on_receive(frame)
+
+  client.get_current_model(runtime).count |> should.equal(1)
+}
+
+// =============================================================================
+// ON-LIFECYCLE HOOKS
+// =============================================================================
+
+@target(javascript)
+pub fn client_on_connect_fires_on_first_connected_frame_test() {
+  test_setup.reset_dom()
+  test_setup.reset_mocks()
+  let runtime = new_runtime()
+
+  let captured: test_ref.Ref(List(String)) = test_ref.new([])
+  let _r =
+    client.on_connect(runtime, fn(client_id) {
+      test_ref.set(captured, [client_id, ..test_ref.get(captured)])
+    })
+
+  let handler_ref: test_ref.Ref(transport.Handler) =
+    test_ref.new(
+      transport.Handler(
+        on_receive: fn(_) { Nil },
+        on_reconnect: fn() { Nil },
+        on_disconnect: fn() { Nil },
+      ),
+    )
+  let connector =
+    transport.make_connector(fn(handler: transport.Handler) {
+      test_ref.set(handler_ref, handler)
+      transport.new(send: fn(_) { Nil }, close: fn() { Nil })
+    })
+  let _r2 =
+    client.connect(
+      runtime,
+      with: connector,
+      serialiser: test_fixtures.custom_serialiser(),
+    )
+
+  // Simulate the server's Connected frame arriving on the transport
+  let handler = test_ref.get(handler_ref)
+  let connected_frame =
+    transport.encode(
+      transport.Connected(client_id: "c1"),
+      serialiser: test_fixtures.custom_serialiser(),
+    )
+  handler.on_receive(connected_frame)
+
+  test_ref.get(captured) |> should.equal(["c1"])
+}
+
+@target(javascript)
+pub fn client_on_connect_does_not_fire_twice_test() {
+  test_setup.reset_dom()
+  test_setup.reset_mocks()
+  let runtime = new_runtime()
+
+  let captured: test_ref.Ref(List(String)) = test_ref.new([])
+  let _r =
+    client.on_connect(runtime, fn(client_id) {
+      test_ref.set(captured, [client_id, ..test_ref.get(captured)])
+    })
+
+  let handler_ref: test_ref.Ref(transport.Handler) =
+    test_ref.new(
+      transport.Handler(
+        on_receive: fn(_) { Nil },
+        on_reconnect: fn() { Nil },
+        on_disconnect: fn() { Nil },
+      ),
+    )
+  let connector =
+    transport.make_connector(fn(handler: transport.Handler) {
+      test_ref.set(handler_ref, handler)
+      transport.new(send: fn(_) { Nil }, close: fn() { Nil })
+    })
+  let _r2 =
+    client.connect(
+      runtime,
+      with: connector,
+      serialiser: test_fixtures.custom_serialiser(),
+    )
+
+  let handler = test_ref.get(handler_ref)
+  let connected_frame =
+    transport.encode(
+      transport.Connected(client_id: "c1"),
+      serialiser: test_fixtures.custom_serialiser(),
+    )
+  handler.on_receive(connected_frame)
+  handler.on_receive(connected_frame)
+
+  test_ref.get(captured) |> should.equal(["c1"])
+}
+
+@target(javascript)
+pub fn client_on_reconnect_does_not_fire_on_first_connect_test() {
+  test_setup.reset_dom()
+  test_setup.reset_mocks()
+  let runtime = new_runtime()
+
+  let fired: test_ref.Ref(Int) = test_ref.new(0)
+  let _r =
+    client.on_reconnect(runtime, fn() {
+      test_ref.set(fired, test_ref.get(fired) + 1)
+    })
+
+  let handler_ref: test_ref.Ref(transport.Handler) =
+    test_ref.new(
+      transport.Handler(
+        on_receive: fn(_) { Nil },
+        on_reconnect: fn() { Nil },
+        on_disconnect: fn() { Nil },
+      ),
+    )
+  let connector =
+    transport.make_connector(fn(handler: transport.Handler) {
+      test_ref.set(handler_ref, handler)
+      handler.on_reconnect()
+      transport.new(send: fn(_) { Nil }, close: fn() { Nil })
+    })
+  let _r2 =
+    client.connect(
+      runtime,
+      with: connector,
+      serialiser: test_fixtures.custom_serialiser(),
+    )
+
+  test_ref.get(fired) |> should.equal(0)
+}
+
+@target(javascript)
+pub fn client_on_reconnect_fires_after_first_connected_test() {
+  test_setup.reset_dom()
+  test_setup.reset_mocks()
+  let runtime = new_runtime()
+
+  let fired: test_ref.Ref(Int) = test_ref.new(0)
+  let _r =
+    client.on_reconnect(runtime, fn() {
+      test_ref.set(fired, test_ref.get(fired) + 1)
+    })
+
+  let handler_ref: test_ref.Ref(transport.Handler) =
+    test_ref.new(
+      transport.Handler(
+        on_receive: fn(_) { Nil },
+        on_reconnect: fn() { Nil },
+        on_disconnect: fn() { Nil },
+      ),
+    )
+  let connector =
+    transport.make_connector(fn(handler: transport.Handler) {
+      test_ref.set(handler_ref, handler)
+      transport.new(send: fn(_) { Nil }, close: fn() { Nil })
+    })
+  let _r2 =
+    client.connect(
+      runtime,
+      with: connector,
+      serialiser: test_fixtures.custom_serialiser(),
+    )
+
+  // Deliver Connected so the runtime considers itself attached
+  let handler = test_ref.get(handler_ref)
+  let connected_frame =
+    transport.encode(
+      transport.Connected(client_id: "c1"),
+      serialiser: test_fixtures.custom_serialiser(),
+    )
+  handler.on_receive(connected_frame)
+
+  // Now a transport-level reconnect should fire the user hook
+  handler.on_reconnect()
+  handler.on_reconnect()
+
+  test_ref.get(fired) |> should.equal(2)
+}
+
+@target(javascript)
+pub fn client_on_disconnect_fires_on_every_drop_test() {
+  test_setup.reset_dom()
+  test_setup.reset_mocks()
+  let runtime = new_runtime()
+
+  let fired: test_ref.Ref(Int) = test_ref.new(0)
+  let _r =
+    client.on_disconnect(runtime, fn() {
+      test_ref.set(fired, test_ref.get(fired) + 1)
+    })
+
+  let handler_ref: test_ref.Ref(transport.Handler) =
+    test_ref.new(
+      transport.Handler(
+        on_receive: fn(_) { Nil },
+        on_reconnect: fn() { Nil },
+        on_disconnect: fn() { Nil },
+      ),
+    )
+  let connector =
+    transport.make_connector(fn(handler: transport.Handler) {
+      test_ref.set(handler_ref, handler)
+      transport.new(send: fn(_) { Nil }, close: fn() { Nil })
+    })
+  let _r2 =
+    client.connect(
+      runtime,
+      with: connector,
+      serialiser: test_fixtures.custom_serialiser(),
+    )
+
+  let handler = test_ref.get(handler_ref)
+  handler.on_disconnect()
+  handler.on_disconnect()
+
+  test_ref.get(fired) |> should.equal(2)
 }
 
 // =============================================================================

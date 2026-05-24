@@ -8,14 +8,15 @@
 import gleam/bit_array
 import gleam/dict
 import gleam/set
+import gleam/string
 import gleeunit/should
 import lily/test_fixtures.{
   type Message, type Model, Increment, SetName, WithDict, WithSet, WithTuple,
 }
 import lily/transport.{
   type Protocol, Acknowledge, Connected, Push, Rejected, Resync, Session,
-  SessionMessage, Snapshot, Subscribe, Topic, TopicMessage, TopicUpdate,
-  Unsubscribe,
+  SessionMessage, SessionUpdate, Snapshot, Subscribe, Topic, TopicMessage,
+  TopicUpdate, Unsubscribe,
 }
 
 // =============================================================================
@@ -136,6 +137,13 @@ pub fn snapshot_session_message_set_name_test() {
   )
 }
 
+pub fn snapshot_session_update_test() {
+  assert_encoded(
+    SessionUpdate(sequence: 4, payload: Increment),
+    "83A474797065AE73657373696F6E5F757064617465A873657175656E636504A77061796C6F6164C40D81A15FA9496E6372656D656E74",
+  )
+}
+
 pub fn snapshot_snapshot_session_test() {
   assert_encoded(
     Snapshot(
@@ -204,6 +212,53 @@ pub fn roundtrip_resync_session_topic_test() {
 
 pub fn roundtrip_session_message_set_name_test() {
   assert_roundtrip(SessionMessage(payload: SetName("Alice")))
+}
+
+pub fn roundtrip_session_update_test() {
+  assert_roundtrip(SessionUpdate(sequence: 4, payload: Increment))
+}
+
+// =============================================================================
+// INITIAL SNAPSHOT EMBED
+// =============================================================================
+
+pub fn encode_initial_snapshot_wraps_in_script_tag_test() {
+  let snapshot =
+    transport.encode_initial_snapshot(
+      serialiser: transport.automatic(),
+      model: test_fixtures.initial_model(),
+    )
+  let expected_prefix =
+    "<script type=\"application/json\" id=\"lily-snapshot\">"
+  snapshot
+  |> string.starts_with(expected_prefix)
+  |> should.be_true
+  snapshot
+  |> string.ends_with("</script>")
+  |> should.be_true
+}
+
+pub fn encode_initial_snapshot_round_trips_via_decode_test() {
+  let model = test_fixtures.initial_model()
+  let embed =
+    transport.encode_initial_snapshot(
+      serialiser: transport.automatic(),
+      model: model,
+    )
+  let prefix = "<script type=\"application/json\" id=\"lily-snapshot\">"
+  let suffix = "</script>"
+  let json_only =
+    embed
+    |> string.drop_start(string.length(prefix))
+    |> string.drop_end(string.length(suffix))
+
+  transport.decode(
+    bit_array.from_string(json_only),
+    serialiser: transport.automatic(),
+  )
+  |> should.equal(
+    Ok(Snapshot(target: Session, sequence: 0, state: model)),
+  )
 }
 
 pub fn roundtrip_snapshot_test() {

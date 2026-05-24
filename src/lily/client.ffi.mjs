@@ -12,8 +12,9 @@
 // IMPORTS
 // =============================================================================
 
-import { Ok, Error, toList } from "../gleam.mjs";
+import { Ok, Error, toList, BitArray } from "../gleam.mjs";
 import { Some, None } from "../../gleam_stdlib/gleam/option.mjs";
+import { parse as parseUri } from "../../gleam_stdlib/gleam/uri.mjs";
 import {
   SetText,
   SetAttribute,
@@ -68,6 +69,12 @@ export function createRuntime(store, apply) {
   let snapshotHook = null;
   let wiring = null;
   let sendFrameFn = null;
+  let onConnectHook = null;
+  let onDisconnectHook = null;
+  let onReconnectHook = null;
+  let connectedAtLeastOnce = false;
+  let urlSetter = null;
+  let popstateInstalled = false;
 
   // Per-target sequence tracking (in-memory; keyed by target key string)
   const sequences = new Map();
@@ -117,6 +124,14 @@ export function createRuntime(store, apply) {
         flushNotify();
       }
     });
+  }
+
+  function applyUrlFromLocation() {
+    if (!urlSetter || typeof window === "undefined") return;
+    const parsed = parseUri(window.location.href);
+    if (!(parsed instanceof Ok)) return;
+    currentStore.model = urlSetter(currentStore.model, parsed[0]);
+    scheduleNotify();
   }
 
   function persistSessionChanges(session) {
@@ -284,9 +299,59 @@ export function createRuntime(store, apply) {
       clientIdSetter = set;
     },
     handleClientId(clientId) {
+      // Connected is the server-acknowledged signal that the client has an
+      // identity. The first one fires user.on_connect; subsequent ones
+      // (after a reconnect) don't, since the user already saw on_connect
+      // and any reconnect lifecycle is delivered via on_reconnect.
+      if (!connectedAtLeastOnce) {
+        connectedAtLeastOnce = true;
+        if (onConnectHook) onConnectHook(clientId);
+      }
       if (clientIdSetter === null) return;
       currentStore.model = clientIdSetter(currentStore.model, clientId);
       scheduleNotify();
+    },
+    fireReconnectHook() {
+      // Transport on_reconnect fires on every WebSocket open, including the
+      // first. Only fire the user hook on subsequent opens, not the first
+      // (the first one is delivered via on_connect once the server
+      // acknowledges with a Connected frame).
+      if (connectedAtLeastOnce && onReconnectHook) onReconnectHook();
+    },
+    fireDisconnectHook() {
+      if (onDisconnectHook) onDisconnectHook();
+    },
+    setOnConnectHook(hook) {
+      onConnectHook = hook;
+    },
+    setOnDisconnectHook(hook) {
+      onDisconnectHook = hook;
+    },
+    setOnReconnectHook(hook) {
+      onReconnectHook = hook;
+    },
+    setUrlSetter(set) {
+      urlSetter = set;
+      // popstate fires when the user uses the browser back/forward buttons.
+      // pushState/replaceState don't emit popstate themselves, so navigate
+      // and replace re-read window.location explicitly after the history op.
+      if (!popstateInstalled && typeof window !== "undefined") {
+        popstateInstalled = true;
+        window.addEventListener("popstate", () => applyUrlFromLocation());
+      }
+      // Read the initial URL on attach so the model reflects the page the
+      // user landed on.
+      applyUrlFromLocation();
+    },
+    navigate(path) {
+      if (typeof window === "undefined") return;
+      window.history.pushState({}, "", path);
+      applyUrlFromLocation();
+    },
+    replace(path) {
+      if (typeof window === "undefined") return;
+      window.history.replaceState({}, "", path);
+      applyUrlFromLocation();
     },
     setConnectionStatusConfig(set) {
       setConnectionStatusModel = set;
@@ -390,6 +455,14 @@ export function dispatchModel(runtime, model) {
   runtime.dispatchModel(model);
 }
 
+export function fireDisconnectHook(runtime) {
+  runtime.fireDisconnectHook();
+}
+
+export function fireReconnectHook(runtime) {
+  runtime.fireReconnectHook();
+}
+
 /**
  * Generate a random 32-character hex string for use as a client-side
  * session identifier.
@@ -426,6 +499,24 @@ export function initialNotify(runtime) {
 
 export function mergeLocals(incoming, current) {
   return mergeLocal(incoming, current);
+}
+
+export function navigate(runtime, path) {
+  runtime.navigate(path);
+}
+
+export function replace(runtime, path) {
+  runtime.replace(path);
+}
+
+export function readEmbeddedSnapshot() {
+  if (typeof document === "undefined") return new Error(undefined);
+  const element = document.getElementById("lily-snapshot");
+  if (!element) return new Error(undefined);
+  const text = element.textContent;
+  if (text === null || text === "") return new Error(undefined);
+  const bytes = new TextEncoder().encode(text);
+  return new Ok(new BitArray(bytes, bytes.length * 8, 0));
 }
 
 export function readField(prefix, key) {
@@ -468,8 +559,24 @@ export function setModel(runtime, model) {
   runtime.setModel(model);
 }
 
+export function setOnConnectHook(runtime, hook) {
+  runtime.setOnConnectHook(hook);
+}
+
+export function setOnDisconnectHook(runtime, hook) {
+  runtime.setOnDisconnectHook(hook);
+}
+
 export function setOnMessageHook(runtime, hook) {
   runtime.setOnMessageHook(hook);
+}
+
+export function setOnReconnectHook(runtime, hook) {
+  runtime.setOnReconnectHook(hook);
+}
+
+export function setUrlSetter(runtime, set) {
+  runtime.setUrlSetter(set);
 }
 
 export function setSessionConfig(runtime, persistence, prefix, get, set) {

@@ -81,6 +81,8 @@ import gleam/result
 @target(javascript)
 import gleam/string
 @target(javascript)
+import gleam/uri.{type Uri}
+@target(javascript)
 import lily/store.{type Store}
 @target(javascript)
 import lily/transport
@@ -241,8 +243,12 @@ pub fn connect(
       on_reconnect: fn() {
         set_connection_status(handle, True)
         send_resync(handle, serialiser)
+        fire_reconnect_hook(handle)
       },
-      on_disconnect: fn() { set_connection_status(handle, False) },
+      on_disconnect: fn() {
+        set_connection_status(handle, False)
+        fire_disconnect_hook(handle)
+      },
     )
 
   let client_transport = transport.run_connector(connector, handler)
@@ -335,6 +341,60 @@ pub fn generate_session_id() -> String {
 }
 
 @target(javascript)
+/// Variant of [`start`](#start) that adopts a server-rendered DOM and
+/// reads the embedded snapshot from `<script id="lily-snapshot">`. Pair
+/// with [`transport.encode_initial_snapshot`](./transport.html#encode_initial_snapshot)
+/// on the server and [`component.render_to_string`](./component.html#render_to_string)
+/// for the surrounding HTML.
+///
+/// If the embedded snapshot is missing or fails to decode, hydrate
+/// silently falls back to the model in the supplied store. No warning is
+/// raised: in production the script tag may legitimately be absent (a CDN
+/// stripping inline scripts, a CSP blocking inline content), and the
+/// store's model is a valid initial state by definition. Detect missing
+/// snapshots in dev by checking the embed yourself before calling hydrate.
+///
+/// Lenient hydration: components do not assert byte-equality with the
+/// server-rendered DOM. The first event after hydrate triggers a full
+/// render, replacing any mismatched content.
+///
+/// ```gleam
+/// pub fn main() {
+///   store.new(shared.initial_model(), with: shared.update)
+///   |> client.hydrate(shared.wiring(), shared.serialiser())
+///   |> component.mount(
+///     selector: "#app",
+///     to_html: element.to_string,
+///     to_slot: fn() { element.element("lily-slot", [], []) },
+///     view: shared.view,
+///   )
+/// }
+/// ```
+pub fn hydrate(
+  store: Store(model, message),
+  wiring wiring: store.Wiring(model, message),
+  serialiser serialiser: transport.Serialiser(model, message),
+) -> Runtime(model, message) {
+  let handle = create_runtime(store, store.apply)
+  set_store(handle, store)
+  set_wiring(handle, wiring)
+  // Try to read and decode the embedded snapshot. If anything fails
+  // (missing tag, malformed JSON, schema mismatch), fall back to the
+  // store's current model silently.
+  case read_embedded_snapshot() {
+    Ok(bytes) ->
+      case transport.decode(bytes, serialiser:) {
+        Ok(transport.Snapshot(target: transport.Session, sequence: _, state:)) ->
+          set_model(handle, state)
+        _ -> Nil
+      }
+    Error(_) -> Nil
+  }
+  initial_notify(handle)
+  Runtime(handle)
+}
+
+@target(javascript)
 /// A reconciliation helper for use inside [`on_snapshot`](#on_snapshot):
 /// recursively walks the incoming model, preserving any field whose
 /// current value is [`store.Local`](./store.html#Local) and otherwise
@@ -345,6 +405,65 @@ pub fn generate_session_id() -> String {
 /// signature: `(incoming, current)`.
 pub fn merge_locals(incoming: model, current: model) -> model {
   ffi_merge_locals(incoming, current)
+}
+
+@target(javascript)
+/// Push a new history entry and update the URL. Fires the [`url`](#url)
+/// setter so the model reflects the new location, which lets
+/// [`component.switch`](./component.html#switch) re-render based on the
+/// route field of your model.
+///
+/// ```gleam
+/// client.navigate(runtime, "/projects/42")
+/// ```
+pub fn navigate(
+  runtime: Runtime(model, message),
+  path path: String,
+) -> Nil {
+  let Runtime(handle) = runtime
+  ffi_navigate(handle, path)
+}
+
+@target(javascript)
+/// Register a hook that fires once after the first server-acknowledged
+/// connection. Receives the server-assigned client id. Use this for
+/// per-session bootstrap work like registering with analytics or kicking
+/// off a one-time fetch.
+///
+/// Attach before [`connect`](#connect) so the hook is in place by the time
+/// the first `Connected` frame arrives.
+///
+/// ```gleam
+/// runtime
+/// |> client.on_connect(fn(client_id) {
+///   logging.info("connected as " <> client_id)
+/// })
+/// ```
+pub fn on_connect(
+  runtime: Runtime(model, message),
+  hook: fn(String) -> Nil,
+) -> Runtime(model, message) {
+  let Runtime(handle) = runtime
+  set_on_connect_hook(handle, hook)
+  runtime
+}
+
+@target(javascript)
+/// Register a hook that fires every time the transport drops the
+/// connection. Companion to [`on_reconnect`](#on_reconnect) and
+/// [`connection_status`](#connection_status).
+///
+/// ```gleam
+/// runtime
+/// |> client.on_disconnect(fn() { show_offline_toast() })
+/// ```
+pub fn on_disconnect(
+  runtime: Runtime(model, message),
+  hook: fn() -> Nil,
+) -> Runtime(model, message) {
+  let Runtime(handle) = runtime
+  set_on_disconnect_hook(handle, hook)
+  runtime
 }
 
 @target(javascript)
@@ -372,6 +491,24 @@ pub fn on_message(
 }
 
 @target(javascript)
+/// Register a hook that fires every time the transport restores the
+/// connection after a drop. Does not fire on the first connect, see
+/// [`on_connect`](#on_connect) for that.
+///
+/// ```gleam
+/// runtime
+/// |> client.on_reconnect(fn() { show_reconnected_toast() })
+/// ```
+pub fn on_reconnect(
+  runtime: Runtime(model, message),
+  hook: fn() -> Nil,
+) -> Runtime(model, message) {
+  let Runtime(handle) = runtime
+  set_on_reconnect_hook(handle, hook)
+  runtime
+}
+
+@target(javascript)
 /// Register a hook that runs when a server snapshot arrives on reconnect.
 /// The hook receives `(incoming, current)` and returns the merged model
 /// to dispatch into the runtime.
@@ -395,6 +532,22 @@ pub fn on_snapshot(
   let Runtime(handle) = runtime
   set_snapshot_hook(handle, hook)
   runtime
+}
+
+@target(javascript)
+/// Replace the current history entry and update the URL. Fires the
+/// [`url`](#url) setter. Use for view-state-in-URL changes that should
+/// not create a back-button stop, such as a sort-order or filter toggle.
+///
+/// ```gleam
+/// client.replace(runtime, "/projects?sort=newest")
+/// ```
+pub fn replace(
+  runtime: Runtime(model, message),
+  path path: String,
+) -> Nil {
+  let Runtime(handle) = runtime
+  ffi_replace(handle, path)
 }
 
 @target(javascript)
@@ -520,6 +673,31 @@ pub fn unsubscribe(
   runtime
 }
 
+@target(javascript)
+/// Track the browser URL in the model. The `set` callback receives the
+/// parsed [`uri.Uri`](https://hexdocs.pm/gleam_stdlib/gleam/uri.html); map
+/// it to your own route ADT inside. The initial URL is read on attach,
+/// and changes from `popstate`, [`navigate`](#navigate), and
+/// [`replace`](#replace) all flow through the same setter.
+///
+/// Mirrors [`client_id`](#client_id) and
+/// [`connection_status`](#connection_status).
+///
+/// ```gleam
+/// runtime
+/// |> client.url(set: fn(model, uri) {
+///   Model(..model, route: shared.parse_route(uri))
+/// })
+/// ```
+pub fn url(
+  runtime: Runtime(model, message),
+  set set: fn(model, Uri) -> model,
+) -> Runtime(model, message) {
+  let Runtime(handle) = runtime
+  set_url_setter(handle, set)
+  runtime
+}
+
 // =============================================================================
 // INTERNAL FUNCTIONS
 // =============================================================================
@@ -602,6 +780,15 @@ fn handle_incoming(
       set_last_sequence_for_target(
         handle,
         target_to_key(transport.Topic(topic_id)),
+        sequence,
+      )
+      apply_remote_message(handle, payload)
+    }
+
+    Ok(transport.SessionUpdate(sequence:, payload:)) -> {
+      set_last_sequence_for_target(
+        handle,
+        target_to_key(transport.Session),
         sequence,
       )
       apply_remote_message(handle, payload)
@@ -715,6 +902,14 @@ fn create_runtime(
 fn dispatch_model(handle: RuntimeHandle, model: model) -> Nil
 
 @target(javascript)
+@external(javascript, "./client.ffi.mjs", "fireDisconnectHook")
+fn fire_disconnect_hook(handle: RuntimeHandle) -> Nil
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "fireReconnectHook")
+fn fire_reconnect_hook(handle: RuntimeHandle) -> Nil
+
+@target(javascript)
 @external(javascript, "./client.ffi.mjs", "clearSession")
 fn ffi_clear_session(prefix: String) -> Nil
 
@@ -725,6 +920,14 @@ fn ffi_generate_session_id() -> String
 @target(javascript)
 @external(javascript, "./client.ffi.mjs", "mergeLocals")
 fn ffi_merge_locals(incoming: model, current: model) -> model
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "navigate")
+fn ffi_navigate(handle: RuntimeHandle, path: String) -> Nil
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "replace")
+fn ffi_replace(handle: RuntimeHandle, path: String) -> Nil
 
 @target(javascript)
 @external(javascript, "./client.ffi.mjs", "sendMessage")
@@ -755,6 +958,10 @@ fn handle_client_id(handle: RuntimeHandle, client_id: String) -> Nil
 @target(javascript)
 @external(javascript, "./client.ffi.mjs", "initialNotify")
 fn initial_notify(handle: RuntimeHandle) -> Nil
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "readEmbeddedSnapshot")
+fn read_embedded_snapshot() -> Result(BitArray, Nil)
 
 @target(javascript)
 @external(javascript, "./client.ffi.mjs", "readField")
@@ -795,8 +1002,23 @@ fn set_last_sequence_for_target(
 fn set_model(handle: RuntimeHandle, model: model) -> Nil
 
 @target(javascript)
+@external(javascript, "./client.ffi.mjs", "setOnConnectHook")
+fn set_on_connect_hook(
+  handle: RuntimeHandle,
+  hook: fn(String) -> Nil,
+) -> Nil
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "setOnDisconnectHook")
+fn set_on_disconnect_hook(handle: RuntimeHandle, hook: fn() -> Nil) -> Nil
+
+@target(javascript)
 @external(javascript, "./client.ffi.mjs", "setOnMessageHook")
 fn set_on_message_hook(handle: RuntimeHandle, hook: fn(message) -> Nil) -> Nil
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "setOnReconnectHook")
+fn set_on_reconnect_hook(handle: RuntimeHandle, hook: fn() -> Nil) -> Nil
 
 @target(javascript)
 @external(javascript, "./client.ffi.mjs", "setSessionConfig")
@@ -813,6 +1035,13 @@ fn set_session_config(
 fn set_snapshot_hook(
   handle: RuntimeHandle,
   hook: fn(model, model) -> model,
+) -> Nil
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "setUrlSetter")
+fn set_url_setter(
+  handle: RuntimeHandle,
+  set: fn(model, Uri) -> model,
 ) -> Nil
 
 @target(javascript)

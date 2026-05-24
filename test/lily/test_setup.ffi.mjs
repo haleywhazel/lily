@@ -113,6 +113,26 @@ export function resetDom() {
   dom.window.localStorage.clear();
 }
 
+export function historyLength() {
+  return dom.window.history.length;
+}
+
+export function resetUrl() {
+  // jsdom keeps history across tests; reset to "/" so URL-sensitive tests
+  // start from a known state.
+  dom.window.history.replaceState({}, "", "/");
+}
+
+export function injectSnapshotScript(json) {
+  // Mimic what transport.encode_initial_snapshot produces server-side, so
+  // client.hydrate tests can read it via document.getElementById.
+  const script = dom.window.document.createElement("script");
+  script.type = "application/json";
+  script.id = "lily-snapshot";
+  script.textContent = json;
+  dom.window.document.body.appendChild(script);
+}
+
 export function resetMocks() {
   lastWs = null;
   lastEs = null;

@@ -86,6 +86,48 @@
 ////
 //// All event handlers are JavaScript-only (`@target(javascript)`).
 ////
+//// To validate a form submission with the
+//// [`formal`](https://hexdocs.pm/formal/) library, pass
+//// [`form_submit`](#form_submit) to [`on_decoded()`](#on_decoded) with a
+//// decoder that builds the form, adds the submitted values, and calls
+//// `form.run`. The error branch carries the whole `Form(model)` back so
+//// the view can render field-level errors via `form.field_error_messages`:
+////
+//// ```gleam
+//// import formal/form
+////
+//// fn login_schema() -> form.Schema(Login) {
+////   use email <- form.field("email", form.parse_email)
+////   use password <- form.field(
+////     "password",
+////     form.parse_string |> form.check_string_length_more_than(7),
+////   )
+////   form.success(Login(email:, password:))
+//// }
+////
+//// fn login_decoder(
+////   fields: List(#(String, String)),
+//// ) -> Result(Message, Nil) {
+////   let submitted = form.new(login_schema()) |> form.add_values(fields)
+////   case form.run(submitted) {
+////     Ok(login) -> Ok(LoginSubmitted(login))
+////     Error(invalid_form) -> Ok(LoginFailed(invalid_form))
+////   }
+//// }
+////
+//// component.simple(slice: ..., render: ...)
+//// |> event.on_decoded(
+////   event: event.form_submit,
+////   selector: "#login-form",
+////   decoder: login_decoder,
+//// )
+//// ```
+////
+//// Store the returned `Form(model)` in your application model on the error
+//// branch; the view calls `form.field_error_messages(invalid_form,
+//// "email")` to render error text next to each field. Run the same schema
+//// inside your server-side update function to re-validate untrusted input.
+////
 
 // =============================================================================
 // IMPORTS
@@ -180,13 +222,16 @@ pub fn focus(_runtime: Runtime(model, message), selector: String) -> Nil {
 
 @target(javascript)
 /// Confine Tab and Shift+Tab cycling to focusable descendants of the
-/// element matching `within`. Focusable elements are re-enumerated on
-/// every Tab press so dynamic content inside the container is handled.
-/// The `release_on` predicate runs on every keydown inside the document
-/// while the trap is active; returning `True` releases the trap and
-/// dispatches the message produced by `on_exit`. Only one trap can be
-/// active at a time, activating a new one silently replaces the previous
-/// trap (no `on_exit`).
+/// element matching `within`. Pushes a new trap onto a stack so nested
+/// overlays (a Combobox inside a Dialog inside a Drawer) each keep their
+/// own keyboard scope. Focusable elements are re-enumerated on every Tab
+/// press so dynamic content inside the container is handled.
+///
+/// While this trap is the top of the stack, `release_on` runs on every
+/// keydown; returning `True` pops the trap and dispatches the message
+/// produced by `on_exit`. Opening another trap on top suspends this one
+/// (Tab cycles within the new trap, `release_on` and `on_exit` come from
+/// the new trap); popping the top trap restores the one below.
 ///
 /// Pair with [`focus`](#focus) to seed initial focus inside the trapped
 /// region, and [`release_focus_trap`](#release_focus_trap) for imperative
@@ -348,8 +393,9 @@ pub fn prevent_default(options: EventOptions) -> EventOptions {
 }
 
 @target(javascript)
-/// Release the active focus trap, if any. No-op when no trap is active.
-/// Does not dispatch the trap's `on_exit` message, call this when the
+/// Pop the top focus trap from the stack. If another trap was below it,
+/// that trap becomes active again. No-op when the stack is empty. Does
+/// not dispatch the popped trap's `on_exit` message, call this when the
 /// caller is already running its own close logic and just needs the trap
 /// unhooked (e.g. a click on a Cancel button that dispatches `CloseDialog`
 /// and restores focus separately).

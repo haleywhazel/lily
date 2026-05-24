@@ -79,3 +79,21 @@ pub fn trigger_event_source_message(
 pub fn trigger_event_source_error(_event_source: Dynamic) -> Nil {
   Nil
 }
+
+@target(javascript)
+@external(javascript, "./test_setup.ffi.mjs", "historyLength")
+pub fn history_length() -> Int {
+  0
+}
+
+@target(javascript)
+@external(javascript, "./test_setup.ffi.mjs", "resetUrl")
+pub fn reset_url() -> Nil {
+  Nil
+}
+
+@target(javascript)
+@external(javascript, "./test_setup.ffi.mjs", "injectSnapshotScript")
+pub fn inject_snapshot_script(_json: String) -> Nil {
+  Nil
+}

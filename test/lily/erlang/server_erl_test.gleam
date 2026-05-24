@@ -336,6 +336,109 @@ pub fn server_resync_reflects_own_session_only_test() {
 }
 
 // =============================================================================
+// DISPATCH-TO
+// =============================================================================
+
+@target(erlang)
+pub fn server_dispatch_to_sends_session_update_test() {
+  let srv = new_server()
+  let s1 = connect_client(srv, "c1")
+  server.dispatch_to(srv, client_id: "c1", message: Increment)
+  let bytes = recv(s1) |> should.be_ok
+  transport.decode(bytes, serialiser: ser())
+  |> should.equal(Ok(transport.SessionUpdate(sequence: 1, payload: Increment)))
+}
+
+@target(erlang)
+pub fn server_dispatch_to_unknown_client_is_noop_test() {
+  let srv = new_server()
+  let s1 = connect_client(srv, "c1")
+  server.dispatch_to(srv, client_id: "ghost", message: Increment)
+  recv(s1) |> should.be_error
+}
+
+@target(erlang)
+pub fn server_dispatch_to_does_not_reach_other_clients_test() {
+  let srv = new_server()
+  let s1 = connect_client(srv, "c1")
+  let s2 = connect_client(srv, "c2")
+  server.dispatch_to(srv, client_id: "c1", message: Increment)
+  let _ = recv(s1) |> should.be_ok
+  recv(s2) |> should.be_error
+}
+
+@target(erlang)
+pub fn server_dispatch_to_all_reaches_every_client_test() {
+  let srv = new_server()
+  let s1 = connect_client(srv, "c1")
+  let s2 = connect_client(srv, "c2")
+  server.dispatch_to_all(srv, message: Increment)
+  let _ = recv(s1) |> should.be_ok
+  recv(s2) |> should.be_ok
+}
+
+@target(erlang)
+pub fn server_dispatch_to_increments_session_sequence_test() {
+  let srv = new_server()
+  let s1 = connect_client(srv, "c1")
+  server.dispatch_to(srv, client_id: "c1", message: Increment)
+  server.dispatch_to(srv, client_id: "c1", message: Increment)
+  let first = recv(s1) |> should.be_ok
+  let second = recv(s1) |> should.be_ok
+  transport.decode(first, serialiser: ser())
+  |> should.equal(Ok(transport.SessionUpdate(sequence: 1, payload: Increment)))
+  transport.decode(second, serialiser: ser())
+  |> should.equal(Ok(transport.SessionUpdate(sequence: 2, payload: Increment)))
+}
+
+// =============================================================================
+// ON-CONNECT / ON-DISCONNECT HOOKS
+// =============================================================================
+
+@target(erlang)
+pub fn server_on_connect_fires_with_client_id_test() {
+  let srv = new_server()
+  let hook_subj: process.Subject(String) = process.new_subject()
+  server.on_connect(srv, fn(client_id) { process.send(hook_subj, client_id) })
+  let _ = connect_client(srv, "c1")
+  process.receive(hook_subj, within: 200)
+  |> should.equal(Ok("c1"))
+}
+
+@target(erlang)
+pub fn server_on_connect_fires_once_per_connect_test() {
+  let srv = new_server()
+  let hook_subj: process.Subject(String) = process.new_subject()
+  server.on_connect(srv, fn(client_id) { process.send(hook_subj, client_id) })
+  let _ = connect_client(srv, "c1")
+  let _ = connect_client(srv, "c2")
+  process.receive(hook_subj, within: 200) |> should.equal(Ok("c1"))
+  process.receive(hook_subj, within: 200) |> should.equal(Ok("c2"))
+}
+
+@target(erlang)
+pub fn server_on_disconnect_fires_with_client_id_test() {
+  let srv = new_server()
+  let hook_subj: process.Subject(String) = process.new_subject()
+  server.on_disconnect(srv, fn(client_id) {
+    process.send(hook_subj, client_id)
+  })
+  let _ = connect_client(srv, "c1")
+  server.disconnect(srv, client_id: "c1")
+  process.receive(hook_subj, within: 200)
+  |> should.equal(Ok("c1"))
+}
+
+@target(erlang)
+pub fn server_no_connect_hook_does_not_crash_test() {
+  let srv = new_server()
+  let _ = connect_client(srv, "c1")
+  server.disconnect(srv, client_id: "c1")
+  True
+  |> should.be_true
+}
+
+// =============================================================================
 // ON-MESSAGE HOOK
 // =============================================================================
 
