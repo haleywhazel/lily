@@ -468,6 +468,27 @@ pub fn throttle_milliseconds(options: EventOptions, value: Int) -> EventOptions 
   EventOptions(..options, throttle_milliseconds: option.Some(value))
 }
 
+@target(javascript)
+/// Install a document-level observer that activates a focus trap on any
+/// element carrying `data-lily-focus-trap`, declaratively, for as long as it
+/// is in the DOM. This is the hands-off counterpart to
+/// [`focus_trap`](#focus_trap): rather than trapping imperatively from an
+/// update hook, an element declares its own trap and this manages the
+/// lifecycle. While the element is present, Tab and Shift+Tab are confined to
+/// it and focus is seeded to `data-lily-focus-trap-initial` (or the first
+/// focusable descendant); when it leaves the DOM, focus returns to whatever
+/// was focused before. If it also carries `data-lily-focus-trap-dismiss` (a
+/// CSS selector), the Escape key clicks that element, so dismissal flows
+/// through the ordinary `data-message` delegation; without it Escape is inert.
+///
+/// The primitive has no notion of dialogs or modals: any element can declare
+/// a trap (a wizard step, a command palette, a modal recipe). A component
+/// library renders the data attributes and calls this once at startup.
+/// Idempotent: repeated calls install a single observer.
+pub fn watch_focus_traps() -> Nil {
+  watch_focus_traps_ffi()
+}
+
 // =============================================================================
 // PUBLIC EVENTS
 // =============================================================================
@@ -946,3 +967,7 @@ fn setup_wheel_event_with_options(
   options: #(Int, Int, Bool, Bool, Bool),
   handler: fn(Float, Float) -> Nil,
 ) -> Nil
+
+@target(javascript)
+@external(javascript, "./event.ffi.mjs", "watchFocusTraps")
+fn watch_focus_traps_ffi() -> Nil
