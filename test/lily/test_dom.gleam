@@ -38,6 +38,18 @@ pub fn key_event(_selector: String, _event_name: String, _key: String) -> Nil {
 }
 
 @target(javascript)
+@external(javascript, "./test_dom.ffi.mjs", "focus")
+pub fn focus(_selector: String) -> Nil {
+  Nil
+}
+
+@target(javascript)
+@external(javascript, "./test_dom.ffi.mjs", "activeElementId")
+pub fn active_element_id() -> String {
+  ""
+}
+
+@target(javascript)
 @external(javascript, "./test_dom.ffi.mjs", "dispatchInputEvent")
 pub fn input_event(_selector: String, _value: String) -> Nil {
   Nil

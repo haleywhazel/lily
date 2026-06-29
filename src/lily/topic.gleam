@@ -197,10 +197,11 @@ pub fn new(
   Ok(Topic(id:, handle:, server:))
 }
 
-/// Stop the topic actor and remove it from the server registry. All
-/// subscribers receive an `Acknowledge(Topic(id), seq)` frame so their client
-/// slices reset to initial. Further subscribes to this id either error (fixed
-/// topic) or trigger lazy reinstantiation (parametric kind, if registered).
+/// Stop the topic actor and remove it from the server registry.
+/// Subscribers stop receiving updates; their last slice value is left as-is,
+/// not reset. Further subscribes to this id either error (fixed topic) or
+/// trigger lazy reinstantiation (parametric kind, if registered), in which
+/// case the fresh topic pushes a snapshot on subscribe that replaces it.
 ///
 /// ```gleam
 /// topic.stop(chat_topic)

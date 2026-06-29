@@ -14,7 +14,7 @@
 //// Selectors are standard CSS, matched globally via document-level event
 //// delegation. Locality is organisational, the framework does not scope
 //// matches to the component the binding is attached to. Patterns like
-//// `on(event.click, selector: "#app")` paired with `data-msg` attributes
+//// `on(event.click, selector: "#app")` paired with `data-message` attributes
 //// keep working as you patch the DOM. Bindings declared inside
 //// [`each`](./component.html#each) and
 //// [`each_live`](./component.html#each_live) item bodies are not collected,
@@ -190,6 +190,15 @@ pub type KeyEvent {
   KeyEvent(key: String, ctrl: Bool, shift: Bool, alt: Bool, meta: Bool)
 }
 
+/// Axis a [`focus_group`](#focus_group) navigates with the arrow keys:
+/// `Horizontal` listens to Left and Right, `Vertical` to Up and Down, and
+/// `Both` to all four.
+pub type Orientation {
+  Horizontal
+  Vertical
+  Both
+}
+
 // =============================================================================
 // PUBLIC FUNCTIONS
 // =============================================================================
@@ -218,6 +227,36 @@ pub fn debounce_milliseconds(options: EventOptions, value: Int) -> EventOptions 
 /// ```
 pub fn focus(_runtime: Runtime(model, message), selector: String) -> Nil {
   setup_focus(selector)
+}
+
+@target(javascript)
+/// Make a set of sibling elements a single arrow-navigable group (the
+/// "roving tabindex" accessibility pattern). `items` is a CSS selector for
+/// the navigable elements, for example `"#menu [role=menuitem]"`; while
+/// focus is on one of them, the arrow keys allowed by `orientation` (plus
+/// Home and End) move focus to the previous or next item. `wrap` decides
+/// whether moving past either end loops around.
+///
+/// Unlike [`focus_trap`](#focus_trap), which is a stack with one active
+/// entry, several groups coexist; the active group on any keypress is the
+/// one whose `items` include the focused element. Focus moves with
+/// `element.focus()`, so the non-active items may carry `tabindex="-1"`
+/// (the usual roving-tabindex render) and still be reached by the arrows.
+///
+/// Pair with [`release_focus_group`](#release_focus_group) to remove a
+/// transient group (for example a menu) when it closes.
+pub fn focus_group(
+  _runtime: Runtime(model, message),
+  items items: String,
+  orientation orientation: Orientation,
+  wrap wrap: Bool,
+) -> Nil {
+  let orientation_value = case orientation {
+    Horizontal -> "horizontal"
+    Vertical -> "vertical"
+    Both -> "both"
+  }
+  setup_focus_group(items, orientation_value, wrap)
 }
 
 @target(javascript)
@@ -285,7 +324,7 @@ pub fn on(
 
 @target(javascript)
 /// Bind an event handler whose decoder may decline to dispatch by
-/// returning `Error(Nil)`. Useful for [`click`](#click) (the `data-msg`
+/// returning `Error(Nil)`. Useful for [`click`](#click) (the `data-message`
 /// attribute may not match a known message) and form events (validation
 /// failure should skip dispatching).
 ///
@@ -393,6 +432,18 @@ pub fn prevent_default(options: EventOptions) -> EventOptions {
 }
 
 @target(javascript)
+/// Remove a focus group registered with [`focus_group`](#focus_group),
+/// matched by the same `items` selector. No-op if no such group is
+/// registered. Call when a transient group (a menu, say) closes; persistent
+/// groups (a radio group always on the page) need never release.
+pub fn release_focus_group(
+  _runtime: Runtime(model, message),
+  items items: String,
+) -> Nil {
+  release_focus_group_ffi(items)
+}
+
+@target(javascript)
 /// Pop the top focus trap from the stack. If another trap was below it,
 /// that trap becomes active again. No-op when the stack is empty. Does
 /// not dispatch the popped trap's `on_exit` message, call this when the
@@ -431,8 +482,8 @@ pub const blur: Event(ElementData) = Event("blur", TypeElement)
 pub const change: Event(String) = Event("change", TypeValue)
 
 @target(javascript)
-/// `click` event, uses delegation against the `data-msg` attribute. The
-/// payload is the matched element's `data-msg` value. Pair with
+/// `click` event, uses delegation against the `data-message` attribute. The
+/// payload is the matched element's `data-message` value. Pair with
 /// [`on_decoded()`](#on_decoded) so unknown messages can be skipped via
 /// `Error(Nil)`.
 pub const click: Event(String) = Event("click", TypeClick)
@@ -776,6 +827,10 @@ fn unpack_options(options: EventOptions) -> #(Int, Int, Bool, Bool, Bool) {
 fn unsafe_cast(value: a) -> b
 
 @target(javascript)
+@external(javascript, "./event.ffi.mjs", "releaseFocusGroup")
+fn release_focus_group_ffi(items: String) -> Nil
+
+@target(javascript)
 @external(javascript, "./event.ffi.mjs", "releaseFocusTrap")
 fn release_focus_trap_ffi() -> Nil
 
@@ -819,6 +874,10 @@ fn setup_element_event_with_options(
 @target(javascript)
 @external(javascript, "./event.ffi.mjs", "setupFocus")
 fn setup_focus(selector: String) -> Nil
+
+@target(javascript)
+@external(javascript, "./event.ffi.mjs", "setupFocusGroup")
+fn setup_focus_group(items: String, orientation: String, wrap: Bool) -> Nil
 
 @target(javascript)
 @external(javascript, "./event.ffi.mjs", "setupFocusTrap")

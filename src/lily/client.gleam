@@ -341,11 +341,13 @@ pub fn generate_session_id() -> String {
 }
 
 @target(javascript)
-/// Variant of [`start`](#start) that adopts a server-rendered DOM and
+/// Variant of [`start`](#start) that adopts a pre-rendered DOM and
 /// reads the embedded snapshot from `<script id="lily-snapshot">`. Pair
 /// with [`transport.encode_initial_snapshot`](./transport.html#encode_initial_snapshot)
-/// on the server and [`component.render_to_string`](./component.html#render_to_string)
-/// for the surrounding HTML.
+/// for the embedded state and
+/// [`component.render_to_string`](./component.html#render_to_string) for the
+/// surrounding HTML. This is hydration from a fixed initial snapshot (markup
+/// rendered ahead of time), not per-request server-side rendering.
 ///
 /// If the embedded snapshot is missing or fails to decode, hydrate
 /// silently falls back to the model in the supplied store. No warning is
@@ -355,7 +357,7 @@ pub fn generate_session_id() -> String {
 /// snapshots in dev by checking the embed yourself before calling hydrate.
 ///
 /// Lenient hydration: components do not assert byte-equality with the
-/// server-rendered DOM. The first event after hydrate triggers a full
+/// pre-rendered DOM. The first event after hydrate triggers a full
 /// render, replacing any mismatched content.
 ///
 /// ```gleam
@@ -416,10 +418,7 @@ pub fn merge_locals(incoming: model, current: model) -> model {
 /// ```gleam
 /// client.navigate(runtime, "/projects/42")
 /// ```
-pub fn navigate(
-  runtime: Runtime(model, message),
-  path path: String,
-) -> Nil {
+pub fn navigate(runtime: Runtime(model, message), path path: String) -> Nil {
   let Runtime(handle) = runtime
   ffi_navigate(handle, path)
 }
@@ -542,10 +541,7 @@ pub fn on_snapshot(
 /// ```gleam
 /// client.replace(runtime, "/projects?sort=newest")
 /// ```
-pub fn replace(
-  runtime: Runtime(model, message),
-  path path: String,
-) -> Nil {
+pub fn replace(runtime: Runtime(model, message), path path: String) -> Nil {
   let Runtime(handle) = runtime
   ffi_replace(handle, path)
 }
@@ -656,9 +652,12 @@ pub fn subscribe(
 }
 
 @target(javascript)
-/// Unsubscribe from a topic. After unsubscribing the topic's slice resets to
-/// its initial value (set during runtime construction). Idempotent, no-op
-/// if not subscribed. Must be called after [`client.connect`](#connect).
+/// Unsubscribe from a topic: sends an unsubscribe frame so the server stops
+/// pushing updates for it. Fire-and-forget, the server sends no confirmation
+/// and the topic's last slice value is left as-is in the model. Re-subscribing
+/// pulls a fresh snapshot that replaces it (for stateful topics); clear it
+/// sooner with your own message if you need to. Must be called after
+/// [`client.connect`](#connect).
 ///
 /// ```gleam
 /// runtime
@@ -1003,10 +1002,7 @@ fn set_model(handle: RuntimeHandle, model: model) -> Nil
 
 @target(javascript)
 @external(javascript, "./client.ffi.mjs", "setOnConnectHook")
-fn set_on_connect_hook(
-  handle: RuntimeHandle,
-  hook: fn(String) -> Nil,
-) -> Nil
+fn set_on_connect_hook(handle: RuntimeHandle, hook: fn(String) -> Nil) -> Nil
 
 @target(javascript)
 @external(javascript, "./client.ffi.mjs", "setOnDisconnectHook")
@@ -1039,10 +1035,7 @@ fn set_snapshot_hook(
 
 @target(javascript)
 @external(javascript, "./client.ffi.mjs", "setUrlSetter")
-fn set_url_setter(
-  handle: RuntimeHandle,
-  set: fn(model, Uri) -> model,
-) -> Nil
+fn set_url_setter(handle: RuntimeHandle, set: fn(model, Uri) -> model) -> Nil
 
 @target(javascript)
 @external(javascript, "./client.ffi.mjs", "setStore")

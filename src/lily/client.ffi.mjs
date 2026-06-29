@@ -92,14 +92,14 @@ export function createRuntime(store, apply) {
   const pendingExits = new Map();
 
   // Bindings collected during render that need to fire after the
-  // innerHTML pass. Pushed to by renderWithEvents (in component.ffi.mjs);
+  // innerHTML pass. Pushed to by renderDecorated (in component.ffi.mjs);
   // drained by renderTree. The `collectingBindings` flag is toggled
   // off by renderEach / renderEachLive / renderSwitch around their
   // per-item / per-case child renders, so events declared inside those
   // bodies are ignored by design.
   let pendingBindings = [];
   let collectingBindings = true;
-  // Stashed at mount so renderWithEvents can pass it to the binding
+  // Stashed at mount so renderDecorated can pass it to the binding
   // closures (which take a Runtime, not just the handle).
   let runtimeRef = null;
 

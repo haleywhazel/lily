@@ -235,10 +235,7 @@ pub fn client_url_setter_fires_on_attach_test() {
 
   let _r =
     client.url(runtime, set: fn(model, uri) {
-      test_ref.set(captured, [
-        uri |> uri_path,
-        ..test_ref.get(captured)
-      ])
+      test_ref.set(captured, [uri |> uri_path, ..test_ref.get(captured)])
       model
     })
 
@@ -254,10 +251,7 @@ pub fn client_navigate_pushes_history_and_fires_setter_test() {
 
   let _r =
     client.url(runtime, set: fn(model, uri) {
-      test_ref.set(captured, [
-        uri |> uri_path,
-        ..test_ref.get(captured)
-      ])
+      test_ref.set(captured, [uri |> uri_path, ..test_ref.get(captured)])
       model
     })
 
@@ -277,10 +271,7 @@ pub fn client_replace_does_not_push_history_test() {
 
   let _r =
     client.url(runtime, set: fn(model, uri) {
-      test_ref.set(captured, [
-        uri |> uri_path,
-        ..test_ref.get(captured)
-      ])
+      test_ref.set(captured, [uri |> uri_path, ..test_ref.get(captured)])
       model
     })
 

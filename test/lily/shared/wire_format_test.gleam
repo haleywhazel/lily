@@ -256,9 +256,7 @@ pub fn encode_initial_snapshot_round_trips_via_decode_test() {
     bit_array.from_string(json_only),
     serialiser: transport.automatic(),
   )
-  |> should.equal(
-    Ok(Snapshot(target: Session, sequence: 0, state: model)),
-  )
+  |> should.equal(Ok(Snapshot(target: Session, sequence: 0, state: model)))
 }
 
 pub fn roundtrip_snapshot_test() {

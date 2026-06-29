@@ -57,7 +57,7 @@ pub fn event_on_click_disabled_ignored_test() {
   let runtime = new_runtime()
   test_dom.set_inner_html(
     "#app",
-    "<div data-lily-disabled=\"true\"><button data-msg=\"increment\">+</button></div>",
+    "<div data-lily-disabled=\"true\"><button data-message=\"increment\">+</button></div>",
   )
   mount_event(runtime, fn(component) {
     event.on_decoded(
@@ -67,16 +67,19 @@ pub fn event_on_click_disabled_ignored_test() {
       decoder: fn(_name) { Ok(Increment) },
     )
   })
-  test_dom.click("[data-msg=\"increment\"]")
+  test_dom.click("[data-message=\"increment\"]")
   client.get_current_model(runtime).count
   |> should.equal(0)
 }
 
 @target(javascript)
-pub fn event_on_click_with_data_msg_test() {
+pub fn event_on_click_with_data_message_test() {
   test_setup.reset_dom()
   let runtime = new_runtime()
-  test_dom.set_inner_html("#app", "<button data-msg=\"increment\">+</button>")
+  test_dom.set_inner_html(
+    "#app",
+    "<button data-message=\"increment\">+</button>",
+  )
   mount_event(runtime, fn(component) {
     event.on_decoded(
       component,
@@ -90,13 +93,13 @@ pub fn event_on_click_with_data_msg_test() {
       },
     )
   })
-  test_dom.click("[data-msg=\"increment\"]")
+  test_dom.click("[data-message=\"increment\"]")
   client.get_current_model(runtime).count
   |> should.equal(1)
 }
 
 @target(javascript)
-pub fn event_on_click_without_data_msg_ignored_test() {
+pub fn event_on_click_without_data_message_ignored_test() {
   test_setup.reset_dom()
   let runtime = new_runtime()
   test_dom.set_inner_html("#app", "<button id=\"no-msg\">+</button>")
@@ -428,7 +431,10 @@ pub fn event_on_form_change_passes_fields_test() {
 pub fn event_on_click_with_once_fires_only_once_test() {
   test_setup.reset_dom()
   let runtime = new_runtime()
-  test_dom.set_inner_html("#app", "<button data-msg=\"increment\">+</button>")
+  test_dom.set_inner_html(
+    "#app",
+    "<button data-message=\"increment\">+</button>",
+  )
   mount_event(runtime, fn(component) {
     event.on_decoded_with_options(
       component,
@@ -443,8 +449,8 @@ pub fn event_on_click_with_once_fires_only_once_test() {
       },
     )
   })
-  test_dom.click("[data-msg=\"increment\"]")
-  test_dom.click("[data-msg=\"increment\"]")
+  test_dom.click("[data-message=\"increment\"]")
+  test_dom.click("[data-message=\"increment\"]")
   client.get_current_model(runtime).count
   |> should.equal(1)
 }
@@ -455,7 +461,7 @@ pub fn event_on_click_with_stop_propagation_blocks_parent_test() {
   let runtime = new_runtime()
   test_dom.set_inner_html(
     "#app",
-    "<div id=\"sp-outer\"><div id=\"sp-inner\"><button data-msg=\"increment\">+</button></div></div>",
+    "<div id=\"sp-outer\"><div id=\"sp-inner\"><button data-message=\"increment\">+</button></div></div>",
   )
   mount_event(runtime, fn(component) {
     component
@@ -481,7 +487,7 @@ pub fn event_on_click_with_stop_propagation_blocks_parent_test() {
       },
     )
   })
-  test_dom.click("[data-msg=\"increment\"]")
+  test_dom.click("[data-message=\"increment\"]")
   client.get_current_model(runtime).count
   |> should.equal(1)
 }
@@ -1244,4 +1250,138 @@ pub fn event_on_wheel_with_once_fires_only_once_test() {
   test_dom.wheel_event("#wheel-w-el", 3.0, 4.0)
   client.get_current_model(runtime).count
   |> should.equal(1)
+}
+
+// =============================================================================
+// FOCUS GROUP
+// =============================================================================
+
+@target(javascript)
+fn mount_focus_group_dom() -> Nil {
+  test_dom.set_inner_html(
+    "#app",
+    "<div id=\"g\">"
+      <> "<button id=\"i1\">1</button>"
+      <> "<button id=\"i2\">2</button>"
+      <> "<button id=\"i3\">3</button>"
+      <> "</div>",
+  )
+}
+
+@target(javascript)
+pub fn event_focus_group_arrow_moves_focus_test() {
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  mount_focus_group_dom()
+  event.focus_group(
+    runtime,
+    items: "#g button",
+    orientation: event.Vertical,
+    wrap: True,
+  )
+  test_dom.focus("#i1")
+  test_dom.key_event("#g", "keydown", "ArrowDown")
+  test_dom.active_element_id()
+  |> should.equal("i2")
+  test_dom.key_event("#g", "keydown", "ArrowDown")
+  test_dom.active_element_id()
+  |> should.equal("i3")
+  event.release_focus_group(runtime, "#g button")
+}
+
+@target(javascript)
+pub fn event_focus_group_wraps_past_the_ends_test() {
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  mount_focus_group_dom()
+  event.focus_group(
+    runtime,
+    items: "#g button",
+    orientation: event.Vertical,
+    wrap: True,
+  )
+  test_dom.focus("#i3")
+  test_dom.key_event("#g", "keydown", "ArrowDown")
+  test_dom.active_element_id()
+  |> should.equal("i1")
+  test_dom.key_event("#g", "keydown", "ArrowUp")
+  test_dom.active_element_id()
+  |> should.equal("i3")
+  event.release_focus_group(runtime, "#g button")
+}
+
+@target(javascript)
+pub fn event_focus_group_clamps_without_wrap_test() {
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  mount_focus_group_dom()
+  event.focus_group(
+    runtime,
+    items: "#g button",
+    orientation: event.Vertical,
+    wrap: False,
+  )
+  test_dom.focus("#i1")
+  test_dom.key_event("#g", "keydown", "ArrowUp")
+  test_dom.active_element_id()
+  |> should.equal("i1")
+  event.release_focus_group(runtime, "#g button")
+}
+
+@target(javascript)
+pub fn event_focus_group_home_end_jump_test() {
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  mount_focus_group_dom()
+  event.focus_group(
+    runtime,
+    items: "#g button",
+    orientation: event.Vertical,
+    wrap: False,
+  )
+  test_dom.focus("#i2")
+  test_dom.key_event("#g", "keydown", "End")
+  test_dom.active_element_id()
+  |> should.equal("i3")
+  test_dom.key_event("#g", "keydown", "Home")
+  test_dom.active_element_id()
+  |> should.equal("i1")
+  event.release_focus_group(runtime, "#g button")
+}
+
+@target(javascript)
+pub fn event_focus_group_respects_orientation_test() {
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  mount_focus_group_dom()
+  event.focus_group(
+    runtime,
+    items: "#g button",
+    orientation: event.Vertical,
+    wrap: True,
+  )
+  test_dom.focus("#i1")
+  // A vertical group ignores horizontal arrows.
+  test_dom.key_event("#g", "keydown", "ArrowRight")
+  test_dom.active_element_id()
+  |> should.equal("i1")
+  event.release_focus_group(runtime, "#g button")
+}
+
+@target(javascript)
+pub fn event_focus_group_release_stops_navigation_test() {
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  mount_focus_group_dom()
+  event.focus_group(
+    runtime,
+    items: "#g button",
+    orientation: event.Vertical,
+    wrap: True,
+  )
+  event.release_focus_group(runtime, "#g button")
+  test_dom.focus("#i1")
+  test_dom.key_event("#g", "keydown", "ArrowDown")
+  test_dom.active_element_id()
+  |> should.equal("i1")
 }

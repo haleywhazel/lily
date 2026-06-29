@@ -479,8 +479,7 @@ fn handle_dispatch_to_logic(
   client_id: String,
   message: message,
 ) -> ServerState(model, message) {
-  case dict.get(state.sessions, client_id), dict.get(state.clients, client_id)
-  {
+  case dict.get(state.sessions, client_id), dict.get(state.clients, client_id) {
     Ok(connection), Ok(send) -> {
       let new_model = case state.session_apply {
         option.None -> connection.model

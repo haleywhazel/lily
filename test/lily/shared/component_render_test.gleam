@@ -22,7 +22,9 @@ fn from_string(s: String) -> String {
   s
 }
 
-fn render(view: fn(Model) -> component.Component(Model, Message, String)) -> String {
+fn render(
+  view: fn(Model) -> component.Component(Model, Message, String),
+) -> String {
   component.render_to_string(
     view: view,
     model: test_fixtures.initial_model(),
@@ -75,10 +77,9 @@ pub fn render_fragment_concatenates_children_test() {
 
 pub fn render_switch_uses_built_component_test() {
   render(fn(_) {
-    component.switch(
-      on: fn(model: Model) { model.count },
-      case_of: fn(_) { component.static(fn(_) { "<switched/>" }) },
-    )
+    component.switch(on: fn(model: Model) { model.count }, case_of: fn(_) {
+      component.static(fn(_) { "<switched/>" })
+    })
   })
   |> should.equal("<switched/>")
 }
@@ -93,7 +94,9 @@ pub fn render_each_renders_per_item_test() {
     component.each(
       slice: fn(_) { [1, 2, 3] },
       key: fn(n) { int.to_string(n) },
-      render: fn(n) { component.static(fn(_) { "[" <> int.to_string(n) <> "]" }) },
+      render: fn(n) {
+        component.static(fn(_) { "[" <> int.to_string(n) <> "]" })
+      },
     )
   })
   |> should.equal("[1][2][3]")
@@ -134,31 +137,25 @@ pub fn render_simple_nested_via_slot_test() {
   // Outer wraps inner content. The slotter renders the inner Component
   // inline and from_string wraps it back as the html (String) type.
   render(fn(_) {
-    component.simple(
-      slice: fn(_) { Nil },
-      render: fn(_, slot) {
-        "<outer>"
-        <> slot(component.static(fn(_) { "<inner/>" }))
-        <> "</outer>"
-      },
-    )
+    component.simple(slice: fn(_) { Nil }, render: fn(_, slot) {
+      "<outer>" <> slot(component.static(fn(_) { "<inner/>" })) <> "</outer>"
+    })
   })
   |> should.equal("<outer><inner/></outer>")
 }
 
 // =============================================================================
-// WRAPPERS (Transition, RequireConnection, WithEvents)
+// DECORATIONS (Transition, Connection, Listener)
 // =============================================================================
 
 pub fn render_transition_passes_through_test() {
   render(fn(_) {
-    component.transition(
+    component.static(fn(_) { "<inner/>" })
+    |> component.transition(
       enter: "fade-in",
       exit: "fade-out",
       duration_milliseconds: 200,
-      child: component.static(fn(_) { "<inner/>" }),
     )
   })
   |> should.equal("<inner/>")
 }
-

@@ -43,7 +43,7 @@ export function renderTree(runtime, rootSelector, component, model, toHtml, toSl
   const handle = runtime.handle;
 
   // The binding closures take a Runtime, not just a handle, so stash
-  // it on the handle for renderWithEvents to grab. Idempotent across
+  // it on the handle for renderDecorated to grab. Idempotent across
   // mounts since the same runtime drives every mount.
   handle.setRuntime(runtime);
 
@@ -73,8 +73,9 @@ export function renderTree(runtime, rootSelector, component, model, toHtml, toSl
     if (handler) handler(model);
   }
 
-  // Bindings get queued during renderComponent (every WithEvents in the
-  // tree, including ones reached via slot children). Fire them now that
+  // Bindings get queued during renderComponent (every Decorated with
+  // bindings in the tree, including ones reached via slot children). Fire
+  // them now that
   // the DOM has stabilised so element-scoped listeners attach to the
   // post-handler subtree.
   handle.drainBindings();
@@ -455,15 +456,91 @@ function createKeyedListHandler({ handle, selector, slice, getKey, onDrop, onIte
 
 // --- RENDERERS ---
 
-/** Renders a general `Component` (irrespective of specific variant) */
+/**
+ * Renders a `Component`: dispatch on its `component_type` to produce the
+ * inner HTML, then layer its `decorations` (transition wrapper, connection
+ * gate, event listeners) on top.
+ */
 function renderComponent(handle, component, model, toHtml, toSlot) {
-  const typeName = component.constructor.name;
+  const componentType = component.component_type;
+  const typeName = componentType.constructor.name;
   const render = RENDERERS[typeName];
   if (!render) {
-    console.error("Unknown component variant:", typeName, component);
+    console.error("Unknown component type:", typeName, componentType);
     return "";
   }
-  return render(handle, component, model, toHtml, toSlot);
+  const html = render(handle, componentType, model, toHtml, toSlot);
+  return applyDecorations(handle, component.decorations, html, model);
+}
+
+/**
+ * Applies a component's decoration list to its rendered HTML. Decorations
+ * are folded innermost-first in list order, so the last one wraps outermost
+ * (matching how the constructors append them):
+ *
+ *  - `Listener`: queues the binding to fire after renderTree's innerHTML
+ *    pass; no element of its own (suppressed inside each / each_live /
+ *    switch item bodies via handle.queueBinding).
+ *  - `Transition`: wraps in a marker div carrying the enter class (scheduled
+ *    for removal) plus the exit class and duration as data attributes for
+ *    removeWithTransition; no reactive handler of its own.
+ *  - `Connection`: wraps in a div whose disabled / aria-disabled /
+ *    lily-disconnected state tracks the connection predicate.
+ */
+function applyDecorations(handle, decorations, html, model) {
+  const runtime = handle.getRuntime();
+  for (const decoration of decorations.toArray()) {
+    switch (decoration.constructor.name) {
+      case "Listener":
+        handle.queueBinding(() => decoration.handler(runtime));
+        break;
+
+      case "Transition": {
+        const { enter, exit, duration_milliseconds: durationMs } = decoration;
+        const componentId = handle.nextComponentId();
+        scheduleEnterClassRemoval(
+          `[data-lily-component="${componentId}"]`,
+          enter,
+          durationMs,
+        );
+        html =
+          `<div data-lily-component="${componentId}" ` +
+          `data-lily-transition-exit="${exit}" ` +
+          `data-lily-transition-duration="${durationMs}" ` +
+          `class="${enter}">${html}</div>`;
+        break;
+      }
+
+      case "Connection": {
+        const connectedFn = decoration.connected;
+        const componentId = handle.nextComponentId();
+        const selector = `[data-lily-component="${componentId}"]`;
+        let cachedElement = null;
+        const handler = createSelective(
+          connectedFn,
+          referenceEqual,
+          (isConnected) => {
+            cachedElement = ensureCached(cachedElement, selector);
+            if (!cachedElement) return;
+
+            if (isConnected) {
+              cachedElement.removeAttribute("data-lily-disabled");
+              cachedElement.removeAttribute("aria-disabled");
+              cachedElement.classList.remove("lily-disconnected");
+            } else {
+              cachedElement.setAttribute("data-lily-disabled", "true");
+              cachedElement.setAttribute("aria-disabled", "true");
+              cachedElement.classList.add("lily-disconnected");
+            }
+          },
+        );
+        handle.registerComponent(componentId, handler);
+        html = `<div data-lily-component="${componentId}">${html}</div>`;
+        break;
+      }
+    }
+  }
+  return html;
 }
 
 /** Renders an Each component */
@@ -573,38 +650,6 @@ function renderLive(handle, component, model, toHtml, toSlot) {
   }
 
   return `<div data-lily-component="${componentId}">${initialHtml}</div>`;
-}
-
-/** Renders a component wrapped in RequireConnection */
-function renderRequireConnection(handle, component, model, toHtml, toSlot) {
-  const componentId = handle.nextComponentId();
-  const selector = `[data-lily-component="${componentId}"]`;
-
-  const { inner, connected } = component;
-
-  const innerHtml = renderComponent(handle, inner, model, toHtml, toSlot);
-
-  let cachedElement = null;
-
-  const handler = createSelective(connected, referenceEqual, (isConnected) => {
-    cachedElement = ensureCached(cachedElement, selector);
-    if (!cachedElement) return;
-
-    if (isConnected) {
-      cachedElement.removeAttribute("data-lily-disabled");
-      cachedElement.removeAttribute("aria-disabled");
-      cachedElement.classList.remove("lily-disconnected");
-    } else {
-      cachedElement.setAttribute("data-lily-disabled", "true");
-      cachedElement.setAttribute("aria-disabled", "true");
-      cachedElement.classList.add("lily-disconnected");
-    }
-  });
-
-  // Register handler to be called on model updates
-  handle.registerComponent(componentId, handler);
-
-  return `<div data-lily-component="${componentId}">${innerHtml}</div>`;
 }
 
 /** Renders a Simple component */
@@ -740,60 +785,6 @@ function renderSwitch(handle, component, model, toHtml, toSlot) {
   return `<div data-lily-component="${componentId}">${initialHtml}</div>`;
 }
 
-/**
- * Renders a Transition wrapper. The enter class is applied via the
- * initial HTML and scheduled for removal after the duration. The exit
- * class and duration are stored as data attributes so removeWithTransition
- * can find them when the surrounding each / each_live / switch removal
- * path runs. Transition has no reactive content of its own, so we don't
- * register a handler, the wrapper's component ID is just a DOM marker
- * for the CSS selector.
- */
-function renderTransition(handle, component, model, toHtml, toSlot) {
-  const componentId = handle.nextComponentId();
-  const selector = `[data-lily-component="${componentId}"]`;
-  const { enter, exit, duration_milliseconds: durationMs, child } =
-    component;
-
-  const { html } = renderChildAndCaptureIds(
-    handle,
-    child,
-    model,
-    toHtml,
-    toSlot,
-  );
-
-  scheduleEnterClassRemoval(selector, enter, durationMs);
-
-  return (
-    `<div data-lily-component="${componentId}" ` +
-    `data-lily-transition-exit="${exit}" ` +
-    `data-lily-transition-duration="${durationMs}" ` +
-    `class="${enter}">${html}</div>`
-  );
-}
-
-/**
- * Renders a WithEvents wrapper. Queues each binding to fire after the
- * surrounding renderTree finishes its innerHTML pass, so listeners that
- * attach to specific elements (e.g. `event.click` on `#app`) find their
- * target in the DOM. Queuing instead of firing inline matters for slot
- * children too: a parent's renderComponent call may produce HTML that
- * isn't in the DOM yet.
- *
- * Suppressed inside `each` / `each_live` / `switch` per-item bodies
- * (those renderers toggle `handle.suppressBindings()` around their child
- * renders), which keeps event-binding semantics the same as the
- * documented placement rule.
- */
-function renderWithEvents(handle, component, model, toHtml, toSlot) {
-  const runtime = handle.getRuntime();
-  for (const binding of component.bindings.toArray()) {
-    handle.queueBinding(() => binding(runtime));
-  }
-  return renderComponent(handle, component.inner, model, toHtml, toSlot);
-}
-
 // --- TRANSITION HELPERS ---
 
 /**
@@ -912,12 +903,9 @@ const RENDERERS = {
   EachLive: renderEachLive,
   Fragment: renderFragment,
   Live: renderLive,
-  RequireConnection: renderRequireConnection,
   Simple: renderSimple,
   Static: renderStatic,
   Switch: renderSwitch,
-  Transition: renderTransition,
-  WithEvents: renderWithEvents,
 };
 
 // Regex matching a single `<lily-slot></lily-slot>` placeholder (with

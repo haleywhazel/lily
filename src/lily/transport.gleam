@@ -161,8 +161,8 @@ pub type Target {
 @internal
 pub type Protocol(model, message) {
   /// Sent by the server after applying a `SessionMessage` or `TopicMessage`
-  /// and assigning it a sequence number for the relevant target. Also used
-  /// to confirm `Unsubscribe`.
+  /// and assigning it a sequence number for the relevant target. Also sent
+  /// to a topic's subscribers when the topic is stopped.
   Acknowledge(target: Target, sequence: Int)
 
   /// Sent by the server immediately after a client connects, carrying the
@@ -214,8 +214,8 @@ pub type Protocol(model, message) {
   /// sequence after applying.
   TopicUpdate(topic_id: String, sequence: Int, payload: message)
 
-  /// Sent by the client to leave a topic. The server replies with
-  /// `Acknowledge(Topic(id), seq)` to confirm.
+  /// Sent by the client to leave a topic. Fire-and-forget: the server
+  /// removes the subscriber and sends no confirmation frame back.
   Unsubscribe(topic_id: String)
 }
 
@@ -431,8 +431,10 @@ pub fn decode(
   }
 }
 
-/// Encodes a `Protocol` into bytes. Uses MessagePack when a binary codec is
-/// active (the default for [`automatic`](#automatic)), or JSON otherwise.
+/// Encodes a `Protocol` into bytes. Uses MessagePack for a binary serialiser
+/// (`custom_binary`, or [`automatic`](#automatic) after
+/// [`use_message_pack`](#use_message_pack)), and JSON otherwise. An
+/// [`automatic`](#automatic) serialiser defaults to JSON.
 pub fn encode(
   protocol: Protocol(model, message),
   serialiser serialiser: Serialiser(model, message),
@@ -449,18 +451,19 @@ pub fn encode(
 }
 
 /// Encode a model as an inline hydration payload to embed inside
-/// server-rendered HTML. Returns
+/// pre-rendered HTML. Returns
 /// `<script type="application/json" id="lily-snapshot">...</script>` with
 /// a JSON-encoded `Snapshot(Session, 0, model)` frame inside.
 /// [`client.hydrate`](./client.html#hydrate) reads this on mount and uses
 /// the embedded model as the initial state, avoiding a round-trip on
-/// first paint.
+/// first paint. The snapshot is a fixed initial state baked into the page,
+/// not data rendered per request.
 ///
 /// Always uses JSON regardless of the serialiser's `automatic` format
 /// toggle, since binary MessagePack is not safe to inline inside HTML.
 /// `CustomBinary` serialisers will produce a snapshot whose payload is a
 /// base16-encoded representation of the binary bytes; prefer `automatic`
-/// or `custom_json` for SSR.
+/// or `custom_json` for the embedded snapshot.
 ///
 /// ```gleam
 /// let body = "<!DOCTYPE html><html><body>"

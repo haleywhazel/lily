@@ -74,6 +74,15 @@ export function getText(selector) {
   return el ? el.textContent ?? "" : "";
 }
 
+export function focus(selector) {
+  const el = document.querySelector(selector);
+  if (el && typeof el.focus === "function") el.focus();
+}
+
+export function activeElementId() {
+  return document.activeElement ? document.activeElement.id ?? "" : "";
+}
+
 export function setLocalStorageItem(key, value) {
   localStorage.setItem(key, value);
 }

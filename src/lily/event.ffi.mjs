@@ -102,7 +102,13 @@ function applyOptions(listener, debounceMs, throttleMs, once, stopPropagation) {
   if (stopPropagation) {
     const inner = listener;
     listener = (event) => {
-      event.stopPropagation();
+      // Delegated handlers all live on the same node (document, or window
+      // for window-only events), so a plain stopPropagation would not stop
+      // the other delegated listeners on that node, only propagation to
+      // ancestors. stopImmediatePropagation also skips the same-node
+      // listeners registered after this one, which is what lets a specific
+      // handler block a broader ancestor-selector handler registered later.
+      event.stopImmediatePropagation();
       inner(event);
     };
   }
@@ -264,6 +270,75 @@ function popFocusTrap() {
   if (trapStack.length === 0) uninstallTrapKeydownHandler();
 }
 
+// Registry of arrow-navigable focus groups, keyed by the items selector.
+// Unlike traps (a LIFO stack with one active entry), several groups coexist
+// on a page; the active group on a keypress is the one whose items include
+// the focused element. One document-level keydown listener serves them all.
+const focusGroups = new Map();
+let groupKeydownHandler = null;
+
+/** Install the focus-group keydown listener if not already installed. */
+function installGroupKeydownHandler() {
+  if (groupKeydownHandler !== null) return;
+  groupKeydownHandler = (event) => handleGroupKeydown(event);
+  // Capture phase, like the trap listener, so navigation wins over any
+  // element-level keydown handlers.
+  document.addEventListener("keydown", groupKeydownHandler, true);
+}
+
+/** Remove the focus-group keydown listener if installed. */
+function uninstallGroupKeydownHandler() {
+  if (groupKeydownHandler === null) return;
+  document.removeEventListener("keydown", groupKeydownHandler, true);
+  groupKeydownHandler = null;
+}
+
+/**
+ * Move focus among a group's items when an Arrow/Home/End key is pressed
+ * while focus sits on one of them. Items are re-queried per keypress so
+ * dynamically-rendered groups are handled. Focus moves via element.focus(),
+ * which works even on the tabindex="-1" items of a roving-tabindex render.
+ */
+function handleGroupKeydown(event) {
+  const active = document.activeElement;
+  if (!active) return;
+
+  for (const [selector, config] of focusGroups) {
+    const items = Array.from(document.querySelectorAll(selector));
+    const current = items.indexOf(active);
+    if (current === -1) continue;
+
+    let next;
+    if (event.key === "Home") {
+      next = 0;
+    } else if (event.key === "End") {
+      next = items.length - 1;
+    } else {
+      const step = groupStep(event.key, config.orientation);
+      if (step === 0) return;
+      next = current + step;
+      if (next < 0 || next >= items.length) {
+        if (!config.wrap) return;
+        next = (next + items.length) % items.length;
+      }
+    }
+    event.preventDefault();
+    items[next].focus();
+    return;
+  }
+}
+
+/** Arrow-key direction for an orientation: +1 (next), -1 (prev), or 0. */
+function groupStep(key, orientation) {
+  const horizontal = orientation === "horizontal" || orientation === "both";
+  const vertical = orientation === "vertical" || orientation === "both";
+  if (vertical && key === "ArrowDown") return 1;
+  if (vertical && key === "ArrowUp") return -1;
+  if (horizontal && key === "ArrowRight") return 1;
+  if (horizontal && key === "ArrowLeft") return -1;
+  return 0;
+}
+
 // =============================================================================
 // EXPORT FUNCTIONS
 // =============================================================================
@@ -271,7 +346,7 @@ function popFocusTrap() {
 // click events
 
 /**
- * Attaches a click event handler with data-msg attribute delegation and
+ * Attaches a click event handler with data-message attribute delegation and
  * options.
  */
 export function setupClickEventWithOptions(selector, options, handler) {
@@ -279,9 +354,9 @@ export function setupClickEventWithOptions(selector, options, handler) {
   let listener = (event) => {
     if (!matchesSelectorScope(event, selector)) return;
     if (event.target.closest("[data-lily-disabled]")) return;
-    const matched = event.target.closest("[data-msg]");
+    const matched = event.target.closest("[data-message]");
     if (!matched) return;
-    handler(matched.getAttribute("data-msg"));
+    handler(matched.getAttribute("data-message"));
   };
   listener = applyOptions(listener, debounceMs, throttleMs, once, stopPropagation);
   if (preventDefault) listener = preventDefaultFirst(listener);
@@ -397,8 +472,18 @@ export function setupFocusTrap(within, releaseOn, onExit) {
  * Pop the top focus trap. If another trap is below it, that trap becomes
  * active again. No on_exit dispatched. No-op when the stack is empty.
  */
+export function releaseFocusGroup(items) {
+  focusGroups.delete(items);
+  if (focusGroups.size === 0) uninstallGroupKeydownHandler();
+}
+
 export function releaseFocusTrap() {
   popFocusTrap();
+}
+
+export function setupFocusGroup(items, orientation, wrap) {
+  focusGroups.set(items, { orientation, wrap });
+  installGroupKeydownHandler();
 }
 
 // form events

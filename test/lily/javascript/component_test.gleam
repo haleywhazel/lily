@@ -534,9 +534,10 @@ pub fn switch_inside_require_connection_test() {
       })
       |> component.require_connection(fn(m: Model) { m.connected })
     })
-  // Default initial_model has connected: False, so the wrapper should be
-  // marked disabled.
-  test_dom.has_attribute("[data-lily-component=\"c0\"]", "data-lily-disabled")
+  // Default initial_model has connected: False, so the connection wrapper
+  // should be marked disabled. Select by the marker attribute itself rather
+  // than a fixed component id, so the assertion survives id-allocation order.
+  test_dom.has_attribute("[data-lily-disabled]", "data-lily-disabled")
   |> should.be_true
 }
 
@@ -575,7 +576,7 @@ pub fn switch_events_on_switch_itself_fire_test() {
     mount(runtime, fn(_model) {
       component.switch(on: fn(m: Model) { m.active_tab }, case_of: fn(_tab) {
         component.static(fn(_) {
-          "<button id=\"fires\" data-msg=\"increment\">+</button>"
+          "<button id=\"fires\" data-message=\"increment\">+</button>"
         })
       })
       |> event.on_decoded(
@@ -603,7 +604,7 @@ pub fn event_on_fragment_root_test() {
     mount(runtime, fn(_model) {
       component.fragment([
         component.static(fn(_) {
-          "<button id=\"frag\" data-msg=\"go\">+</button>"
+          "<button id=\"frag\" data-message=\"go\">+</button>"
         }),
       ])
       |> event.on_decoded(event: event.click, selector: "#frag", decoder: fn(_) {
@@ -626,7 +627,7 @@ pub fn event_pipe_order_event_then_require_connection_test() {
   let _r =
     mount(runtime, fn(_model) {
       component.static(fn(_) {
-        "<button id=\"pipe-a\" data-msg=\"go\">+</button>"
+        "<button id=\"pipe-a\" data-message=\"go\">+</button>"
       })
       |> event.on_decoded(
         event: event.click,
@@ -650,7 +651,7 @@ pub fn event_pipe_order_require_connection_then_event_test() {
   let _r =
     mount(runtime, fn(_model) {
       component.static(fn(_) {
-        "<button id=\"pipe-b\" data-msg=\"go\">+</button>"
+        "<button id=\"pipe-b\" data-message=\"go\">+</button>"
       })
       |> component.require_connection(fn(_) { True })
       |> event.on_decoded(
@@ -678,7 +679,7 @@ pub fn event_on_slot_child_of_live_test() {
     mount(runtime, fn(_model) {
       let inner =
         component.static(fn(_) {
-          "<button id=\"slotted\" data-msg=\"go\">+</button>"
+          "<button id=\"slotted\" data-message=\"go\">+</button>"
         })
         |> event.on_decoded(
           event: event.click,
@@ -796,7 +797,7 @@ pub fn multi_mount_events_globally_delegated_test() {
   let _r =
     mount(runtime, fn(_model) {
       component.static(fn(_) {
-        "<button id=\"global-btn\" data-msg=\"go\">+</button>"
+        "<button id=\"global-btn\" data-message=\"go\">+</button>"
       })
     })
   let _r2 =
@@ -837,13 +838,13 @@ pub fn transition_enter_class_applied_on_mount_test() {
         slice: fn(m: Model) { transition_items_list(m) },
         key: fn(id: Int) { int.to_string(id) },
         initial: fn(id) {
-          component.transition(
+          component.static(fn(_) {
+            "<span>item " <> int.to_string(id) <> "</span>"
+          })
+          |> component.transition(
             enter: "fade-enter",
             exit: "fade-exit",
             duration_milliseconds: 10,
-            child: component.static(fn(_) {
-              "<span>item " <> int.to_string(id) <> "</span>"
-            }),
           )
         },
         patch: fn(_) { [] },
@@ -868,13 +869,13 @@ pub fn transition_exit_defers_removal_test() -> promise.Promise(Nil) {
         slice: fn(m: Model) { transition_items_list(m) },
         key: fn(id: Int) { int.to_string(id) },
         initial: fn(id) {
-          component.transition(
+          component.static(fn(_) {
+            "<span class=\"item-" <> int.to_string(id) <> "\"></span>"
+          })
+          |> component.transition(
             enter: "tx-enter",
             exit: "tx-exit",
             duration_milliseconds: 20,
-            child: component.static(fn(_) {
-              "<span class=\"item-" <> int.to_string(id) <> "\"></span>"
-            }),
           )
         },
         patch: fn(_) { [] },
@@ -911,13 +912,13 @@ pub fn transition_re_add_mid_exit_cancels_test() -> promise.Promise(Nil) {
         slice: fn(m: Model) { transition_items_list(m) },
         key: fn(id: Int) { int.to_string(id) },
         initial: fn(id) {
-          component.transition(
+          component.static(fn(_) {
+            "<span class=\"keep-" <> int.to_string(id) <> "\"></span>"
+          })
+          |> component.transition(
             enter: "tx2-enter",
             exit: "tx2-exit",
             duration_milliseconds: 50,
-            child: component.static(fn(_) {
-              "<span class=\"keep-" <> int.to_string(id) <> "\"></span>"
-            }),
           )
         },
         patch: fn(_) { [] },
@@ -960,13 +961,13 @@ pub fn transition_inside_each_live_keeps_item_attribute_test() {
         slice: fn(m: Model) { transition_items_list(m) },
         key: fn(id: Int) { int.to_string(id) },
         initial: fn(id) {
-          component.transition(
+          component.static(fn(_) {
+            "<span>item " <> int.to_string(id) <> "</span>"
+          })
+          |> component.transition(
             enter: "in",
             exit: "out",
             duration_milliseconds: 10,
-            child: component.static(fn(_) {
-              "<span>item " <> int.to_string(id) <> "</span>"
-            }),
           )
         },
         patch: fn(_) { [] },
@@ -983,19 +984,20 @@ pub fn transition_inside_each_live_keeps_item_attribute_test() {
 
 @target(javascript)
 pub fn transition_events_on_outer_wrapper_test() {
-  // event.on attached to a Transition gets registered via the WithEvents
-  // path; the binding fires while the child is mounted.
+  // event.on attached to a transitioned component is registered as a
+  // Listener decoration alongside the transition; the binding fires while
+  // the child is mounted.
   test_setup.reset_dom()
   let runtime = new_runtime()
   let _r =
     mount(runtime, fn(_model) {
-      component.transition(
+      component.static(fn(_) {
+        "<button id=\"tx-btn\" data-message=\"go\">+</button>"
+      })
+      |> component.transition(
         enter: "fade",
         exit: "fade-out",
         duration_milliseconds: 10,
-        child: component.static(fn(_) {
-          "<button id=\"tx-btn\" data-msg=\"go\">+</button>"
-        }),
       )
       |> event.on_decoded(
         event: event.click,

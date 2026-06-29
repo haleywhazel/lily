@@ -420,9 +420,7 @@ pub fn server_on_connect_fires_once_per_connect_test() {
 pub fn server_on_disconnect_fires_with_client_id_test() {
   let srv = new_server()
   let hook_subj: process.Subject(String) = process.new_subject()
-  server.on_disconnect(srv, fn(client_id) {
-    process.send(hook_subj, client_id)
-  })
+  server.on_disconnect(srv, fn(client_id) { process.send(hook_subj, client_id) })
   let _ = connect_client(srv, "c1")
   server.disconnect(srv, client_id: "c1")
   process.receive(hook_subj, within: 200)

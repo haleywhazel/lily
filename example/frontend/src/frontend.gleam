@@ -260,7 +260,7 @@ fn app(
       [SetAttribute(".app-root", "data-theme", theme)]
     },
   )
-  // Click delegation, every actionable element carries a `data-msg`
+  // Click delegation, every actionable element carries a `data-message`
   // attribute. Sits on the root component so it covers the whole app.
   |> event.on_decoded(
     event: event.click,
@@ -393,7 +393,7 @@ fn theme_toggle() -> component.Component(
         [
           attribute.class("theme-toggle"),
           attribute.attribute("type", "button"),
-          attribute.attribute("data-msg", "toggle-theme"),
+          attribute.attribute("data-message", "toggle-theme"),
           attribute.attribute("aria-pressed", "false"),
           attribute.attribute("aria-label", "Toggle light theme"),
         ],
@@ -449,7 +449,7 @@ fn clear_button() -> component.Component(
               attribute.id("clear-button"),
               attribute.class("clear-button"),
               attribute.attribute("type", "button"),
-              attribute.attribute("data-msg", "open-clear"),
+              attribute.attribute("data-message", "open-clear"),
             ],
             [html.text("Clear notifications")],
           )
@@ -483,7 +483,7 @@ fn render_popup(
           attribute.class("popup-dismiss"),
           attribute.attribute("type", "button"),
           attribute.attribute(
-            "data-msg",
+            "data-message",
             "dismiss-popup:" <> int.to_string(popup.id),
           ),
           attribute.attribute("aria-label", "Dismiss notification"),
@@ -660,7 +660,7 @@ fn render_dialog(popup_count: Int) -> Element(shared.Message) {
   html.div(
     [
       attribute.class("clear-dialog__overlay"),
-      attribute.attribute("data-msg", "close-clear"),
+      attribute.attribute("data-message", "close-clear"),
     ],
     [
       html.div(
@@ -682,7 +682,7 @@ fn render_dialog(popup_count: Int) -> Element(shared.Message) {
               [
                 attribute.id("clear-dialog-cancel"),
                 attribute.attribute("type", "button"),
-                attribute.attribute("data-msg", "close-clear"),
+                attribute.attribute("data-message", "close-clear"),
               ],
               [html.text("Cancel")],
             ),
@@ -691,7 +691,7 @@ fn render_dialog(popup_count: Int) -> Element(shared.Message) {
                 attribute.id("clear-dialog-confirm"),
                 attribute.class("destructive"),
                 attribute.attribute("type", "button"),
-                attribute.attribute("data-msg", "confirm-clear"),
+                attribute.attribute("data-message", "confirm-clear"),
               ],
               [html.text("Clear")],
             ),
