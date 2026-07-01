@@ -133,12 +133,17 @@
 // IMPORTS
 // =============================================================================
 
+import gleam/bit_array
+import gleam/dynamic.{type Dynamic}
 @target(javascript)
 import gleam/option.{type Option}
+import gleam/result
+
 @target(javascript)
 import lily/client.{type Runtime}
 @target(javascript)
 import lily/component.{type Component}
+import lily/internal/auto_codec
 
 // =============================================================================
 // PUBLIC TYPES
@@ -210,6 +215,49 @@ pub fn debounce_milliseconds(options: EventOptions, value: Int) -> EventOptions 
   EventOptions(..options, debounce_milliseconds: option.Some(value))
 }
 
+/// Recover a message encoded by [`encode_message`](#encode_message). Returns
+/// `Error(Nil)` for any string this module did not produce, so it drops
+/// straight into [`on_decoded()`](#on_decoded) as the `decoder` and coexists
+/// with handlers that read readable `data-message` tags (those decline here
+/// and are handled by their own listeners).
+///
+/// ```gleam
+/// root
+/// |> event.on_decoded(
+///   event: event.click,
+///   selector: ".lily-ui-root",
+///   decoder: event.decode_message,
+/// )
+/// ```
+pub fn decode_message(encoded: String) -> Result(message, Nil) {
+  case encoded {
+    "lily-message:" <> payload -> {
+      use bytes <- result.try(bit_array.base64_decode(payload))
+      use value <- result.try(auto_codec.decode_message_pack(bytes))
+      Ok(unsafe_coerce_dynamic(value))
+    }
+    _ -> Error(Nil)
+  }
+}
+
+/// Serialise `message` into an attribute-safe string for a `data-message`
+/// attribute, so a stateless element can carry a typed message that
+/// [`decode_message()`](#decode_message) recovers at the root. The value
+/// round-trips through Lily's reflection codec, the same one
+/// [`transport`](./transport.html) uses on the wire, so no separate encoder
+/// is needed and the constructor is cached at encode time.
+///
+/// ```gleam
+/// html.button(
+///   [attribute.data("message", event.encode_message(SaveDraft))],
+///   [html.text("Save")],
+/// )
+/// ```
+pub fn encode_message(message: a) -> String {
+  "lily-message:"
+  <> bit_array.base64_encode(auto_codec.encode_message_pack(message), False)
+}
+
 @target(javascript)
 /// Programmatically move focus to the first element matching `selector`.
 /// Runs after the next paint so the call is safe from a `client.on_message`
@@ -227,6 +275,21 @@ pub fn debounce_milliseconds(options: EventOptions, value: Int) -> EventOptions 
 /// ```
 pub fn focus(_runtime: Runtime(model, message), selector: String) -> Nil {
   setup_focus(selector)
+}
+
+@target(javascript)
+/// Make a set of elements an arrow-navigable grid of `columns` columns (the
+/// roving-tabindex pattern in two dimensions). Left and right move focus by
+/// one cell, up and down by a full row. `wrap` decides whether moving past an
+/// edge loops around. Pair with [`release_focus_group`](#release_focus_group)
+/// to remove a transient grid.
+pub fn focus_grid(
+  _runtime: Runtime(model, message),
+  items items: String,
+  columns columns: Int,
+  wrap wrap: Bool,
+) -> Nil {
+  setup_focus_grid(items, columns, wrap)
 }
 
 @target(javascript)
@@ -843,6 +906,13 @@ fn unpack_options(options: EventOptions) -> #(Int, Int, Bool, Bool, Bool) {
 
 // See event.ffi.mjs for explanations for each function.
 
+// Reinterpret the reflection-reconstructed Dynamic as the caller's message
+// type, the same identity cast transport uses after decoding. Reflection has
+// already built the correct runtime value, so only the static type is recast.
+@external(erlang, "lily_reflection_ffi", "passthrough")
+@external(javascript, "./internal/reflection.ffi.mjs", "passthrough")
+fn unsafe_coerce_dynamic(value: Dynamic) -> a
+
 @target(javascript)
 @external(javascript, "./event.ffi.mjs", "identity")
 fn unsafe_cast(value: a) -> b
@@ -895,6 +965,10 @@ fn setup_element_event_with_options(
 @target(javascript)
 @external(javascript, "./event.ffi.mjs", "setupFocus")
 fn setup_focus(selector: String) -> Nil
+
+@target(javascript)
+@external(javascript, "./event.ffi.mjs", "setupFocusGrid")
+fn setup_focus_grid(items: String, columns: Int, wrap: Bool) -> Nil
 
 @target(javascript)
 @external(javascript, "./event.ffi.mjs", "setupFocusGroup")

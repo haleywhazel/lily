@@ -787,23 +787,70 @@ function renderSwitch(handle, component, model, toHtml, toSlot) {
 
 // --- TRANSITION HELPERS ---
 
+/** Parse a CSS time list ("0.22s, 100ms") to the largest value in milliseconds. */
+function parseCssDurationMs(value) {
+  let max = 0;
+  for (const part of String(value).split(",")) {
+    const text = part.trim();
+    let ms = 0;
+    if (text.endsWith("ms")) ms = parseFloat(text);
+    else if (text.endsWith("s")) ms = parseFloat(text) * 1000;
+    if (Number.isFinite(ms) && ms > max) max = ms;
+  }
+  return max;
+}
+
 /**
- * Schedules removal of the enter class on the next animation frame.
- * Using requestAnimationFrame (two-frame dance) so the class outlives
- * the initial paint, otherwise the animation can be skipped on some
- * browsers when the class is removed mid-frame. Falls back to the
- * duration timer so the class is gone even when the element is
- * offscreen and rAF is throttled.
+ * How long to hold a transitioning element before removing it (or before
+ * stripping its enter class): the element's *computed* animation duration plus
+ * a small buffer, so the timing tracks theme.motion() automatically. Falls back
+ * to the component's declared duration when the environment can't compute one
+ * (headless tests, or CSS with no animation), where animationend never fires.
+ */
+function transitionHoldMs(element, fallbackMs) {
+  if (typeof getComputedStyle === "function") {
+    const computed = parseCssDurationMs(
+      getComputedStyle(element).animationDuration ?? "0s",
+    );
+    if (computed > 0) return computed + 60;
+  }
+  return fallbackMs;
+}
+
+/**
+ * Removes the enter class once the enter animation has finished, so the
+ * animation plays to completion. Waits one frame for the element to mount and
+ * the animation to commit, then strips the class on `animationend` (guarding
+ * against bubbling child animations), with a duration-sized timer as a fallback
+ * for environments/CSS where `animationend` never fires. Removing the class
+ * only after completion (rather than after a couple of frames) is what lets
+ * enter animations like a menu sliding down actually run.
  */
 function scheduleEnterClassRemoval(selector, enterClass, durationMs) {
-  const remove = () => {
+  const arm = () => {
     const element = document.querySelector(selector);
-    if (element) element.classList.remove(enterClass);
+    if (!element) {
+      setTimeout(() => {
+        const later = document.querySelector(selector);
+        if (later) later.classList.remove(enterClass);
+      }, durationMs);
+      return;
+    }
+    let done = false;
+    const finish = (event) => {
+      if (event && event.target !== element) return;
+      if (done) return;
+      done = true;
+      element.removeEventListener("animationend", finish);
+      element.classList.remove(enterClass);
+    };
+    element.addEventListener("animationend", finish);
+    setTimeout(finish, transitionHoldMs(element, durationMs));
   };
-  if (typeof requestAnimationFrame === "function") {
-    requestAnimationFrame(() => requestAnimationFrame(remove));
-  }
-  setTimeout(remove, durationMs);
+  // Defer a frame so the element is mounted and its animation has committed
+  // before we attach the listener.
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(arm);
+  else setTimeout(arm, 0);
 }
 
 /**
@@ -872,7 +919,7 @@ async function removeWithTransition(handle, parent, element, onComplete) {
     const timer = setTimeout(() => {
       cleanup();
       resolve();
-    }, durationMs);
+    }, transitionHoldMs(transitionElement, durationMs));
     transitionElement.addEventListener("animationend", onAnimationEnd, {
       once: true,
     });

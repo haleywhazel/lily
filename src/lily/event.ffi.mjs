@@ -188,6 +188,17 @@ export function setupFocus(selector) {
 }
 
 /**
+ * Register a set of elements as an arrow-navigable grid of `columns` columns
+ * (roving tabindex in two dimensions). Left/right move by one cell, up/down by
+ * a full row. Shares the focus-group registry and keydown handler, so
+ * releaseFocusGroup removes it too.
+ */
+export function setupFocusGrid(items, columns, wrap) {
+  focusGroups.set(items, { columns, wrap });
+  installGroupKeydownHandler();
+}
+
+/**
  * Register a set of sibling elements as an arrow-navigable focus group (the
  * roving-tabindex pattern). Several groups coexist; the active one on a
  * keypress is whichever contains the focused element.
@@ -468,13 +479,16 @@ function activateDeclaredTrap(element) {
   declaredTraps.set(element, { trap, opener: document.activeElement });
 
   // Defer initial focus a frame so the content is laid out (the trap push
-  // itself was triggered by a mutation, so layout is imminent).
+  // itself was triggered by a mutation, so layout is imminent). preventScroll
+  // keeps a bare focus from scrolling the modal into view, which jumps the
+  // page on open.
   requestAnimationFrame(() => {
     const target =
       (initial && document.querySelector(initial)) ||
       firstFocusable(element) ||
       element;
-    if (target && typeof target.focus === "function") target.focus();
+    if (target && typeof target.focus === "function")
+      target.focus({ preventScroll: true });
   });
 }
 
@@ -575,7 +589,9 @@ function deactivateDeclaredTrap(element) {
     document.contains(opener) &&
     typeof opener.focus === "function"
   ) {
-    opener.focus();
+    // preventScroll so restoring focus to the opener does not jump the page
+    // back when the modal closes.
+    opener.focus({ preventScroll: true });
   }
 }
 
@@ -632,6 +648,18 @@ function formDataToList(form) {
 }
 
 /** Arrow-key direction for an orientation: +1 (next), -1 (prev), or 0. */
+/**
+ * Arrow-key step for a grid focus group: left/right move by one, up/down by a
+ * full row (`columns`). Returns 0 for keys that should not move focus.
+ */
+function gridStep(key, columns) {
+  if (key === "ArrowRight") return 1;
+  if (key === "ArrowLeft") return -1;
+  if (key === "ArrowDown") return columns;
+  if (key === "ArrowUp") return -columns;
+  return 0;
+}
+
 function groupStep(key, orientation) {
   const horizontal = orientation === "horizontal" || orientation === "both";
   const vertical = orientation === "vertical" || orientation === "both";
@@ -663,7 +691,9 @@ function handleGroupKeydown(event) {
     } else if (event.key === "End") {
       next = items.length - 1;
     } else {
-      const step = groupStep(event.key, config.orientation);
+      const step = config.columns
+        ? gridStep(event.key, config.columns)
+        : groupStep(event.key, config.orientation);
       if (step === 0) return;
       next = current + step;
       if (next < 0 || next >= items.length) {
