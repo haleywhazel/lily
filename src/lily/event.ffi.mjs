@@ -450,6 +450,77 @@ export function watchFocusTraps() {
   trapObserver.observe(document.body, { childList: true, subtree: true });
 }
 
+/**
+ * Install a document-level Escape-to-dismiss handler. Idempotent. On Escape,
+ * the topmost (last in document order) element carrying
+ * `data-lily-escape-dismiss` is consulted; its attribute value is a CSS
+ * selector, and the element it points at is clicked. This drives dismissal
+ * through the ordinary data-message delegation, exactly like a focus trap's
+ * dismiss, but without trapping focus, so non-modal overlays (popover, menu,
+ * select, date picker) can close on Escape while staying non-modal.
+ */
+export function watchEscapeDismiss() {
+  if (escapeDismissHandler !== null) return;
+  escapeDismissHandler = (event) => {
+    if (event.key !== "Escape") return;
+    const openers = document.querySelectorAll("[data-lily-escape-dismiss]");
+    if (openers.length === 0) return;
+    // Last in document order is the most-recently opened / innermost overlay.
+    const opener = openers[openers.length - 1];
+    const selector = opener.getAttribute("data-lily-escape-dismiss") || "";
+    if (selector === "") return;
+    const target = document.querySelector(selector);
+    if (target && typeof target.click === "function") {
+      // Consume the key and click the dismiss target, so dismissal flows
+      // through the ordinary data-message delegation (the trigger carries the
+      // overlay's on_toggle message). Mirrors a focus trap's Escape dismiss,
+      // without trapping focus.
+      event.preventDefault();
+      target.click();
+    }
+  };
+  // Capture phase so Escape dismisses even when focus sits outside the panel.
+  document.addEventListener("keydown", escapeDismissHandler, true);
+}
+
+/**
+ * Install a document-level drag-and-drop handler for file dropzones.
+ * Idempotent. A dropzone opts in with `data-lily-file-drop="<input selector>"`;
+ * dropping files onto it assigns them to that input and fires a `change` event,
+ * so drops flow through the same path as picking files. While a drag is over the
+ * zone it carries a `data-lily-file-dragover` attribute for styling.
+ */
+export function watchFileDrops() {
+  if (fileDropsInstalled) return;
+  fileDropsInstalled = true;
+  const zoneOf = (event) => event.target.closest?.("[data-lily-file-drop]");
+
+  document.addEventListener("dragover", (event) => {
+    const zone = zoneOf(event);
+    if (!zone) return;
+    event.preventDefault();
+    zone.setAttribute("data-lily-file-dragover", "");
+  });
+  document.addEventListener("dragleave", (event) => {
+    const zone = zoneOf(event);
+    if (zone && !zone.contains(event.relatedTarget)) {
+      zone.removeAttribute("data-lily-file-dragover");
+    }
+  });
+  document.addEventListener("drop", (event) => {
+    const zone = zoneOf(event);
+    if (!zone) return;
+    event.preventDefault();
+    zone.removeAttribute("data-lily-file-dragover");
+    const input = document.querySelector(
+      zone.getAttribute("data-lily-file-drop") || "",
+    );
+    if (!input || input.disabled || !event.dataTransfer) return;
+    input.files = event.dataTransfer.files;
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+
 
 // =============================================================================
 // FUNCTIONS
@@ -878,6 +949,15 @@ const focusGroups = new Map();
 let groupKeydownHandler = null;
 
 let trapKeydownHandler = null;
+
+// Document-level Escape-to-dismiss handler installed by watchEscapeDismiss.
+// Unlike a focus trap it holds no state beyond the listener itself: on every
+// Escape it consults the live DOM for the topmost element opting into
+// dismissal, so it needs no observer or registry.
+let escapeDismissHandler = null;
+
+// Guards the idempotent install of the file-drop handlers (watchFileDrops).
+let fileDropsInstalled = false;
 
 // Declarative focus traps. The observer installed by watchFocusTraps
 // confines focus to any element carrying `data-lily-focus-trap` while it is

@@ -1,5 +1,5 @@
 //// Ephemeral and stateful topics for server-to-client fan-out, similar to
-//// pub/sub patterns within other libraries.
+//// pub/sub patterns within other libraries like Phoenix.
 ////
 //// An ephemeral topic broadcasts `Push` frames with no sequence and no replay:
 ////
@@ -74,8 +74,8 @@ pub type Ephemeral
 pub type Stateful
 
 /// Opaque handle to a running topic. The `kind` phantom parameter is
-/// `Ephemeral` after `topic.new` and `Stateful` after `topic.with_store`;
-/// this is enforced at compile time so `topic.dispatch` cannot be called
+/// `Ephemeral` after `topic.new` and `Stateful` after `topic.with_store`.
+/// This is enforced at compile time so `topic.dispatch` cannot be called
 /// on an ephemeral topic.
 pub opaque type Topic(model, message, kind) {
   Topic(
@@ -118,8 +118,9 @@ pub fn broadcast_from(
 
 /// Apply a message to the topic's store and emit
 /// `TopicUpdate(id, seq, payload)` to every subscriber. Only callable on
-/// stateful topics (created via `with_store`); ephemeral topics fail at
-/// compile time.
+/// stateful topics (created via `with_store`).
+///
+/// Ephemeral topics fail at compile time.
 ///
 /// ```gleam
 /// topic.dispatch(chat_topic, Chat(NewChatMessage(body)))
@@ -135,7 +136,7 @@ pub fn dispatch(topic: Topic(model, message, Stateful), message: message) -> Nil
 ///
 /// The pre-started topic is passed to `configure`. Call `with_store`,
 /// `with_can_subscribe`, etc. on it and return the result. Do not call
-/// `topic.new` inside `configure`; the topic actor is already started.
+/// `topic.new` inside `configure`, the topic actor is already started.
 ///
 /// ```gleam
 /// let assert Ok(_) =
@@ -198,7 +199,7 @@ pub fn new(
 }
 
 /// Stop the topic actor and remove it from the server registry.
-/// Subscribers stop receiving updates; their last slice value is left as-is,
+/// Subscribers stop receiving updates, their last slice value is left as-is,
 /// not reset. Further subscribes to this id either error (fixed topic) or
 /// trigger lazy reinstantiation (parametric kind, if registered), in which
 /// case the fresh topic pushes a snapshot on subscribe that replaces it.
@@ -211,8 +212,8 @@ pub fn stop(topic: Topic(model, message, kind)) -> Nil {
   server.unregister_topic(topic.server, topic.id)
 }
 
-/// Add a subscriber. Server-initiated; the client-side counterpart is
-/// `client.subscribe`. Idempotent.
+/// Add a subscriber (server-initiated), the client-side counterpart is
+/// `client.subscribe`.
 ///
 /// ```gleam
 /// topic.subscribe(chat_topic, client_id)
@@ -221,7 +222,7 @@ pub fn subscribe(topic: Topic(model, message, kind), client_id: String) -> Nil {
   server.do_subscribe(topic.server, client_id, topic.id)
 }
 
-/// Remove a subscriber. Idempotent.
+/// Remove a subscriber.
 ///
 /// ```gleam
 /// topic.unsubscribe(chat_topic, client_id)
@@ -264,9 +265,8 @@ pub fn with_on_subscribe(
   topic
 }
 
-/// Set a leave hook. Symmetric to `with_on_subscribe`; fires after the
-/// subscriber is removed. Common pattern: check the remaining subscriber count
-/// and call `topic.stop` when empty for kind-instantiated topics.
+/// Set a leave hook. Symmetric to `with_on_subscribe` and fires after the
+/// subscriber is removed.
 ///
 /// ```gleam
 /// topic.with_on_unsubscribe(chat_topic, fn(_client_id) { [] })

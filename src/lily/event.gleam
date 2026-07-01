@@ -532,6 +532,33 @@ pub fn throttle_milliseconds(options: EventOptions, value: Int) -> EventOptions 
 }
 
 @target(javascript)
+/// Install a document-level Escape-to-dismiss handler. On Escape, the topmost
+/// element carrying `data-lily-escape-dismiss` (a CSS selector) has that
+/// selector's target clicked, so dismissal flows through the ordinary
+/// `data-message` delegation. Unlike [`watch_focus_traps`](#watch_focus_traps)
+/// it does not trap focus, so it suits non-modal overlays (popover, menu,
+/// select, date picker) that should close on Escape while staying non-modal.
+///
+/// A component library renders the data attribute on its overlays and calls
+/// this once at startup. Idempotent: repeated calls install a single handler.
+pub fn watch_escape_dismiss() -> Nil {
+  watch_escape_dismiss_ffi()
+}
+
+@target(javascript)
+/// Install a document-level drag-and-drop handler for file dropzones. A
+/// dropzone opts in with `data-lily-file-drop="<input selector>"`: dropping
+/// files onto it assigns them to that input and fires a `change` event, so
+/// drops flow through the same path as picking files. While a drag is over the
+/// zone it carries a `data-lily-file-dragover` attribute for styling.
+///
+/// A component library renders the data attribute on its dropzones and calls
+/// this once at startup. Idempotent: repeated calls install a single handler.
+pub fn watch_file_drops() -> Nil {
+  watch_file_drops_ffi()
+}
+
+@target(javascript)
 /// Install a document-level observer that activates a focus trap on any
 /// element carrying `data-lily-focus-trap`, declaratively, for as long as it
 /// is in the DOM. This is the hands-off counterpart to
@@ -1041,6 +1068,14 @@ fn setup_wheel_event_with_options(
   options: #(Int, Int, Bool, Bool, Bool),
   handler: fn(Float, Float) -> Nil,
 ) -> Nil
+
+@target(javascript)
+@external(javascript, "./event.ffi.mjs", "watchEscapeDismiss")
+fn watch_escape_dismiss_ffi() -> Nil
+
+@target(javascript)
+@external(javascript, "./event.ffi.mjs", "watchFileDrops")
+fn watch_file_drops_ffi() -> Nil
 
 @target(javascript)
 @external(javascript, "./event.ffi.mjs", "watchFocusTraps")

@@ -87,121 +87,75 @@ export function renderTree(runtime, rootSelector, component, model, toHtml, toSl
 // FUNCTIONS
 // =============================================================================
 
-// --- DOM HELPERS ---
-
 /**
- * Returns `cached` if it's still in the document, otherwise re-queries
- * `selector`. Handlers cache their root element to skip a querySelector on
- * every model update; the re-query path is for re-mounts after detachment.
- */
-function ensureCached(cached, selector) {
-  return cached && cached.isConnected
-    ? cached
-    : document.querySelector(selector);
-}
-
-// --- SLOT HELPERS ---
-
-/**
- * Builds a slotter: a function the user calls inline in their content function
- * to place a child component. Each call records the component and returns a
- * placeholder html value (via toSlot). Children are collected in call order,
- * which always equals DOM position order in strict Gleam evaluation.
- */
-function makeSlotter(toSlot) {
-  const collected = []; // [Component, ...]
-  const slot = (component) => {
-    collected.push(component);
-    return toSlot();
-  };
-  return { slot, collected };
-}
-
-/**
- * Renders a child component, capturing any new component IDs that get
- * registered as a side effect. Returns the HTML string and the array of new
- * IDs so the caller can run their handlers immediately and track them for
- * cleanup when the parent item is removed or re-rendered.
- */
-function renderChildAndCaptureIds(handle, child, model, toHtml, toSlot) {
-  const registry = handle.getComponentRegistry();
-  const beforeKeys = new Set(registry.keys());
-  const html = renderComponent(handle, child, model, toHtml, toSlot);
-  const newIds = [];
-  for (const k of registry.keys()) {
-    if (!beforeKeys.has(k)) newIds.push(k);
-  }
-  return { html, newIds };
-}
-
-/** Runs each handler in `ids` once with the current model to populate. */
-function runChildHandlers(handle, ids, model) {
-  const registry = handle.getComponentRegistry();
-  for (const id of ids) {
-    const handler = registry.get(id);
-    if (handler) handler(model);
-  }
-}
-
-/**
- * After calling the user's content function and serialising to HTML, replace
- * each `<lily-slot>` marker in order with the rendered HTML of the
- * corresponding collected child component. Returns the substituted HTML string
- * and a flat list of all child component IDs registered during this call.
+ * Applies a component's decoration list to its rendered HTML. Decorations
+ * are folded innermost-first in list order, so the last one wraps outermost
+ * (matching how the constructors append them):
  *
- * Splits on every placeholder in one pass, then interleaves segments with
- * rendered children. If there are more children than placeholders (the user
- * dropped a slot return value), logs an error and unregisters the orphan
- * children so their handlers don't dangle.
+ *  - `Listener`: queues the binding to fire after renderTree's innerHTML
+ *    pass; no element of its own (suppressed inside each / each_live /
+ *    switch item bodies via handle.queueBinding).
+ *  - `Transition`: wraps in a marker div carrying the enter class (scheduled
+ *    for removal) plus the exit class and duration as data attributes for
+ *    removeWithTransition; no reactive handler of its own.
+ *  - `Connection`: wraps in a div whose disabled / aria-disabled /
+ *    lily-disconnected state tracks the connection predicate.
  */
-function substituteSlots(parentHtml, collected, handle, model, toHtml, toSlot) {
-  if (collected.length === 0) {
-    return { html: parentHtml, ids: [] };
-  }
+function applyDecorations(handle, decorations, html, model) {
+  const runtime = handle.getRuntime();
+  for (const decoration of decorations.toArray()) {
+    switch (decoration.constructor.name) {
+      case "Listener":
+        handle.queueBinding(() => decoration.handler(runtime));
+        break;
 
-  const segments = parentHtml.split(SLOT_RE);
-  const slotsAvailable = segments.length - 1;
-  const allIds = [];
-  let html = segments[0];
+      case "Transition": {
+        const { enter, exit, duration_milliseconds: durationMs } = decoration;
+        const componentId = handle.nextComponentId();
+        scheduleEnterClassRemoval(
+          `[data-lily-component="${componentId}"]`,
+          enter,
+          durationMs,
+        );
+        html =
+          `<div data-lily-component="${componentId}" ` +
+          `data-lily-transition-exit="${exit}" ` +
+          `data-lily-transition-duration="${durationMs}" ` +
+          `class="${enter}">${html}</div>`;
+        break;
+      }
 
-  for (let i = 0; i < collected.length; i++) {
-    const { html: childHtml, newIds } = renderChildAndCaptureIds(
-      handle,
-      collected[i],
-      model,
-      toHtml,
-      toSlot,
-    );
-    if (i >= slotsAvailable) {
-      console.error(
-        "lily: <lily-slot> placeholder missing from rendered HTML, child component dropped. " +
-          "Make sure slot() return values are placed in the template.",
-      );
-      unregisterChildHandlers(handle, newIds);
-      continue;
+      case "Connection": {
+        const connectedFn = decoration.connected;
+        const componentId = handle.nextComponentId();
+        const selector = `[data-lily-component="${componentId}"]`;
+        let cachedElement = null;
+        const handler = createSelective(
+          connectedFn,
+          referenceEqual,
+          (isConnected) => {
+            cachedElement = ensureCached(cachedElement, selector);
+            if (!cachedElement) return;
+
+            if (isConnected) {
+              cachedElement.removeAttribute("data-lily-disabled");
+              cachedElement.removeAttribute("aria-disabled");
+              cachedElement.classList.remove("lily-disconnected");
+            } else {
+              cachedElement.setAttribute("data-lily-disabled", "true");
+              cachedElement.setAttribute("aria-disabled", "true");
+              cachedElement.classList.add("lily-disconnected");
+            }
+          },
+        );
+        handle.registerComponent(componentId, handler);
+        html = `<div data-lily-component="${componentId}">${html}</div>`;
+        break;
+      }
     }
-    html += childHtml + segments[i + 1];
-    allIds.push(...newIds);
   }
-
-  // Append any trailing segments past the matched-children count. Only
-  // reachable if the template contains more placeholders than the user
-  // passed children, in which case those extra slots are dropped from output.
-  for (let i = collected.length + 1; i < segments.length; i++) {
-    html += segments[i];
-  }
-
-  return { html, ids: allIds };
+  return html;
 }
-
-/** Unregisters every id in `ids` from the runtime registry. */
-function unregisterChildHandlers(handle, ids) {
-  for (const id of ids) {
-    handle.unregisterComponent(id);
-  }
-}
-
-// --- LIST HANDLERS ---
 
 /** Create handler for `component.each` (returns the handler function) */
 function createEachHandler(
@@ -454,7 +408,146 @@ function createKeyedListHandler({ handle, selector, slice, getKey, onDrop, onIte
   };
 }
 
-// --- RENDERERS ---
+/**
+ * Returns `cached` if it's still in the document, otherwise re-queries
+ * `selector`. Handlers cache their root element to skip a querySelector on
+ * every model update; the re-query path is for re-mounts after detachment.
+ */
+function ensureCached(cached, selector) {
+  return cached && cached.isConnected
+    ? cached
+    : document.querySelector(selector);
+}
+
+/**
+ * Finds the Transition wrapper inside or at `element`. When a
+ * Transition is placed as the top-level component of an each_live /
+ * each item, the framework's key wrapper (`<div data-lily-key>`) sits
+ * one level above it; for `switch`, the switch wrapper sits above it.
+ * Returns null when the subtree doesn't include a Transition (so the
+ * removal proceeds synchronously).
+ */
+function findTransitionElement(element) {
+  if (element.dataset?.lilyTransitionExit) return element;
+  const child = element.firstElementChild;
+  if (child?.dataset?.lilyTransitionExit) return child;
+  return null;
+}
+
+/**
+ * Builds a slotter: a function the user calls inline in their content function
+ * to place a child component. Each call records the component and returns a
+ * placeholder html value (via toSlot). Children are collected in call order,
+ * which always equals DOM position order in strict Gleam evaluation.
+ */
+function makeSlotter(toSlot) {
+  const collected = []; // [Component, ...]
+  const slot = (component) => {
+    collected.push(component);
+    return toSlot();
+  };
+  return { slot, collected };
+}
+
+/** Parse a CSS time list ("0.22s, 100ms") to the largest value in milliseconds. */
+function parseCssDurationMs(value) {
+  let max = 0;
+  for (const part of String(value).split(",")) {
+    const text = part.trim();
+    let ms = 0;
+    if (text.endsWith("ms")) ms = parseFloat(text);
+    else if (text.endsWith("s")) ms = parseFloat(text) * 1000;
+    if (Number.isFinite(ms) && ms > max) max = ms;
+  }
+  return max;
+}
+
+/**
+ * Performs a transition-aware removal of `element` from `parent`.
+ * If the subtree includes a Transition wrapper (own dataset attrs or
+ * first child's), applies the exit class to that wrapper, races
+ * animationend vs the duration timer, then removes `element` from
+ * `parent` and calls `onComplete`. If not, removes immediately. Async
+ * because the await is genuine; callers don't have to await unless
+ * ordering matters.
+ *
+ * The pendingExits map on the handle is keyed by the outer `element`
+ * (the one the caller wants to remove) so the each_live reconciler
+ * can find a pending exit by the same handle it has, even when the
+ * Transition attrs live one level down.
+ */
+async function removeWithTransition(handle, parent, element, onComplete) {
+  const transitionElement = findTransitionElement(element);
+
+  if (!transitionElement) {
+    if (element.parentNode === parent) parent.removeChild(element);
+    onComplete();
+    return;
+  }
+
+  const exitClass = transitionElement.dataset.lilyTransitionExit;
+  const durationMs =
+    parseInt(transitionElement.dataset.lilyTransitionDuration ?? "0", 10) || 0;
+  const controller = new AbortController();
+  handle.registerPendingExit(element, controller);
+
+  transitionElement.classList.add(exitClass);
+
+  // Race animationend (the user's CSS finishing) vs the duration timer
+  // (fallback for headless test environments and CSS that doesn't
+  // animate). Abort short-circuits both.
+  await new Promise((resolve) => {
+    const cleanup = () => {
+      transitionElement.removeEventListener("animationend", onAnimationEnd);
+      controller.signal.removeEventListener("abort", onAbort);
+      clearTimeout(timer);
+    };
+    const onAnimationEnd = () => {
+      cleanup();
+      resolve();
+    };
+    const onAbort = () => {
+      cleanup();
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, transitionHoldMs(transitionElement, durationMs));
+    transitionElement.addEventListener("animationend", onAnimationEnd, {
+      once: true,
+    });
+    controller.signal.addEventListener("abort", onAbort, { once: true });
+  });
+
+  if (controller.signal.aborted) {
+    // Re-add mid-exit cancelled us. Strip the exit class so the
+    // element looks normal again.
+    transitionElement.classList.remove(exitClass);
+    return;
+  }
+
+  handle.clearPendingExit(element);
+  if (element.parentNode === parent) parent.removeChild(element);
+  onComplete();
+}
+
+/**
+ * Renders a child component, capturing any new component IDs that get
+ * registered as a side effect. Returns the HTML string and the array of new
+ * IDs so the caller can run their handlers immediately and track them for
+ * cleanup when the parent item is removed or re-rendered.
+ */
+function renderChildAndCaptureIds(handle, child, model, toHtml, toSlot) {
+  const registry = handle.getComponentRegistry();
+  const beforeKeys = new Set(registry.keys());
+  const html = renderComponent(handle, child, model, toHtml, toSlot);
+  const newIds = [];
+  for (const k of registry.keys()) {
+    if (!beforeKeys.has(k)) newIds.push(k);
+  }
+  return { html, newIds };
+}
 
 /**
  * Renders a `Component`: dispatch on its `component_type` to produce the
@@ -471,76 +564,6 @@ function renderComponent(handle, component, model, toHtml, toSlot) {
   }
   const html = render(handle, componentType, model, toHtml, toSlot);
   return applyDecorations(handle, component.decorations, html, model);
-}
-
-/**
- * Applies a component's decoration list to its rendered HTML. Decorations
- * are folded innermost-first in list order, so the last one wraps outermost
- * (matching how the constructors append them):
- *
- *  - `Listener`: queues the binding to fire after renderTree's innerHTML
- *    pass; no element of its own (suppressed inside each / each_live /
- *    switch item bodies via handle.queueBinding).
- *  - `Transition`: wraps in a marker div carrying the enter class (scheduled
- *    for removal) plus the exit class and duration as data attributes for
- *    removeWithTransition; no reactive handler of its own.
- *  - `Connection`: wraps in a div whose disabled / aria-disabled /
- *    lily-disconnected state tracks the connection predicate.
- */
-function applyDecorations(handle, decorations, html, model) {
-  const runtime = handle.getRuntime();
-  for (const decoration of decorations.toArray()) {
-    switch (decoration.constructor.name) {
-      case "Listener":
-        handle.queueBinding(() => decoration.handler(runtime));
-        break;
-
-      case "Transition": {
-        const { enter, exit, duration_milliseconds: durationMs } = decoration;
-        const componentId = handle.nextComponentId();
-        scheduleEnterClassRemoval(
-          `[data-lily-component="${componentId}"]`,
-          enter,
-          durationMs,
-        );
-        html =
-          `<div data-lily-component="${componentId}" ` +
-          `data-lily-transition-exit="${exit}" ` +
-          `data-lily-transition-duration="${durationMs}" ` +
-          `class="${enter}">${html}</div>`;
-        break;
-      }
-
-      case "Connection": {
-        const connectedFn = decoration.connected;
-        const componentId = handle.nextComponentId();
-        const selector = `[data-lily-component="${componentId}"]`;
-        let cachedElement = null;
-        const handler = createSelective(
-          connectedFn,
-          referenceEqual,
-          (isConnected) => {
-            cachedElement = ensureCached(cachedElement, selector);
-            if (!cachedElement) return;
-
-            if (isConnected) {
-              cachedElement.removeAttribute("data-lily-disabled");
-              cachedElement.removeAttribute("aria-disabled");
-              cachedElement.classList.remove("lily-disconnected");
-            } else {
-              cachedElement.setAttribute("data-lily-disabled", "true");
-              cachedElement.setAttribute("aria-disabled", "true");
-              cachedElement.classList.add("lily-disconnected");
-            }
-          },
-        );
-        handle.registerComponent(componentId, handler);
-        html = `<div data-lily-component="${componentId}">${html}</div>`;
-        break;
-      }
-    }
-  }
-  return html;
 }
 
 /** Renders an Each component */
@@ -785,36 +808,13 @@ function renderSwitch(handle, component, model, toHtml, toSlot) {
   return `<div data-lily-component="${componentId}">${initialHtml}</div>`;
 }
 
-// --- TRANSITION HELPERS ---
-
-/** Parse a CSS time list ("0.22s, 100ms") to the largest value in milliseconds. */
-function parseCssDurationMs(value) {
-  let max = 0;
-  for (const part of String(value).split(",")) {
-    const text = part.trim();
-    let ms = 0;
-    if (text.endsWith("ms")) ms = parseFloat(text);
-    else if (text.endsWith("s")) ms = parseFloat(text) * 1000;
-    if (Number.isFinite(ms) && ms > max) max = ms;
+/** Runs each handler in `ids` once with the current model to populate. */
+function runChildHandlers(handle, ids, model) {
+  const registry = handle.getComponentRegistry();
+  for (const id of ids) {
+    const handler = registry.get(id);
+    if (handler) handler(model);
   }
-  return max;
-}
-
-/**
- * How long to hold a transitioning element before removing it (or before
- * stripping its enter class): the element's *computed* animation duration plus
- * a small buffer, so the timing tracks theme.motion() automatically. Falls back
- * to the component's declared duration when the environment can't compute one
- * (headless tests, or CSS with no animation), where animationend never fires.
- */
-function transitionHoldMs(element, fallbackMs) {
-  if (typeof getComputedStyle === "function") {
-    const computed = parseCssDurationMs(
-      getComputedStyle(element).animationDuration ?? "0s",
-    );
-    if (computed > 0) return computed + 60;
-  }
-  return fallbackMs;
 }
 
 /**
@@ -854,88 +854,78 @@ function scheduleEnterClassRemoval(selector, enterClass, durationMs) {
 }
 
 /**
- * Finds the Transition wrapper inside or at `element`. When a
- * Transition is placed as the top-level component of an each_live /
- * each item, the framework's key wrapper (`<div data-lily-key>`) sits
- * one level above it; for `switch`, the switch wrapper sits above it.
- * Returns null when the subtree doesn't include a Transition (so the
- * removal proceeds synchronously).
+ * After calling the user's content function and serialising to HTML, replace
+ * each `<lily-slot>` marker in order with the rendered HTML of the
+ * corresponding collected child component. Returns the substituted HTML string
+ * and a flat list of all child component IDs registered during this call.
+ *
+ * Splits on every placeholder in one pass, then interleaves segments with
+ * rendered children. If there are more children than placeholders (the user
+ * dropped a slot return value), logs an error and unregisters the orphan
+ * children so their handlers don't dangle.
  */
-function findTransitionElement(element) {
-  if (element.dataset?.lilyTransitionExit) return element;
-  const child = element.firstElementChild;
-  if (child?.dataset?.lilyTransitionExit) return child;
-  return null;
+function substituteSlots(parentHtml, collected, handle, model, toHtml, toSlot) {
+  if (collected.length === 0) {
+    return { html: parentHtml, ids: [] };
+  }
+
+  const segments = parentHtml.split(SLOT_RE);
+  const slotsAvailable = segments.length - 1;
+  const allIds = [];
+  let html = segments[0];
+
+  for (let i = 0; i < collected.length; i++) {
+    const { html: childHtml, newIds } = renderChildAndCaptureIds(
+      handle,
+      collected[i],
+      model,
+      toHtml,
+      toSlot,
+    );
+    if (i >= slotsAvailable) {
+      console.error(
+        "lily: <lily-slot> placeholder missing from rendered HTML, child component dropped. " +
+          "Make sure slot() return values are placed in the template.",
+      );
+      unregisterChildHandlers(handle, newIds);
+      continue;
+    }
+    html += childHtml + segments[i + 1];
+    allIds.push(...newIds);
+  }
+
+  // Append any trailing segments past the matched-children count. Only
+  // reachable if the template contains more placeholders than the user
+  // passed children, in which case those extra slots are dropped from output.
+  for (let i = collected.length + 1; i < segments.length; i++) {
+    html += segments[i];
+  }
+
+  return { html, ids: allIds };
 }
 
 /**
- * Performs a transition-aware removal of `element` from `parent`.
- * If the subtree includes a Transition wrapper (own dataset attrs or
- * first child's), applies the exit class to that wrapper, races
- * animationend vs the duration timer, then removes `element` from
- * `parent` and calls `onComplete`. If not, removes immediately. Async
- * because the await is genuine; callers don't have to await unless
- * ordering matters.
- *
- * The pendingExits map on the handle is keyed by the outer `element`
- * (the one the caller wants to remove) so the each_live reconciler
- * can find a pending exit by the same handle it has, even when the
- * Transition attrs live one level down.
+ * How long to hold a transitioning element before removing it (or before
+ * stripping its enter class): the element's *computed* animation duration plus
+ * a small buffer, so the timing tracks theme.motion() automatically. Falls back
+ * to the component's declared duration when the environment can't compute one
+ * (headless tests, or CSS with no animation), where animationend never fires.
  */
-async function removeWithTransition(handle, parent, element, onComplete) {
-  const transitionElement = findTransitionElement(element);
-
-  if (!transitionElement) {
-    if (element.parentNode === parent) parent.removeChild(element);
-    onComplete();
-    return;
+function transitionHoldMs(element, fallbackMs) {
+  if (typeof getComputedStyle === "function") {
+    const computed = parseCssDurationMs(
+      getComputedStyle(element).animationDuration ?? "0s",
+    );
+    if (computed > 0) return computed + 60;
   }
+  return fallbackMs;
+}
 
-  const exitClass = transitionElement.dataset.lilyTransitionExit;
-  const durationMs =
-    parseInt(transitionElement.dataset.lilyTransitionDuration ?? "0", 10) || 0;
-  const controller = new AbortController();
-  handle.registerPendingExit(element, controller);
-
-  transitionElement.classList.add(exitClass);
-
-  // Race animationend (the user's CSS finishing) vs the duration timer
-  // (fallback for headless test environments and CSS that doesn't
-  // animate). Abort short-circuits both.
-  await new Promise((resolve) => {
-    const cleanup = () => {
-      transitionElement.removeEventListener("animationend", onAnimationEnd);
-      controller.signal.removeEventListener("abort", onAbort);
-      clearTimeout(timer);
-    };
-    const onAnimationEnd = () => {
-      cleanup();
-      resolve();
-    };
-    const onAbort = () => {
-      cleanup();
-      resolve();
-    };
-    const timer = setTimeout(() => {
-      cleanup();
-      resolve();
-    }, transitionHoldMs(transitionElement, durationMs));
-    transitionElement.addEventListener("animationend", onAnimationEnd, {
-      once: true,
-    });
-    controller.signal.addEventListener("abort", onAbort, { once: true });
-  });
-
-  if (controller.signal.aborted) {
-    // Re-add mid-exit cancelled us. Strip the exit class so the
-    // element looks normal again.
-    transitionElement.classList.remove(exitClass);
-    return;
+/** Unregisters every id in `ids` from the runtime registry. */
+function unregisterChildHandlers(handle, ids) {
+  for (const id of ids) {
+    handle.unregisterComponent(id);
   }
-
-  handle.clearPendingExit(element);
-  if (element.parentNode === parent) parent.removeChild(element);
-  onComplete();
 }
 
 // =============================================================================

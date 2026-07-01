@@ -1,9 +1,10 @@
 //// Transport between client and server. The
 //// [`Store`](./store.html#Store) on each side stays in sync by exchanging
-//// serialised [`Protocol`](#Protocol) messages over this module. It works
-//// on both Erlang and JS targets since both ends need it; the WebSocket
-//// and HTTP/SSE connectors are JavaScript-only (a dedicated web server
-//// handles the corresponding server-side I/O).
+//// serialised [`Protocol`](#Protocol) messages over this module.
+////
+//// It works on both Erlang and JS targets since both ends need it; the
+//// WebSocket and HTTP/SSE connectors are JavaScript-only (a dedicated web
+//// server handles the corresponding server-side I/O).
 ////
 //// The module provides:
 ////
@@ -20,7 +21,7 @@
 ////
 //// For most apps, use [`transport.automatic`](#automatic) for
 //// zero-configuration serialisation, then pick a transport. WebSockets
-//// suit most cases; switch to HTTP if corporate firewalls block them:
+//// suit most cases; switch to HTTP if corporate firewalls block them.
 ////
 //// ```gleam
 //// import lily/client
@@ -38,7 +39,7 @@
 //// }
 //// ```
 ////
-//// Switch to HTTP/SSE when WebSocket connections are blocked:
+//// Switch to HTTP/SSE when WebSocket connections are blocked.
 ////
 //// ```gleam
 //// client.connect(runtime,
@@ -63,7 +64,8 @@
 //// constructors must be registered so the decoder can reconstruct them.
 ////
 //// To register constructors, your shared types module exposes a tiny FFI
-//// shim that calls `registerModule` from `transport.ffi.mjs`:
+//// shim that calls `registerModule` from `transport.ffi.mjs`, this part is key
+//// do not forget:
 ////
 //// ```javascript
 //// // my_shared.ffi.mjs
@@ -147,8 +149,8 @@ pub type Handler {
   )
 }
 
-/// `Target` identifies which store a frame applies to: the per-connection
-/// session store, or a named shared topic store.
+/// `Target` identifies which store a frame applies to, the per-connection
+/// session store or a named shared topic store.
 @internal
 pub type Target {
   Session
@@ -300,18 +302,16 @@ type WsHandle
 // PUBLIC FUNCTIONS
 // =============================================================================
 
-/// Create an automatic serialiser. Uses JSON by default (human-readable in
-/// DevTools). Positional encoding works for any Gleam custom type on both
-/// targets without configuration.
+/// Create an automatic serialiser. Uses JSON by default.
 ///
 /// Switch to MessagePack for production (smaller, faster binary frames)
 /// with [`transport.use_message_pack`](#use_message_pack):
 ///
 /// ```gleam
-/// // Development: JSON, readable in DevTools
+/// // dev (JSON)
 /// transport.automatic()
 ///
-/// // Production: MessagePack
+/// // prod (MessagePack)
 /// transport.automatic() |> transport.use_message_pack()
 /// ```
 ///
@@ -474,16 +474,14 @@ pub fn encode(
 ///   )
 ///   <> "</body></html>"
 /// ```
+///
+/// Do note that this isn't proper SSR, as it only renders the initial snapshot.
 pub fn encode_initial_snapshot(
   serialiser serialiser: Serialiser(model, message),
   model model: model,
 ) -> String {
   let frame = Snapshot(target: Session, sequence: 0, state: model)
-  // Force JSON for the inline payload; MessagePack is binary and not
-  // HTML-safe. `CustomJson` is already JSON, and `Auto` flips to JSON
-  // regardless of its current format toggle. `CustomBinary` users keep
-  // their binary codec and accept that the embedded bytes may not be
-  // HTML-safe (documented in the function docstring).
+  // Force JSON for the inline payload.
   let json_serialiser = case serialiser {
     Auto(_, codec) -> Auto(AutoJson, codec)
     CustomJson(_, _, _, _) -> serialiser
@@ -510,8 +508,6 @@ pub fn flush_batch_size(config: HttpConfig, size: Int) -> HttpConfig {
 /// sending messages to the server, and the `events_url` is used for receiving
 /// Server-Sent Events.
 ///
-/// ## Example
-///
 /// ```gleam
 /// transport.http(
 ///   post_url: "/api/messages",
@@ -528,8 +524,6 @@ pub fn http(
 @target(javascript)
 /// Returns a connector function that establishes an HTTP/SSE connection. Pass
 /// the result to `client.connect`.
-///
-/// ## Example
 ///
 /// ```gleam
 /// client.connect(runtime,

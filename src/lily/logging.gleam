@@ -1,13 +1,16 @@
 //// Erlang has a perfectly good [`logging`](https://hex.pm/packages/logging)
-//// package; JavaScript does not. Lily runs on both runtimes, so this module
-//// papers over the gap and the same calls work everywhere.
+//// package, JavaScript does not.
+////
+//// Lily runs on both runtimes, so this module creates a wrapper over the
+//// available Erlang one while (through FFI) also does the JS one.
 ////
 //// On Erlang, this is a thin wrapper around the `logging` hex package
 //// (the same logger used by `mist` and `wisp`), so Lily log lines blend
-//// in with framework logs. On JavaScript, log lines go to
-//// `console.error` / `console.warn` / `console.info` / `console.debug`
-//// by level, with the same colour palette the Erlang package uses.
-//// Works identically in browsers, Node, Bun, and Deno.
+//// in with framework logs.
+////
+//// On JavaScript, log lines go to `console.error` / `console.warn` /
+//// `console.info` / `console.debug` by level, with the same colour palette
+//// the Erlang package uses for consistency.
 ////
 //// On Erlang, `configure` installs the `logging` package's formatter and
 //// `set_level` sets the minimum level. On JavaScript, `configure` is a no-op

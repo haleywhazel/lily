@@ -1,15 +1,10 @@
 /**
  * TRANSPORT FFI
  *
- * JavaScript FFI for the transport module:
+ * JSON auto-serialiser, WS/HTTP transport
  *
- *   - JSON auto-serialiser: positional encoding with a constructor registry
- *   - HTTP transport: SSE (server to client) + fetch POST (client to server)
- *   - WebSocket transport: binary frames with exponential-backoff reconnect
- *
- * MessagePack auto-serialisation lives in pure Gleam at
- * lily/internal/auto_codec, composed with reflection (which uses
- * lily/internal/reflection.ffi.mjs for value introspection on JS).
+ * See lily/internal/auto_codec.gleam for auto-serialisation and the relevant
+ * reflection FFIs.
  *
  * Both transports persist offline queues to localStorage and flush them on
  * reconnection before sending Resync.
@@ -34,8 +29,10 @@ import { from_list as setFromList } from "../../gleam_stdlib/gleam/set.mjs";
 
 /**
  * Automatically decode JSON to a Gleam value using the constructor registry.
- * Returns Ok(value) on success, Error(undefined) on failure. Used by
- * decode.new_primitive_decoder in transport.gleam's JSON path.
+
+ * Returns Ok(value) on success, Error(undefined) on failure.
+ *
+ * Used by decode.new_primitive_decoder in transport.gleam's JSON path.
  */
 export function autoDecode(json) {
   try {
@@ -47,8 +44,6 @@ export function autoDecode(json) {
 
 /**
  * Automatically encode any Gleam value to JSON using positional fields.
- * Caches constructors during encoding so the same client can roundtrip
- * without an explicit registerModule call.
  */
 export function autoEncode(value) {
   if (value === null || value === undefined) return null;
@@ -56,14 +51,13 @@ export function autoEncode(value) {
   if (typeof value === "string") return value;
   if (typeof value === "number") return value;
 
-  // Gleam lists: encode as JSON arrays regardless of length. Without the
-  // explicit `Empty` check, the empty singleton falls through to the
-  // CustomType branch below and gets encoded as `{"_":"Empty"}`, while
-  // Erlang's auto-encoder emits a JSON array `[]` for the same value.
-  // The mismatch breaks wire-format round-trips across targets.
+  // Gleam lists are encoded as JSON arrays.
   if (value instanceof Empty || value instanceof NonEmpty) {
     const result = [];
     let current = value;
+    // Empty check makes sure that empty singletons don't fall through to the
+    // CustomType branch lower below and becomes `{"_": "Empty"}`, although
+    // Erlang's auto-encoder emits a proper JSON array `[]`.
     while (current instanceof NonEmpty) {
       result.push(autoEncode(current.head));
       current = current.tail;
@@ -71,12 +65,8 @@ export function autoEncode(value) {
     return result;
   }
 
-  // Gleam tuples (`#(a, b)`) compile to plain JS arrays on this target.
-  // Distinguish from CustomTypes (which are class instances with `_`-style
-  // tagging) and from Lists (which are Empty/NonEmpty classes, handled
-  // above). Tuples have no constructor name to record, so we encode as a
-  // tag-less JSON object with numeric keys, which the decoder
-  // distinguishes from a tagged CustomType by the absence of `_`.
+  // Gleam tuples (`#(a, b)`) compile to plain JS arrays, distinguished from
+  // CustomTypes which are class instances with `_`-style tagging.
   if (Array.isArray(value)) {
     const encoded = {};
     for (let i = 0; i < value.length; i++) {
@@ -85,20 +75,17 @@ export function autoEncode(value) {
     return encoded;
   }
 
-  // Gleam Dict (gleam_stdlib `dict.Dict`). Encoded as a tagged shape so
-  // the decoder can reconstruct a Dict (not a custom type). Entries are a
-  // list of [key, value] pairs, where keys themselves go through the
-  // encoder so non-string keys round-trip.
+  // Gleam Dict (gleam_stdlib `dict.Dict`) encoded as a tagged shape.
   if (value instanceof GleamDict) {
     const entries = [];
     dictFold(value, undefined, (_acc, k, v) => {
       entries.push([autoEncode(k), autoEncode(v)]);
       return undefined;
     });
-    return { _: "$dict", "0": entries };
+    return { _: "$dict", 0: entries };
   }
 
-  // Gleam Set (gleam_stdlib `set.Set`). Implemented internally as
+  // Gleam Set (gleam_stdlib `set.Set`) is implemented internally as
   // `Set(dict: Dict(member, Token))`, so the class instance has a
   // `.dict` field that's a `GleamDict`. Encode the members as an array.
   if (
@@ -112,7 +99,7 @@ export function autoEncode(value) {
       members.push(autoEncode(k));
       return undefined;
     });
-    return { _: "$set", "0": members };
+    return { _: "$set", 0: members };
   }
 
   if (value && typeof value === "object" && value.constructor) {
@@ -121,9 +108,8 @@ export function autoEncode(value) {
     if (!constructorRegistry.has(name)) {
       constructorRegistry.set(name, ctor);
     }
-    // Gleam JS classes store fields as named properties (e.g. this.text =
-    // text), not numeric indices. Object.keys preserves constructor
-    // assignment order.
+    // Gleam JS classes store fields as named properties, so Object.keys
+    // preserves constructor assignment order.
     const encoded = { _: name };
     Object.keys(value).forEach((field, index) => {
       encoded[String(index)] = autoEncode(value[field]);
@@ -314,7 +300,7 @@ export function wsConnect(
     if (reconnectTimer) return;
     if (reconnectDelay === null) reconnectDelay = reconnectBaseMs;
 
-    // Jitter spreads reconnects after a mass disconnect (thundering herd)
+    // Jitter spreads reconnects after a mass disconnect
     const jitteredDelay =
       reconnectDelay * (1 - jitterRatio + Math.random() * jitterRatio * 2);
     reconnectTimer = setTimeout(function () {
@@ -401,7 +387,8 @@ export function transportSend(handle, bytes) {
 function autoDecodeInner(json) {
   // Local is registered lazily to avoid TDZ errors from the circular import
   // cycle: transport.ffi.mjs to store.mjs to transport.mjs to transport.ffi.mjs
-  if (!constructorRegistry.has("Local")) constructorRegistry.set("Local", Local);
+  if (!constructorRegistry.has("Local"))
+    constructorRegistry.set("Local", Local);
 
   if (json === null) return undefined;
   if (typeof json === "boolean") return json;
@@ -453,10 +440,7 @@ function autoDecodeInner(json) {
     return new ctor(...fields);
   }
 
-  // Tag-less JSON object with numeric keys = Gleam tuple. CustomTypes
-  // always have a `_` field, so the absence of `_` plus all-numeric keys
-  // is the unambiguous signal. Decoded back to a JS array to match
-  // Gleam's tuple representation on this target.
+  // Tag-less JSON object with numeric keys is a Gleam tuple.
   if (json && typeof json === "object") {
     const keys = Object.keys(json);
     if (keys.length > 0 && keys.every((k) => /^\d+$/.test(k))) {
@@ -526,7 +510,7 @@ function createOfflineQueue(storageKey) {
       if (wasEmpty) {
         persist();
       } else if (!persistScheduled) {
-        // Coalesce subsequent writes; avoids O(n^2) localStorage writes
+        // Coalesce subsequent writes to avoid O(n^2) localStorage writes
         // during rapid bursts.
         persistScheduled = true;
         queueMicrotask(function () {

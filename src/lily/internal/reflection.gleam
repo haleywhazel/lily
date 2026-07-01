@@ -1,8 +1,8 @@
-//// Target-neutral reflection over Gleam runtime values. This is the only
-//// FFI layer the auto-serialiser needs: each target inspects its native
-//// representation (tagged tuples and atoms on Erlang, CustomType classes
-//// and `Object.keys` on JavaScript) and produces a [`Reflected`](#Reflected)
-//// value the pure-Gleam codec can walk.
+//// Target-neutral reflection over Gleam runtime values.
+////
+//// Each target inspects its native representation (tagged tuples and atoms on
+//// Erlang, CustomType classes and `Object.keys` on JavaScript) and produces a
+//// [`Reflected`](#Reflected) value the pure-Gleam codec can walk.
 ////
 //// The inverse, [`construct`](#construct), takes a [`Reflected`](#Reflected)
 //// produced by decoding and rebuilds a Gleam value. On JavaScript a

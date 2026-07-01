@@ -31,6 +31,24 @@ export function dispatchKeyEvent(selector, eventName, key) {
   if (el) el.dispatchEvent(new KeyboardEvent(eventName, { key, bubbles: true }));
 }
 
+/**
+ * Dispatch a cancelable key event and report whether a handler consumed it
+ * (called preventDefault). Lets a test observe a keydown handler's effect
+ * directly, without depending on document-delegated listeners that persist
+ * and interfere across tests.
+ */
+export function dispatchKeyEventDefaultPrevented(selector, eventName, key) {
+  const el = document.querySelector(selector);
+  if (!el) return false;
+  const event = new KeyboardEvent(eventName, {
+    key,
+    bubbles: true,
+    cancelable: true,
+  });
+  el.dispatchEvent(event);
+  return event.defaultPrevented;
+}
+
 export function dispatchInputEvent(selector, value) {
   const el = document.querySelector(selector);
   if (!el) return;

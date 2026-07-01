@@ -1,5 +1,5 @@
 //// The [`Server`](#Server) holds authoritative state and routes client
-//// messages to the right store: a per-connection session store or a
+//// messages to the right store a per-connection session store or a
 //// named topic store. It works on both Erlang and JavaScript targets,
 //// though Erlang is recommended for production.
 ////
@@ -81,7 +81,7 @@ pub opaque type Server(model, message) {
 // =============================================================================
 
 /// Callbacks registered by a topic actor so the server can route frames to it.
-/// Created inside `topic.gleam`; stored in the server's topic registry.
+/// Created inside `topic.gleam`. Stored in the server's topic registry.
 @internal
 pub type ServerTopicEntry(model, message) {
   ServerTopicEntry(
@@ -121,12 +121,12 @@ pub fn disconnect(
 
 /// Apply `message` to the session store of one connected client and send a
 /// `SessionUpdate` frame back to that client. Use for server-initiated
-/// per-client updates: pushing a fresh slice after authentication, server
-/// timers that affect one user, async DB results, and so on.
+/// per-client updates, e.g. pushing a fresh slice after authentication, server
+/// timers that affect one user, async DB results.
 ///
 /// No-op if no client with `client_id` is currently connected. Safe to call
 /// from any process, including spawned tasks, so it composes with async
-/// work patterns: spawn a process to do the slow thing, then call
+/// work patterns, spawn a process to do the slow thing, then call
 /// `dispatch_to` when the result is ready.
 ///
 /// ```gleam
@@ -270,8 +270,9 @@ pub fn on_topic_message(
   platform_set_topic_message_hook(server.handle, hook)
 }
 
-/// Materialise the configured server. Topics are added afterwards via
-/// `topic.new(server, ...)`.
+/// Start the configured server.
+///
+/// Topics are added then afterwards via `topic.new(server, ...)`.
 ///
 /// ```gleam
 /// let assert Ok(srv) =
@@ -325,7 +326,7 @@ pub fn stop(server: Server(model, message)) -> Nil {
 // =============================================================================
 
 /// Subscribe a client to a topic by routing through the server (so the server
-/// can look up the client's send function). Idempotent.
+/// can look up the client's send function).
 @internal
 pub fn do_subscribe(
   server: Server(model, message),
@@ -508,8 +509,6 @@ fn handle_dispatch_to_all_logic(
   state: ServerState(model, message),
   message: message,
 ) -> ServerState(model, message) {
-  // Fold across every connected client; each iteration produces an updated
-  // ServerState whose sessions dict reflects the dispatch for that client.
   dict.fold(state.clients, state, fn(acc, client_id, _send) {
     handle_dispatch_to_logic(acc, client_id, message)
   })

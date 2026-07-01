@@ -1,8 +1,8 @@
 /**
  * SERVER FFI (JAVASCRIPT)
  *
- * Browser-API helper for the JS server target. State management is handled
- * by lily/internal/reference; only browser-API helpers live here.
+ * Currently only has client ID generation and this could change, there may be
+ * other Gleam packages that can replace this.
  */
 
 // =============================================================================

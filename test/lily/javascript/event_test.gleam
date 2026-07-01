@@ -117,6 +117,78 @@ pub fn event_on_click_without_data_message_ignored_test() {
 }
 
 // =============================================================================
+// ESCAPE DISMISS
+// =============================================================================
+
+// Note: these assert the handler consumed the key (defaultPrevented) rather
+// than the resulting message, because document-delegated click listeners
+// persist across gleeunit tests, and a stop-propagation listener from another
+// test would swallow the dispatched click. Consuming the key is the handler's
+// own, isolation-safe signal that it found an open overlay and dismissed it.
+
+@target(javascript)
+pub fn watch_escape_dismiss_dismisses_open_overlay_on_escape_test() {
+  test_setup.reset_dom()
+  // A trigger carrying a dismiss message, and an overlay panel that names it.
+  test_dom.set_inner_html(
+    "#app",
+    "<button id=\"esc-trigger\" data-message=\"toggle\">x</button>"
+      <> "<div id=\"esc-panel\" data-lily-escape-dismiss=\"#esc-trigger\"></div>",
+  )
+  event.watch_escape_dismiss()
+  // Escape finds the open overlay and consumes the key to dismiss it.
+  test_dom.key_event_default_prevented("#esc-panel", "keydown", "Escape")
+  |> should.be_true
+}
+
+@target(javascript)
+pub fn watch_escape_dismiss_ignores_other_keys_test() {
+  test_setup.reset_dom()
+  test_dom.set_inner_html(
+    "#app",
+    "<button id=\"esc-trigger\" data-message=\"toggle\">x</button>"
+      <> "<div id=\"esc-panel\" data-lily-escape-dismiss=\"#esc-trigger\"></div>",
+  )
+  event.watch_escape_dismiss()
+  // A non-Escape key leaves the overlay alone.
+  test_dom.key_event_default_prevented("#esc-panel", "keydown", "Enter")
+  |> should.be_false
+}
+
+@target(javascript)
+pub fn watch_escape_dismiss_inert_without_open_overlay_test() {
+  test_setup.reset_dom()
+  // No element opts into dismissal, so Escape is left untouched.
+  test_dom.set_inner_html("#app", "<button id=\"plain\">x</button>")
+  event.watch_escape_dismiss()
+  test_dom.key_event_default_prevented("#plain", "keydown", "Escape")
+  |> should.be_false
+}
+
+// =============================================================================
+// FILE DROPS
+// =============================================================================
+
+@target(javascript)
+pub fn watch_file_drops_marks_dragover_test() {
+  test_setup.reset_dom()
+  // A dropzone opting in, and the input it targets.
+  test_dom.set_inner_html(
+    "#app",
+    "<div id=\"dz\" data-lily-file-drop=\"#inp\"></div>"
+      <> "<input id=\"inp\" type=\"file\" />",
+  )
+  event.watch_file_drops()
+  test_dom.has_attribute("#dz", "data-lily-file-dragover")
+  |> should.be_false
+  // Dragging over the zone marks it for styling. (Assigning dropped files needs
+  // a real DataTransfer, which jsdom lacks, so that path is verified manually.)
+  test_dom.simple_event("#dz", "dragover")
+  test_dom.has_attribute("#dz", "data-lily-file-dragover")
+  |> should.be_true
+}
+
+// =============================================================================
 // VALUE EVENTS
 // =============================================================================
 
