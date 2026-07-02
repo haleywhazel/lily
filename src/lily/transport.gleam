@@ -1,10 +1,10 @@
-//// Transport between client and server. The
-//// [`Store`](./store.html#Store) on each side stays in sync by exchanging
-//// serialised [`Protocol`](#Protocol) messages over this module.
+//// This is the transport layer between the client/browser and the server,
+//// ensuring that the centralised model within [`Store`](./store.html#Store)
+//// on both sides remain in sync by exchanging serialised
+//// [`Protocol`](#Protocol) messages over this module.
 ////
-//// It works on both Erlang and JS targets since both ends need it; the
-//// WebSocket and HTTP/SSE connectors are JavaScript-only (a dedicated web
-//// server handles the corresponding server-side I/O).
+//// It works on both Erlang and JS targets since both ends need it, although
+//// the WebSocket and HTTP/SSE connectors are JavaScript-only.
 ////
 //// The module provides:
 ////
@@ -21,7 +21,7 @@
 ////
 //// For most apps, use [`transport.automatic`](#automatic) for
 //// zero-configuration serialisation, then pick a transport. WebSockets
-//// suit most cases; switch to HTTP if corporate firewalls block them.
+//// suit most cases, although switch to HTTP if corporate firewalls block them.
 ////
 //// ```gleam
 //// import lily/client
@@ -39,7 +39,7 @@
 //// }
 //// ```
 ////
-//// Switch to HTTP/SSE when WebSocket connections are blocked.
+//// Switch to HTTP/SSE when WebSocket connections are blocked:
 ////
 //// ```gleam
 //// client.connect(runtime,
@@ -51,9 +51,10 @@
 //// )
 //// ```
 ////
-//// `automatic()` defaults to JSON so frames are human-readable in DevTools.
-//// You can use MessagePack for production (for smaller transport packages)
-//// with [`transport.use_message_pack`](#use_message_pack):
+//// `automatic()` defaults to JSON so frames are more easily debuggable within
+//// DevTools. You can (and probably should) use MessagePack for production
+//// for smaller transport packages with
+//// [`transport.use_message_pack`](#use_message_pack).
 ////
 //// ```gleam
 //// transport.automatic() |> transport.use_message_pack()

@@ -43,7 +43,10 @@ fn assert_roundtrip(p: Protocol(Model, Message)) -> Nil {
 // Generic variants for tests that wrap non-Model types (tuple/dict/set).
 // transport.automatic() is parametric, so the serialiser specialises to
 // whatever model/message types the caller uses.
-fn assert_encoded_generic(p: Protocol(m, msg), expected_hex: String) -> Nil {
+fn assert_encoded_generic(
+  p: Protocol(model, message),
+  expected_hex: String,
+) -> Nil {
   let s = transport.automatic() |> transport.use_message_pack
   let bytes = transport.encode(p, serialiser: s)
   let actual_hex = bit_array.base16_encode(bytes)
@@ -51,7 +54,7 @@ fn assert_encoded_generic(p: Protocol(m, msg), expected_hex: String) -> Nil {
   |> should.equal(expected_hex)
 }
 
-fn assert_roundtrip_generic(p: Protocol(m, msg)) -> Nil {
+fn assert_roundtrip_generic(p: Protocol(model, message)) -> Nil {
   let s = transport.automatic() |> transport.use_message_pack
   transport.encode(p, serialiser: s)
   |> transport.decode(serialiser: s)

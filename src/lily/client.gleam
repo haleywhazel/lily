@@ -134,7 +134,7 @@ pub opaque type Runtime(model, message) {
 ///     decoder: decode.optional(decode.string),
 ///   )
 ///
-/// client.start(app_store, routing)
+/// client.start(app_store, shared.wiring())
 /// |> client.attach_session(
 ///   persistence:,
 ///   get: fn(model) { model.session },
@@ -207,7 +207,7 @@ pub fn client_id(
 ///
 /// This also creates all the handlers for handling incoming messages, and
 /// changes to connection status. Session messages are sent as `SessionMessage`
-/// frames; topic messages are routed to the correct topic using the routing
+/// frames; topic messages are routed to the correct topic using the wiring
 /// config passed to [`client.start`](#start).
 ///
 /// ```gleam
@@ -311,7 +311,7 @@ pub fn connection_status(
 /// some side-effect is called to update the store again.
 ///
 /// ```gleam
-/// let runtime = client.start(store, routing)
+/// let runtime = client.start(store, shared.wiring())
 /// let dispatch = client.dispatch(runtime)
 ///
 /// fetch("/api/data", fn(response) {
@@ -512,7 +512,7 @@ pub fn on_reconnect(
 /// The hook receives `(incoming, current)` and returns the merged model
 /// to dispatch into the runtime.
 ///
-/// Without a hook, the runtime uses the routing config to merge only the
+/// Without a hook, the runtime uses the wiring config to merge only the
 /// snapshotted target's slice into the current model, leaving all other
 /// slices intact. Compose with [`merge_locals`](#merge_locals) to additionally
 /// preserve `store.Local` fields.

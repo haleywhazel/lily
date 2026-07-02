@@ -254,6 +254,50 @@
                 flex-direction: column;
                 gap: 12px;
             }
+            .join-form {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                background: var(--bg-elevated);
+                border: 1px solid var(--border);
+                padding: 5px;
+            }
+            .room-list {
+                list-style: none;
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+                margin-bottom: 16px;
+            }
+            .room-tab {
+                background: var(--bg-elevated);
+                color: var(--text-muted);
+                border: 1px solid var(--border);
+                border-radius: 999px;
+                padding: 6px 14px;
+                font-size: 13px;
+                cursor: pointer;
+                transition:
+                    background 0.15s ease,
+                    color 0.15s ease,
+                    border-color 0.15s ease;
+            }
+            .room-tab:hover {
+                color: var(--text);
+                border-color: var(--accent);
+            }
+            .room-tab.active {
+                background: var(--accent);
+                color: #1c1b24;
+                border-color: var(--accent);
+                font-weight: 600;
+            }
+            .room-empty {
+                color: var(--text-muted);
+                font-size: 14px;
+                font-style: italic;
+                padding: 4px 2px;
+            }
             .clear-button {
                 pointer-events: auto;
                 align-self: flex-end;
@@ -277,6 +321,8 @@
                 padding: 5px;
             }
             #chat-input,
+            #room-input,
+            #room-name-input,
             #username-input {
                 flex: 1;
                 height: 36px;
@@ -289,6 +335,8 @@
                 font-size: 14px;
             }
             #chat-input::placeholder,
+            #room-input::placeholder,
+            #room-name-input::placeholder,
             #username-input::placeholder {
                 color: var(--text-muted);
             }

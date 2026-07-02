@@ -1,25 +1,80 @@
-//// Ephemeral and stateful topics for server-to-client fan-out, similar to
-//// pub/sub patterns within other libraries like Phoenix.
+//// Topics are basically ways for clients to listen to a certain broadcast
+//// channel, similar to pub/sub patterns within other libraries like Phoenix.
+//// This is useful for cases where your own model/store need to easily react
+//// to other states shared between a few clients (e.g. chat rooms).
 ////
-//// An ephemeral topic broadcasts `Push` frames with no sequence and no replay:
+//// Lily provides two main types of topics, an ephemeral topic that simply
+//// broadcasts [`Push`](./transport.html#Push) frames with no sequence and no
+//// replay:
 ////
 //// ```gleam
 //// let assert Ok(typing) = topic.new(server, id: "typing")
-//// // Broadcast from anywhere:
+//// // Broadcast from anywhere, server or client
 //// topic.broadcast(typing, UserIsTyping(client_id))
 //// ```
 ////
-//// Pipe through `with_store` to make it stateful, the topic actor reads its
-//// update logic from the server's `Wiring` and sends `TopicUpdate` frames to
+//// And also more stateful topics which have their own store. Pipe through
+//// [`with_store`](#with_store) to make a topic stateful, the topic actor
+//// reading its update logic from the server's `Wiring` and sends
+//// [`TopicUpdate`](./transport.html#TopicUpdate) frames to
 //// every subscriber:
 ////
 //// ```gleam
-//// let assert Ok(chat) =
-////   topic.new(server, id: "chat")
+//// let assert Ok(chat) = topic.new(server, id: "chat")
+//// let chat =
+////   chat
 ////   |> topic.with_store
 ////   |> topic.with_on_subscribe(fn(client_id) {
 ////     [Chat(UserJoined(client_id))]
 ////   })
+//// ```
+////
+//// Making it stateful means the server owns the topic's state
+//// authoritatively. It assigns a sequence number to every change, hands a
+//// [`Snapshot`](./transport.html#Snapshot) to whoever subscribes so late
+//// joiners catch up, and fans out a
+//// [`TopicUpdate`](./transport.html#TopicUpdate) as the state changes. The
+//// update logic isn't passed here, it's borrowed from the `store.topic(id:)`
+//// entry in your shared `Wiring` whose id matches, so a `"chat"` topic reads
+//// its update function and slice from `store.topic(id: "chat", ...)`. That one
+//// entry is what links the server actor to the client's model slice, so the
+//// same id shows up in the wiring, in `topic.new`, and in `client.subscribe`.
+////
+//// On the client you subscribe after connecting with
+//// [`client.subscribe`](./client.html#subscribe), and the topic's slice is
+//// hydrated from the snapshot when it arrives:
+////
+//// ```gleam
+//// runtime
+//// |> client.connect(with: connector, serialiser: shared.serialiser())
+//// |> client.subscribe("chat")
+//// ```
+////
+//// After that, you don't wire up anything to consume updates. When a
+//// [`TopicUpdate`](./transport.html#TopicUpdate) from a stateful topic or a
+//// [`Push`](./transport.html#Push) from an ephemeral one lands, Lily runs the
+//// payload through your `update` function exactly like a message you'd
+//// dispatched locally, with the matching slice updates, your
+//// [`client.on_message`](./client.html#on_message) hook fires, and the
+//// affected components re-render.
+////
+//// With the `chat` topic set up on the backend (the `topic.new` plus
+//// `with_store` from above), a client (frontend) sends by dispatching, which
+//// the server fans out to the other subscribers as a TopicUpdate:
+////
+//// ```gleam
+//// dispatch(Chat(NewChatMessage(body)))
+//// ```
+////
+//// And consuming that update takes no extra code, a component slicing the
+//// chat re-renders whether the change was local or a TopicUpdate from
+//// elsewhere (another client/frontend):
+////
+//// ```gleam
+//// component.simple(
+////   slice: fn(model: Model) { model.chat },
+////   render: fn(chat, _) { chat_view(chat) },
+//// )
 //// ```
 ////
 //// For dynamic topics keyed by a parsed identifier (e.g. `"room:42"`), use
@@ -27,7 +82,6 @@
 //// subscribe:
 ////
 //// ```gleam
-//// // `auth.may_join_room` is your own helper; Lily does not ship auth.
 //// let assert Ok(_) =
 ////   topic.kind(
 ////     server,
@@ -37,11 +91,19 @@
 ////       topic
 ////       |> topic.with_store
 ////       |> topic.with_can_subscribe(fn(client_id, _topic_id) {
-////         auth.may_join_room(client_id, room_id)
+////         auth.may_join_room(client_id, room_id) // your own helper
 ////       })
 ////     },
 ////   )
 //// ```
+////
+//// On the wiring side this pairs with
+//// [`store.topic_kind`](./store.html#topic_kind) rather than `store.topic`.
+//// It binds the whole `"room:"` family to one keyed model slice, so a client
+//// can be in several rooms at once and each outgoing message, incoming
+//// update, and snapshot still lands on the right one. Back the slice with a
+//// keyed collection like `Dict(String, RoomState)`, the key is the bit after
+//// the prefix (`"42"` for `"room:42"`).
 
 // =============================================================================
 // IMPORTS
@@ -138,6 +200,11 @@ pub fn dispatch(topic: Topic(model, message, Stateful), message: message) -> Nil
 /// `with_can_subscribe`, etc. on it and return the result. Do not call
 /// `topic.new` inside `configure`, the topic actor is already started.
 ///
+/// A stateful kind (one that calls `with_store`) reads its store from the
+/// [`store.topic_kind`](./store.html#topic_kind) wiring entry sharing this
+/// `prefix`, keyed by instance, so every id in the family updates and
+/// snapshots into its own slot.
+///
 /// ```gleam
 /// let assert Ok(_) =
 ///   topic.kind(
@@ -145,7 +212,7 @@ pub fn dispatch(topic: Topic(model, message, Stateful), message: message) -> Nil
 ///     prefix: "room:",
 ///     parse_id: int.parse,
 ///     configure: fn(room_id, topic) {
-///       topic |> topic.with_store(...)
+///       topic |> topic.with_store
 ///     },
 ///   )
 /// ```
@@ -426,7 +493,12 @@ fn handle_dispatch_logic(
   message: message,
 ) -> TopicActorState(model, message) {
   case state.store {
-    option.None -> state
+    // Ephemeral topic: no store to apply to, so relay the client's message
+    // straight to the other subscribers as a Push (no sequence, no replay).
+    // The originator is skipped, it already applied the message optimistically.
+    // This makes client-to-client signalling fan out without an
+    // `on_topic_message` hook.
+    option.None -> handle_broadcast_logic(state, message, from)
     option.Some(store) -> {
       let new_model = store.apply_message(store.current, message)
       let new_seq = store.sequence + 1

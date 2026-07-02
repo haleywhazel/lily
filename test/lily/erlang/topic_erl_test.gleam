@@ -181,6 +181,34 @@ pub fn topic_broadcast_from_skips_originator_test() {
   }
 }
 
+@target(erlang)
+pub fn topic_client_message_on_ephemeral_relays_to_others_test() {
+  let srv = new_server()
+  let _t = new_ephemeral_topic(srv)
+  let s1 = connect_client(srv, "c1")
+  let s2 = connect_client(srv, "c2")
+  server.incoming(srv, client_id: "c1", bytes: encode_subscribe("test"))
+  server.incoming(srv, client_id: "c2", bytes: encode_subscribe("test"))
+  process.sleep(20)
+  // c1 sends a topic message to the ephemeral topic
+  server.incoming(
+    srv,
+    client_id: "c1",
+    bytes: encode_topic_message("test", Increment),
+  )
+  process.sleep(20)
+  // The originator does not get its own message echoed back
+  recv(s1)
+  |> should.be_error
+  // Other subscribers receive it as a Push, no hook required
+  case recv(s2) {
+    Ok(bytes) ->
+      decode(bytes)
+      |> should.equal(transport.Push(topic_id: "test", payload: Increment))
+    Error(_) -> should.fail()
+  }
+}
+
 // =============================================================================
 // DISPATCH (STATEFUL)
 // =============================================================================

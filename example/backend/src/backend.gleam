@@ -33,8 +33,18 @@ pub fn main() {
     logging.auto_log(logging.Info, message)
   })
 
-  let assert Ok(raw_chat) = topic.new(server, id: "chat")
-  let _ = raw_chat |> topic.with_store
+  let assert Ok(_) =
+    topic.kind(
+      server,
+      prefix: "room:",
+      parse_id: fn(name) {
+        case name {
+          "" -> Error(Nil)
+          _ -> Ok(name)
+        }
+      },
+      configure: fn(_room_name, room) { topic.with_store(room) },
+    )
 
   let secret_key_base = wisp.random_string(64)
 

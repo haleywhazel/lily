@@ -1,7 +1,9 @@
+import gleam/dict
 import gleam/dynamic/decode
 import gleam/int
 import gleam/json
 import gleam/list
+import gleam/result
 import gleam/string
 
 import lily/client
@@ -62,12 +64,22 @@ pub fn main() {
   })
   |> client.on_message(fn(message, model) {
     case message {
-      shared.Chat(shared.SendMessage(body:, sender_id:)) ->
+      // A room message from someone else pops a notification; our own echoes
+      // back to the input so typing keeps flowing.
+      shared.RoomMessage(room_id:, message: shared.SendMessage(body:, sender_id:)) ->
         case sender_id == model.session.username {
-          True -> event.focus(runtime, "#chat-input")
+          True -> event.focus(runtime, "#room-input")
           False ->
-            dispatch(shared.Session(shared.AddPopup(sender_id <> ": " <> body)))
+            dispatch(
+              shared.Session(shared.AddPopup(
+                sender_id <> " in " <> room_id <> ": " <> body,
+              )),
+            )
         }
+      shared.Session(shared.JoinRoom(room_id:)) -> {
+        let _ = client.subscribe(runtime, "room:" <> room_id)
+        event.focus(runtime, "#room-input")
+      }
       _ -> handle_focus(runtime, message)
     }
   })
@@ -86,7 +98,6 @@ pub fn main() {
       |> transport.websocket_connect,
     serialiser: shared.serialiser(),
   )
-  |> client.subscribe("chat")
 
   Nil
 }
@@ -134,20 +145,45 @@ fn parse_click(message_name: String) -> Result(shared.Message, Nil) {
             Ok(id) -> Ok(shared.Session(shared.DismissPopup(id)))
             Error(Nil) -> Error(Nil)
           }
+        Ok(#("select-room", room_id)) ->
+          Ok(shared.Session(shared.SelectRoom(room_id)))
         _ -> Error(Nil)
       }
   }
 }
 
-fn parse_submit(fields: List(#(String, String))) -> Result(shared.Message, Nil) {
-  case list.key_find(fields, "body"), list.key_find(fields, "sender_id") {
-    Ok(body), Ok(sender_id) ->
-      case string.trim(body) {
+fn parse_join_room(
+  fields: List(#(String, String)),
+) -> Result(shared.Message, Nil) {
+  case list.key_find(fields, "room") {
+    Ok(name) ->
+      case string.trim(name) {
         "" -> Error(Nil)
-        trimmed ->
-          Ok(shared.Chat(shared.SendMessage(body: trimmed, sender_id:)))
+        trimmed -> Ok(shared.Session(shared.JoinRoom(trimmed)))
       }
-    _, _ -> Error(Nil)
+    Error(Nil) -> Error(Nil)
+  }
+}
+
+fn parse_room_submit(
+  fields: List(#(String, String)),
+) -> Result(shared.Message, Nil) {
+  case
+    list.key_find(fields, "body"),
+    list.key_find(fields, "sender_id"),
+    list.key_find(fields, "room_id")
+  {
+    Ok(body), Ok(sender_id), Ok(room_id) ->
+      case string.trim(body), room_id {
+        "", _ -> Error(Nil)
+        _, "" -> Error(Nil)
+        trimmed, _ ->
+          Ok(shared.RoomMessage(
+            room_id:,
+            message: shared.SendMessage(body: trimmed, sender_id:),
+          ))
+      }
+    _, _, _ -> Error(Nil)
   }
 }
 
@@ -165,7 +201,7 @@ fn parse_username_submit(
 }
 
 // =============================================================================
-// FOCUS SIDE EFFECTS, runs after every locally-dispatched message
+// FOCUS SIDE EFFECTS
 // =============================================================================
 
 fn handle_focus(
@@ -190,17 +226,20 @@ fn handle_focus(
       event.release_focus_trap(runtime)
       event.focus(runtime, "#clear-button")
     }
-    shared.Chat(shared.SendMessage(..)) -> Nil
+    shared.Session(shared.SelectRoom(_)) -> event.focus(runtime, "#room-input")
+    shared.Session(shared.SetUsername(_)) ->
+      event.focus(runtime, "#room-name-input")
+    shared.Session(shared.JoinRoom(_)) -> Nil
     shared.Session(shared.DismissPopup(_id)) -> Nil
-    shared.Session(shared.SetUsername(_)) -> event.focus(runtime, "#chat-input")
     shared.Session(shared.ToggleTheme) -> Nil
     shared.Session(shared.UpdateDraft(_text)) -> Nil
     shared.Session(shared.AddPopup(_body)) -> Nil
+    shared.RoomMessage(..) -> Nil
   }
 }
 
 // =============================================================================
-// VIEW, root carries data-theme, isolating the page from popup/dialog overlays
+// VIEW
 // =============================================================================
 
 fn app(
@@ -236,20 +275,17 @@ fn app(
               attribute.class("page"),
             ],
             [
-              html.h1([attribute.class("page-title")], [html.text("Chat")]),
+              html.h1([attribute.class("page-title")], [html.text("Rooms")]),
+              slot(room_tabs()),
               html.div(
                 [
                   attribute.role("log"),
                   attribute.attribute("aria-live", "polite"),
-                  attribute.attribute("aria-label", "Chat history"),
+                  attribute.attribute("aria-label", "Room history"),
                 ],
-                [
-                  html.div([attribute.class("chat-history")], [
-                    slot(chat_history()),
-                  ]),
-                ],
+                [slot(room_history())],
               ),
-              slot(chat_area()),
+              slot(room_composer()),
             ],
           ),
           slot(clear_dialog()),
@@ -260,8 +296,6 @@ fn app(
       [SetAttribute(".app-root", "data-theme", theme)]
     },
   )
-  // Click delegation, every actionable element carries a `data-message`
-  // attribute. Sits on the root component so it covers the whole app.
   |> event.on_decoded(
     event: event.click,
     selector: "#app",
@@ -270,7 +304,7 @@ fn app(
 }
 
 // =============================================================================
-// NAVBAR, semantic <nav>, theme toggle (live), connection status (live)
+// NAVBAR
 // =============================================================================
 
 fn navbar() -> component.Component(
@@ -296,7 +330,7 @@ fn navbar() -> component.Component(
                 attribute.attribute("href", "#main"),
                 attribute.attribute("aria-current", "page"),
               ],
-              [html.text("Chat")],
+              [html.text("Rooms")],
             ),
           ]),
           html.li([], [
@@ -411,7 +445,7 @@ fn theme_toggle() -> component.Component(
 }
 
 // =============================================================================
-// POPUP STACK, top-right, under navbar, newest on top
+// POPUPS/NOTIFS
 // =============================================================================
 
 fn popup_stack() -> component.Component(
@@ -495,76 +529,147 @@ fn render_popup(
 }
 
 // =============================================================================
-// CHAT HISTORY, semantic <ol> with role="log" for screen readers
+// ROOM TABS
 // =============================================================================
 
-fn chat_history() -> component.Component(
-  shared.Model,
-  shared.Message,
-  Element(shared.Message),
-) {
-  component.each_live(
-    slice: fn(model: shared.Model) { model.chat.history },
-    key: fn(entry: shared.ChatEntry) { int.to_string(entry.id) },
-    initial: render_chat_entry,
-    patch: fn(_entry: shared.ChatEntry) { [] },
-  )
-  |> component.structural
-}
-
-fn render_chat_entry(
-  entry: shared.ChatEntry,
-) -> component.Component(shared.Model, shared.Message, Element(shared.Message)) {
-  component.static(fn(_slot) {
-    html.div([attribute.class("chat-message")], [
-      html.span([attribute.class("chat-message-sender")], [
-        html.span([attribute.class("sender-id")], [
-          html.text(entry.sender_id),
-        ]),
-        html.text(": "),
-      ]),
-      html.span([attribute.class("chat-message-body")], [
-        html.text(entry.body),
-      ]),
-    ])
-  })
-}
-
-// =============================================================================
-// CHAT AREA, username gate, then message form
-// =============================================================================
-
-fn chat_area() -> component.Component(
+fn room_tabs() -> component.Component(
   shared.Model,
   shared.Message,
   Element(shared.Message),
 ) {
   component.simple(
-    slice: fn(model: shared.Model) { model.session.username },
-    render: fn(username, _slot) {
-      html.div([attribute.class("chat-area")], [
-        case username {
-          "" -> username_form()
-          _ -> message_form(username)
-        },
-      ])
+    slice: fn(model: shared.Model) {
+      #(model.session.joined_rooms, model.session.active_room)
+    },
+    render: fn(state, _slot) {
+      let #(rooms, active) = state
+      case rooms {
+        [] -> html.div([], [])
+        _ ->
+          html.ul(
+            [attribute.class("room-list"), attribute.role("tablist")],
+            list.map(rooms, fn(room_id) { room_tab(room_id, active) }),
+          )
+      }
     },
   )
-  |> event.on(event: event.input, selector: "#chat-input", handler: fn(text) {
+  |> component.structural
+}
+
+fn room_tab(room_id: String, active: String) -> Element(shared.Message) {
+  let class = case room_id == active {
+    True -> "room-tab active"
+    False -> "room-tab"
+  }
+  let selected = case room_id == active {
+    True -> "true"
+    False -> "false"
+  }
+  html.li([], [
+    html.button(
+      [
+        attribute.class(class),
+        attribute.role("tab"),
+        attribute.attribute("type", "button"),
+        attribute.attribute("aria-selected", selected),
+        attribute.attribute("data-message", "select-room:" <> room_id),
+      ],
+      [html.text(room_id)],
+    ),
+  ])
+}
+
+// =============================================================================
+// ROOM HISTORY
+// =============================================================================
+
+fn room_history() -> component.Component(
+  shared.Model,
+  shared.Message,
+  Element(shared.Message),
+) {
+  component.simple(
+    slice: fn(model: shared.Model) {
+      let history =
+        dict.get(model.rooms, model.session.active_room)
+        |> result.map(fn(room: shared.Room) { room.history })
+        |> result.unwrap([])
+      #(model.session.active_room, history)
+    },
+    render: fn(state, _slot) {
+      let #(active, history) = state
+      case active {
+        "" -> html.div([], [])
+        _ ->
+          html.div(
+            [attribute.class("chat-history")],
+            list.map(history, render_chat_entry),
+          )
+      }
+    },
+  )
+  |> component.structural
+}
+
+fn render_chat_entry(entry: shared.ChatEntry) -> Element(shared.Message) {
+  html.div([attribute.class("chat-message")], [
+    html.span([attribute.class("chat-message-sender")], [
+      html.span([attribute.class("sender-id")], [html.text(entry.sender_id)]),
+      html.text(": "),
+    ]),
+    html.span([attribute.class("chat-message-body")], [html.text(entry.body)]),
+  ])
+}
+
+// =============================================================================
+// ROOM COMPOSER
+// =============================================================================
+
+fn room_composer() -> component.Component(
+  shared.Model,
+  shared.Message,
+  Element(shared.Message),
+) {
+  component.simple(
+    slice: fn(model: shared.Model) {
+      #(model.session.username, model.session.active_room)
+    },
+    render: fn(state, _slot) {
+      let #(username, active) = state
+      case username {
+        "" -> html.div([attribute.class("chat-area")], [username_form()])
+        _ ->
+          html.div([attribute.class("chat-area")], [
+            case active {
+              "" ->
+                html.p([attribute.class("room-empty")], [
+                  html.text("Create or join a room below to start chatting."),
+                ])
+              room_id -> message_form(room_id, username)
+            },
+            join_room_form(),
+          ])
+      }
+    },
+  )
+  |> component.structural
+  |> event.on(event: event.input, selector: "#room-input", handler: fn(text) {
     shared.Session(shared.UpdateDraft(text))
   })
-  // Reads `sender_id` from a hidden input baked into the form (see
-  // `message_form`), so the decoder stays stateless: no runtime access
-  // needed at handler time.
-  |> event.on_decoded(
-    event: event.form_submit,
-    selector: "#chat-form",
-    decoder: parse_submit,
-  )
   |> event.on_decoded(
     event: event.form_submit,
     selector: "#username-form",
     decoder: parse_username_submit,
+  )
+  |> event.on_decoded(
+    event: event.form_submit,
+    selector: "#join-room-form",
+    decoder: parse_join_room,
+  )
+  |> event.on_decoded(
+    event: event.form_submit,
+    selector: "#room-form",
+    decoder: parse_room_submit,
   )
 }
 
@@ -586,48 +691,71 @@ fn username_form() -> Element(shared.Message) {
       attribute.attribute("maxlength", "32"),
     ]),
     html.button(
-      [
-        attribute.class("send-button"),
-        attribute.attribute("type", "submit"),
-      ],
+      [attribute.class("send-button"), attribute.attribute("type", "submit")],
       [html.text("Join")],
     ),
   ])
 }
 
-fn message_form(username: String) -> Element(shared.Message) {
-  html.form([attribute.id("chat-form"), attribute.class("chat-form")], [
+fn join_room_form() -> Element(shared.Message) {
+  html.form([attribute.id("join-room-form"), attribute.class("join-form")], [
     html.label(
       [
-        attribute.attribute("for", "chat-input"),
+        attribute.attribute("for", "room-name-input"),
+        attribute.class("visually-hidden"),
+      ],
+      [html.text("Room name")],
+    ),
+    html.input([
+      attribute.id("room-name-input"),
+      attribute.attribute("name", "room"),
+      attribute.attribute("type", "text"),
+      attribute.attribute("autocomplete", "off"),
+      attribute.attribute("placeholder", "Create or join a room…"),
+      attribute.attribute("maxlength", "32"),
+    ]),
+    html.button(
+      [attribute.class("send-button"), attribute.attribute("type", "submit")],
+      [html.text("Go")],
+    ),
+  ])
+}
+
+fn message_form(room_id: String, username: String) -> Element(shared.Message) {
+  html.form([attribute.id("room-form"), attribute.class("chat-form")], [
+    html.label(
+      [
+        attribute.attribute("for", "room-input"),
         attribute.class("visually-hidden"),
       ],
       [html.text("Message")],
     ),
     html.input([
       attribute.attribute("type", "hidden"),
+      attribute.attribute("name", "room_id"),
+      attribute.attribute("value", room_id),
+    ]),
+    html.input([
+      attribute.attribute("type", "hidden"),
       attribute.attribute("name", "sender_id"),
       attribute.attribute("value", username),
     ]),
     html.input([
-      attribute.id("chat-input"),
+      attribute.id("room-input"),
       attribute.attribute("name", "body"),
       attribute.attribute("type", "text"),
       attribute.attribute("autocomplete", "off"),
-      attribute.attribute("placeholder", "Type a message…"),
+      attribute.attribute("placeholder", "Message #" <> room_id <> "…"),
     ]),
     html.button(
-      [
-        attribute.class("send-button"),
-        attribute.attribute("type", "submit"),
-      ],
+      [attribute.class("send-button"), attribute.attribute("type", "submit")],
       [html.text("Send")],
     ),
   ])
 }
 
 // =============================================================================
-// CLEAR DIALOG, conditional simple component, focus-trapped via on_message
+// CLEAR DIALOG
 // =============================================================================
 
 fn clear_dialog() -> component.Component(

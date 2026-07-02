@@ -179,6 +179,31 @@ pub fn topic_broadcast_from_skips_originator_test() {
   |> should.equal([transport.Push(topic_id: "test", payload: Increment)])
 }
 
+@target(javascript)
+pub fn topic_client_message_on_ephemeral_relays_to_others_test() {
+  let srv = new_server()
+  let _t = new_ephemeral_topic(srv)
+  let drain1 = connect_client(srv, "c1")
+  let drain2 = connect_client(srv, "c2")
+  server.incoming(srv, client_id: "c1", bytes: encode_subscribe("test"))
+  server.incoming(srv, client_id: "c2", bytes: encode_subscribe("test"))
+  let _ = drain1()
+  let _ = drain2()
+  // c1 sends a topic message to the ephemeral topic
+  server.incoming(
+    srv,
+    client_id: "c1",
+    bytes: encode_topic_message("test", Increment),
+  )
+  // The originator does not get its own message echoed back
+  drain1()
+  |> should.equal([])
+  // Other subscribers receive it as a Push, no hook required
+  drain2()
+  |> list.map(decode)
+  |> should.equal([transport.Push(topic_id: "test", payload: Increment)])
+}
+
 // =============================================================================
 // DISPATCH (STATEFUL)
 // =============================================================================

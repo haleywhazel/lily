@@ -58,6 +58,7 @@ import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option}
 import gleam/result
+import gleam/string
 import lily/transport.{type Target}
 
 // =============================================================================
@@ -96,6 +97,7 @@ pub opaque type Wiring(model, message) {
   Wiring(
     session: Option(TargetConfig(model, message)),
     topics: Dict(String, TargetConfig(model, message)),
+    kinds: List(KindConfig(model, message)),
   )
 }
 
@@ -180,15 +182,58 @@ pub fn topic(
   Wiring(..wiring, topics: dict.insert(wiring.topics, id, config))
 }
 
+/// Register a parametric topic family in the wiring. Where [`topic`](#topic)
+/// binds one id to one model slice, `topic_kind` binds a whole family of
+/// dynamic ids sharing `prefix` (`"room:1"`, `"room:2"`, and so on) to a
+/// keyed slice, so a client can be subscribed to many instances at once.
+///
+/// `extract` returns the instance key together with the sub-message; the full
+/// topic id on the wire is `prefix <> key`. `field_get` and `field_set` read
+/// and write one instance's sub-model by key, so back them with a keyed
+/// collection such as `Dict(String, _)` on your model. This one entry is what
+/// lets an outgoing message route to the right instance, an incoming update
+/// apply to the right key, and a snapshot merge into the right key.
+///
+/// ```gleam
+/// store.wiring()
+/// |> store.topic_kind(
+///   prefix: "room:",
+///   extract: fn(message) {
+///     case message {
+///       Room(id, inner) -> Ok(#(int.to_string(id), inner))
+///       _ -> Error(Nil)
+///     }
+///   },
+///   update: room_update,
+///   field_get: fn(model: Model, key) {
+///     dict.get(model.rooms, key) |> result.unwrap(new_room())
+///   },
+///   field_set: fn(model, key, room) {
+///     Model(..model, rooms: dict.insert(model.rooms, key, room))
+///   },
+/// )
+/// ```
+pub fn topic_kind(
+  wiring: Wiring(model, message),
+  prefix prefix: String,
+  extract extract: fn(message) -> Result(#(String, kind_message), Nil),
+  update update: fn(kind_model, kind_message) -> kind_model,
+  field_get field_get: fn(model, String) -> kind_model,
+  field_set field_set: fn(model, String, kind_model) -> model,
+) -> Wiring(model, message) {
+  let config = make_kind_config(prefix, extract, update, field_get, field_set)
+  Wiring(..wiring, kinds: [config, ..wiring.kinds])
+}
+
 /// Unwrap a [`Local`](#Local) field to get the inner value.
 pub fn unwrap_local(local: Local(a)) -> a {
   let Local(value) = local
   value
 }
 
-/// Create an empty wiring configuration. Pipe through [`session`](#session)
-/// and [`topic`](#topic) to register stores. Pass the result to
-/// [`client.start`](./client.html#start) and
+/// Create an empty wiring configuration. Pipe through [`session`](#session),
+/// [`topic`](#topic), and [`topic_kind`](#topic_kind) to register stores.
+/// Pass the result to [`client.start`](./client.html#start) and
 /// [`server.new`](./server.html#new).
 ///
 /// ```gleam
@@ -197,7 +242,7 @@ pub fn unwrap_local(local: Local(a)) -> a {
 /// |> store.topic(id: "chat", extract:, update:, field_get:, field_set:)
 /// ```
 pub fn wiring() -> Wiring(model, message) {
-  Wiring(session: option.None, topics: dict.new())
+  Wiring(session: option.None, topics: dict.new(), kinds: [])
 }
 
 // =============================================================================
@@ -251,17 +296,24 @@ pub fn merge_snapshot(
   current: model,
   snapshot_state: model,
 ) -> model {
-  let config = case target {
-    transport.Session -> wiring.session
+  case target {
+    transport.Session ->
+      case wiring.session {
+        option.Some(c) -> c.merge_snapshot(current, snapshot_state)
+        option.None -> current
+      }
     transport.Topic(id) ->
       case dict.get(wiring.topics, id) {
-        Ok(c) -> option.Some(c)
-        Error(_) -> option.None
+        Ok(c) -> c.merge_snapshot(current, snapshot_state)
+        Error(_) ->
+          case matching_kind(wiring, id) {
+            option.Some(kind) -> {
+              let key = string.drop_start(id, string.length(kind.prefix))
+              kind.merge_snapshot(current, key, snapshot_state)
+            }
+            option.None -> current
+          }
       }
-  }
-  case config {
-    option.None -> current
-    option.Some(c) -> c.merge_snapshot(current, snapshot_state)
   }
 }
 
@@ -276,9 +328,9 @@ pub fn route_message(wiring: Wiring(model, message), message: message) -> Target
     option.Some(config) ->
       case config.is_for_target(message) {
         True -> transport.Session
-        False -> first_matching_topic(wiring, message)
+        False -> topic_target(wiring, message)
       }
-    option.None -> first_matching_topic(wiring, message)
+    option.None -> topic_target(wiring, message)
   }
 }
 
@@ -298,9 +350,10 @@ pub fn topic_apply(
   wiring: Wiring(model, message),
   id: String,
 ) -> Option(fn(model, message) -> model) {
-  dict.get(wiring.topics, id)
-  |> result.map(fn(config) { config.apply })
-  |> option.from_result
+  case dict.get(wiring.topics, id) {
+    Ok(config) -> option.Some(config.apply)
+    Error(_) -> matching_kind(wiring, id) |> option.map(fn(kind) { kind.apply })
+  }
 }
 
 // =============================================================================
@@ -312,6 +365,20 @@ type TargetConfig(model, message) {
     is_for_target: fn(message) -> Bool,
     apply: fn(model, message) -> model,
     merge_snapshot: fn(model, model) -> model,
+  )
+}
+
+/// Config for a parametric topic family (see [`topic_kind`](#topic_kind)).
+/// Unlike `TargetConfig`, the apply and merge are keyed by an instance id
+/// derived from the message (`topic_id_of`) or the target id (`merge_snapshot`
+/// takes the key), so one config serves every instance sharing `prefix`.
+type KindConfig(model, message) {
+  KindConfig(
+    prefix: String,
+    is_for_target: fn(message) -> Bool,
+    topic_id_of: fn(message) -> Result(String, Nil),
+    apply: fn(model, message) -> model,
+    merge_snapshot: fn(model, String, model) -> model,
   )
 }
 
@@ -331,21 +398,38 @@ fn apply_to_topics(
     |> list.find(fn(pair) { { pair.1 }.is_for_target(message) })
   {
     Ok(#(_id, config)) -> config.apply(model, message)
-    Error(_) -> model
+    Error(_) ->
+      case list.find(wiring.kinds, fn(kind) { kind.is_for_target(message) }) {
+        Ok(kind) -> kind.apply(model, message)
+        Error(_) -> model
+      }
   }
 }
 
-fn first_matching_topic(
-  wiring: Wiring(model, message),
-  message: message,
-) -> Target {
-  case
-    dict.to_list(wiring.topics)
-    |> list.find(fn(pair) { { pair.1 }.is_for_target(message) })
-  {
-    Ok(#(id, _)) -> transport.Topic(id)
-    Error(_) -> transport.Session
-  }
+fn make_kind_config(
+  prefix: String,
+  extract: fn(message) -> Result(#(String, kind_message), Nil),
+  update: fn(kind_model, kind_message) -> kind_model,
+  field_get: fn(model, String) -> kind_model,
+  field_set: fn(model, String, kind_model) -> model,
+) -> KindConfig(model, message) {
+  KindConfig(
+    prefix: prefix,
+    is_for_target: fn(message) { result.is_ok(extract(message)) },
+    topic_id_of: fn(message) {
+      extract(message) |> result.map(fn(pair) { prefix <> pair.0 })
+    },
+    apply: fn(model, message) {
+      case extract(message) {
+        Ok(#(key, inner)) ->
+          field_set(model, key, update(field_get(model, key), inner))
+        Error(_) -> model
+      }
+    },
+    merge_snapshot: fn(current, key, snapshot) {
+      field_set(current, key, field_get(snapshot, key))
+    },
+  )
 }
 
 fn make_target_config(
@@ -366,4 +450,46 @@ fn make_target_config(
       field_set(current, field_get(snapshot))
     },
   )
+}
+
+/// Find the kind whose prefix matches `id`, choosing the longest prefix when
+/// several match so a more specific family wins.
+fn matching_kind(
+  wiring: Wiring(model, message),
+  id: String,
+) -> Option(KindConfig(model, message)) {
+  wiring.kinds
+  |> list.filter(fn(kind) { string.starts_with(id, kind.prefix) })
+  |> list.fold(option.None, fn(best: Option(KindConfig(model, message)), kind) {
+    case best {
+      option.None -> option.Some(kind)
+      option.Some(current) ->
+        case string.length(kind.prefix) > string.length(current.prefix) {
+          True -> option.Some(kind)
+          False -> best
+        }
+    }
+  })
+}
+
+/// Route a non-session message: an exact topic entry first, otherwise a
+/// parametric kind (whose concrete id is `prefix <> key` from the message).
+/// Falls back to `Session` when nothing matches, the safe default for
+/// unrecognised messages.
+fn topic_target(wiring: Wiring(model, message), message: message) -> Target {
+  case
+    dict.to_list(wiring.topics)
+    |> list.find(fn(pair) { { pair.1 }.is_for_target(message) })
+  {
+    Ok(#(id, _)) -> transport.Topic(id)
+    Error(_) ->
+      case list.find(wiring.kinds, fn(kind) { kind.is_for_target(message) }) {
+        Ok(kind) ->
+          case kind.topic_id_of(message) {
+            Ok(id) -> transport.Topic(id)
+            Error(_) -> transport.Session
+          }
+        Error(_) -> transport.Session
+      }
+  }
 }

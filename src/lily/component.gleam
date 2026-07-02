@@ -51,13 +51,13 @@
 ////
 //// ```gleam
 //// component.live(
-////   slice: fn(m) { m.is_active },
+////   slice: fn(model) { model.is_active },
 ////   initial: fn(slot) {
 ////     html.section([attribute.class("column")], [
 ////       html.h2([], [html.text("Title")]),
 ////       slot(component.each_live(
-////         slice: fn(m) { cards_for(m) },
-////         key: fn(c) { c.id },
+////         slice: fn(model) { cards_for(model) },
+////         key: fn(card) { card.id },
 ////         initial: render_card,
 ////         patch: card_patches,
 ////       )),
@@ -71,7 +71,7 @@
 ////
 //// ```gleam
 //// component.simple(
-////   slice: fn(m) { m.count },
+////   slice: fn(model) { model.count },
 ////   render: fn(count, _) {
 ////     html.div([], [html.text(int.to_string(count))])
 ////   },
@@ -103,7 +103,7 @@
 //// component.mount(
 ////   runtime,
 ////   selector: "#app",
-////   to_html: fn(s) { s },
+////   to_html: fn(html) { html },
 ////   to_slot: fn() { "<lily-slot></lily-slot>" },
 ////   view: app,
 //// )
@@ -133,7 +133,7 @@
 ////
 //// fn app(_model: Model) {
 ////   component.simple(
-////     slice: fn(m: Model) { m.count },
+////     slice: fn(model: Model) { model.count },
 ////     render: fn(count, _) {
 ////       html.div([], [
 ////         decrement_button(),
@@ -644,7 +644,7 @@ pub fn structural(
 ///
 /// ```gleam
 /// component.switch(
-///   on: fn(m: Model) { m.route },
+///   on: fn(model: Model) { model.route },
 ///   case_of: fn(route) {
 ///     case route {
 ///       Home -> home_page()
@@ -697,8 +697,8 @@ pub fn switch(
 ///
 /// ```gleam
 /// component.each_live(
-///   slice: fn(m) { m.toasts },
-///   key: fn(t) { int.to_string(t.id) },
+///   slice: fn(model) { model.toasts },
+///   key: fn(toast) { int.to_string(toast.id) },
 ///   initial: fn(toast) {
 ///     component.static(fn(_) { render_toast(toast) })
 ///     |> component.transition(

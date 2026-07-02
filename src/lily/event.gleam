@@ -29,7 +29,7 @@
 //// fn app(_model: Model) {
 ////   component.fragment([
 ////     component.simple(
-////       slice: fn(m: Model) { m.search },
+////       slice: fn(model: Model) { model.search },
 ////       render: fn(value, _) { html.input([attribute.value(value)]) },
 ////     )
 ////     |> event.on(event: event.input, selector: "#search", handler: Search),

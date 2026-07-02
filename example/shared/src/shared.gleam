@@ -1,5 +1,8 @@
+import gleam/dict.{type Dict}
 import gleam/dynamic/decode
 import gleam/json
+import gleam/list
+import gleam/result
 
 import lily/store
 import lily/transport
@@ -9,7 +12,7 @@ import lily/transport
 // =============================================================================
 
 pub type Model {
-  Model(session: Session, chat: Chat)
+  Model(session: Session, rooms: Dict(String, Room))
 }
 
 pub type Session {
@@ -22,11 +25,13 @@ pub type Session {
     next_popup_id: Int,
     session_id: String,
     username: String,
+    joined_rooms: List(String),
+    active_room: String,
   )
 }
 
-pub type Chat {
-  ChatState(history: List(ChatEntry), next_id: Int)
+pub type Room {
+  Room(history: List(ChatEntry), next_id: Int)
 }
 
 pub type ChatEntry {
@@ -48,7 +53,7 @@ pub type Theme {
 
 pub type Message {
   Session(SessionMessage)
-  Chat(ChatMessage)
+  RoomMessage(room_id: String, message: RoomMessage)
 }
 
 pub type SessionMessage {
@@ -56,13 +61,15 @@ pub type SessionMessage {
   ClearNotifications
   CloseClearDialog
   DismissPopup(id: Int)
+  JoinRoom(room_id: String)
   OpenClearDialog
+  SelectRoom(room_id: String)
   SetUsername(name: String)
   ToggleTheme
   UpdateDraft(text: String)
 }
 
-pub type ChatMessage {
+pub type RoomMessage {
   SendMessage(body: String, sender_id: String)
 }
 
@@ -74,7 +81,13 @@ pub fn update(model: Model, message: Message) -> Model {
   case message {
     Session(inner) ->
       Model(..model, session: session_update(model.session, inner))
-    Chat(inner) -> Model(..model, chat: chat_update(model.chat, inner))
+    RoomMessage(room_id:, message:) -> {
+      let room = dict.get(model.rooms, room_id) |> result.unwrap(initial_room())
+      Model(
+        ..model,
+        rooms: dict.insert(model.rooms, room_id, room_update(room, message)),
+      )
+    }
   }
 }
 
@@ -97,7 +110,19 @@ pub fn session_update(session: Session, message: SessionMessage) -> Session {
     DismissPopup(id) ->
       SessionState(..session, popups: filter_popup(session.popups, id))
 
+    JoinRoom(room_id) -> {
+      // Add to the joined list (once) and make it the active room. The room's
+      // synced state arrives separately, as a snapshot after subscribing.
+      let joined = case list.contains(session.joined_rooms, room_id) {
+        True -> session.joined_rooms
+        False -> append(session.joined_rooms, room_id)
+      }
+      SessionState(..session, joined_rooms: joined, active_room: room_id)
+    }
+
     OpenClearDialog -> SessionState(..session, dialog_open: True)
+
+    SelectRoom(room_id) -> SessionState(..session, active_room: room_id)
 
     ToggleTheme -> {
       let next = case session.theme {
@@ -113,15 +138,15 @@ pub fn session_update(session: Session, message: SessionMessage) -> Session {
   }
 }
 
-pub fn chat_update(chat: Chat, message: ChatMessage) -> Chat {
+pub fn room_update(room: Room, message: RoomMessage) -> Room {
   case message {
     SendMessage(body:, sender_id:) ->
       case body {
-        "" -> chat
+        "" -> room
         _ -> {
-          let id = chat.next_id
-          ChatState(
-            history: append(chat.history, ChatEntry(id:, body:, sender_id:)),
+          let id = room.next_id
+          Room(
+            history: append(room.history, ChatEntry(id:, body:, sender_id:)),
             next_id: id + 1,
           )
         }
@@ -152,7 +177,7 @@ fn filter_popup(popups: List(Popup), drop_id: Int) -> List(Popup) {
 // =============================================================================
 
 pub fn initial_model() -> Model {
-  Model(session: initial_session(), chat: initial_chat())
+  Model(session: initial_session(), rooms: dict.new())
 }
 
 pub fn initial_session() -> Session {
@@ -165,11 +190,13 @@ pub fn initial_session() -> Session {
     next_popup_id: 1,
     session_id: "",
     username: "",
+    joined_rooms: [],
+    active_room: "",
   )
 }
 
-pub fn initial_chat() -> Chat {
-  ChatState(history: [], next_id: 1)
+pub fn initial_room() -> Room {
+  Room(history: [], next_id: 1)
 }
 
 // =============================================================================
@@ -182,24 +209,28 @@ pub fn wiring() -> store.Wiring(Model, Message) {
     extract: fn(message) {
       case message {
         Session(m) -> Ok(m)
-        Chat(_) -> Error(Nil)
+        RoomMessage(..) -> Error(Nil)
       }
     },
     update: session_update,
     field_get: fn(model: Model) { model.session },
     field_set: fn(model, session) { Model(..model, session:) },
   )
-  |> store.topic(
-    id: "chat",
+  |> store.topic_kind(
+    prefix: "room:",
     extract: fn(message) {
       case message {
-        Chat(m) -> Ok(m)
+        RoomMessage(room_id:, message:) -> Ok(#(room_id, message))
         Session(_) -> Error(Nil)
       }
     },
-    update: chat_update,
-    field_get: fn(model: Model) { model.chat },
-    field_set: fn(model, chat) { Model(..model, chat:) },
+    update: room_update,
+    field_get: fn(model: Model, key) {
+      dict.get(model.rooms, key) |> result.unwrap(initial_room())
+    },
+    field_set: fn(model: Model, key, room) {
+      Model(..model, rooms: dict.insert(model.rooms, key, room))
+    },
   )
 }
 

@@ -1,6 +1,8 @@
 // Tests for lily/store Wiring builder, route_message, apply_message,
 // merge_snapshot.
 
+import gleam/dict
+import gleam/result
 import gleeunit/should
 import lily/store
 import lily/transport
@@ -251,4 +253,73 @@ pub fn merge_snapshot_session_replaces_session_slice_test() {
   |> should.equal(100)
   merged.chat
   |> should.equal(2)
+}
+
+// =============================================================================
+// TOPIC KIND
+// =============================================================================
+
+type KindModel {
+  KindModel(rooms: dict.Dict(String, Int))
+}
+
+type KindMessage {
+  RoomDelta(id: String, delta: Int)
+  NotARoom
+}
+
+fn kind_wiring() -> store.Wiring(KindModel, KindMessage) {
+  store.wiring()
+  |> store.topic_kind(
+    prefix: "room:",
+    extract: fn(message) {
+      case message {
+        RoomDelta(id, delta) -> Ok(#(id, delta))
+        NotARoom -> Error(Nil)
+      }
+    },
+    update: fn(current: Int, delta: Int) -> Int { current + delta },
+    field_get: fn(model: KindModel, key) {
+      dict.get(model.rooms, key) |> result.unwrap(0)
+    },
+    field_set: fn(model: KindModel, key, value) {
+      KindModel(rooms: dict.insert(model.rooms, key, value))
+    },
+  )
+}
+
+pub fn topic_kind_routes_to_concrete_instance_id_test() {
+  // A message carrying instance key "42" routes to the concrete topic id
+  // "room:42", not the bare prefix.
+  let r = kind_wiring()
+  store.route_message(r, RoomDelta("42", 1))
+  |> should.equal(transport.Topic("room:42"))
+}
+
+pub fn topic_kind_unmatched_falls_back_to_session_test() {
+  let r = kind_wiring()
+  store.route_message(r, NotARoom)
+  |> should.equal(transport.Session)
+}
+
+pub fn topic_kind_apply_updates_keyed_slice_test() {
+  let r = kind_wiring()
+  let model = KindModel(rooms: dict.from_list([#("42", 10)]))
+  let updated = store.apply_message(r, model, RoomDelta("42", 5))
+  dict.get(updated.rooms, "42")
+  |> should.equal(Ok(15))
+}
+
+pub fn topic_kind_merge_snapshot_only_touches_its_key_test() {
+  // A snapshot for "room:42" merges only that key, leaving other joined
+  // rooms in the keyed slice untouched, so multiple instances coexist.
+  let r = kind_wiring()
+  let current = KindModel(rooms: dict.from_list([#("42", 1), #("7", 2)]))
+  let snapshot = KindModel(rooms: dict.from_list([#("42", 99)]))
+  let merged =
+    store.merge_snapshot(r, transport.Topic("room:42"), current, snapshot)
+  dict.get(merged.rooms, "42")
+  |> should.equal(Ok(99))
+  dict.get(merged.rooms, "7")
+  |> should.equal(Ok(2))
 }

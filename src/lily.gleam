@@ -1,11 +1,10 @@
-//// Lily is a web framework for live server updates and offline-friendly
-//// interactivity, with components deciding for themselves how and when they
-//// re-render.
+//// Lily is a library to help with live server updates and offline-friendly
+//// interactivity, primarily adopting a model of keeping all a key states
+//// centralised (and server-synced) while components decide for themselves how
+//// and when they re-render.
 ////
-//// Every part is modular and replaceable, and Lily is designed to integrate
-//// with existing Gleam libraries (such as wisp/mist/ewe).
-////
-//// Lily is still young and breaking changes are expected at this stage.
+//// Lily is still young, very much still growing, and breaking changes are
+//// expected at this stage.
 ////
 
 // =============================================================================

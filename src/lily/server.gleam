@@ -8,6 +8,7 @@
 //// topics with [`topic.new`](./topic.html#new):
 ////
 //// ```gleam
+//// import gleam/result
 //// import lily/server
 //// import lily/topic
 ////
@@ -19,9 +20,9 @@
 ////   )
 ////   |> server.start
 ////
-//// let assert Ok(chat) =
+//// let assert Ok(_) =
 ////   topic.new(srv, id: "chat")
-////   |> topic.with_store
+////   |> result.map(topic.with_store)
 //// ```
 ////
 //// Wire the server into your WebSocket handler using
@@ -234,8 +235,8 @@ pub fn on_disconnect(
 }
 
 /// Register a hook that runs after each session message is applied. Receives
-/// the decoded message, the updated session model (projected from the outer
-/// model), and the originating client id.
+/// the decoded message, the full outer model after the message has been
+/// applied to this client's session store, and the originating client id.
 ///
 /// ```gleam
 /// server.on_message(srv, fn(message, model, client_id) {

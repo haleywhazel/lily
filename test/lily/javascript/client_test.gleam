@@ -740,6 +740,62 @@ pub fn client_subscribe_sends_subscribe_frame_test() {
 }
 
 @target(javascript)
+pub fn client_dispatch_topic_kind_sends_concrete_instance_id_test() {
+  // A parametric topic_kind routes an outgoing message to the concrete
+  // instance id (prefix plus the key carried in the message), so the server
+  // can reach the right instance actor even with several joined at once.
+  test_setup.reset_dom()
+  test_setup.reset_mocks()
+
+  let wiring =
+    store.wiring()
+    |> store.topic_kind(
+      prefix: "room:",
+      extract: fn(_message) { Ok(#("42", Nil)) },
+      update: fn(model: Model, _inner: Nil) { model },
+      field_get: fn(model: Model, _key) { model },
+      field_set: fn(_model, _key, m) { m },
+    )
+
+  let runtime =
+    store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+    |> client.start(wiring)
+
+  let sent_ref: test_ref.Ref(List(BitArray)) = test_ref.new([])
+  let connector =
+    transport.make_connector(fn(_handler: transport.Handler) {
+      transport.new(
+        send: fn(bytes) {
+          test_ref.set(sent_ref, [bytes, ..test_ref.get(sent_ref)])
+        },
+        close: fn() { Nil },
+      )
+    })
+
+  let _r =
+    client.connect(
+      runtime,
+      with: connector,
+      serialiser: test_fixtures.custom_serialiser(),
+    )
+
+  client.dispatch(runtime)(Increment)
+
+  let sent = test_ref.get(sent_ref)
+  case sent {
+    [bytes, ..] ->
+      case bit_array.to_string(bytes) {
+        Ok(text) -> {
+          text |> string.contains("topic_message") |> should.be_true
+          text |> string.contains("\"topic_id\":\"room:42\"") |> should.be_true
+        }
+        Error(_) -> should.fail()
+      }
+    [] -> should.fail()
+  }
+}
+
+@target(javascript)
 pub fn client_connect_sends_resync_on_reconnect_test() {
   test_setup.reset_dom()
   test_setup.reset_mocks()
