@@ -1,33 +1,112 @@
-//// The [`Server`](#Server) holds authoritative state and routes client
-//// messages to the right store a per-connection session store or a
-//// named topic store. It works on both Erlang and JavaScript targets,
-//// though Erlang is recommended for production.
+//// The [`Server`](#Server) is the authoritative half of a Lily app. It holds
+//// the real state and routes every message a client sends to the right store,
+//// either that client's own per-connection session store, or a named
+//// [topic](./topic.html) store shared between clients. Clients apply their own
+//// changes optimistically, the server has the final say and streams the
+//// corrected state back, so the two stay in sync (see
+//// [transport](./transport.html) for the frames that carry it).
 ////
-//// Build a server with [`server.new`](#new), passing the shared `Wiring`
-//// configuration, then start it with [`server.start`](#start) and register
-//// topics with [`topic.new`](./topic.html#new):
+//// It compiles for both targets, but you'll almost always want the Erlang one,
+//// the whole design leans on the BEAM's process-per-connection model and its
+//// cheap concurrency.
+////
+//// You build a server with [`new`](#new), handing it the same three values
+//// your client gets, the initial model, the serialiser, and the shared
+//// [`Wiring`](./store.html#Wiring), then [`start`](#start) it and register
+//// your topics with [`topic.new`](./topic.html#new):
 ////
 //// ```gleam
 //// import gleam/result
 //// import lily/server
 //// import lily/topic
 ////
-//// let assert Ok(srv) =
-////   server.new(
-////     initial: shared.initial_model(),
-////     serialiser: shared.serialiser(),
-////     wiring: shared.wiring(),
-////   )
-////   |> server.start
+//// pub fn main() {
+////   let assert Ok(server) =
+////     server.new(
+////       initial: shared.initial_model(),
+////       serialiser: shared.serialiser(),
+////       wiring: shared.wiring(),
+////     )
+////     |> server.start
 ////
-//// let assert Ok(_) =
-////   topic.new(srv, id: "chat")
-////   |> result.map(topic.with_store)
+////   let assert Ok(_) =
+////     topic.new(server, id: "chat")
+////     |> result.map(topic.with_store)
+//// }
 //// ```
 ////
-//// Wire the server into your WebSocket handler using
-//// [`server.connect`](#connect), [`server.disconnect`](#disconnect), and
-//// [`server.incoming`](#incoming).
+//// Handing those same three values to [`client.start`](./client.html#start) is
+//// what makes both ends agree on the model, the update logic, and the wire
+//// encoding, so define them once in your `shared` package and pass the same
+//// values to each side. See [store](./store.html) for how the `Wiring` splits
+//// the model into a session slice and topic slices.
+////
+//// The server never imports `mist` or `wisp`, it's completely
+//// transport-agnostic (the same way Lustre leaves the transport to you), so
+//// you wire it into whatever WebSocket or HTTP handler you're running with
+//// three calls. Mint a stable id for each connection with
+//// [`generate_client_id`](#generate_client_id), register it with
+//// [`connect`](#connect) (handing over the `send` callback the server uses to
+//// push frames back to that one client), feed every inbound frame to
+//// [`incoming`](#incoming), and call [`disconnect`](#disconnect) when the
+//// socket closes:
+////
+//// ```gleam
+//// let client_id = server.generate_client_id()
+//// server.connect(server, client_id:, send: process.send(outgoing_subject, _))
+////
+//// // for every frame the socket receives:
+//// server.incoming(server, client_id:, bytes:)
+////
+//// // when it closes:
+//// server.disconnect(server, client_id:)
+//// ```
+////
+//// From there most apps just need the lifecycle hooks.
+//// [`on_connect`](#on_connect) and [`on_disconnect`](#on_disconnect) fire with
+//// the client id for presence tracking or audit logging,
+//// [`on_message`](#on_message) runs after each session message is applied
+//// (giving you the decoded message, the whole model after the update, and the
+//// client id, the natural home for side effects like writing to a database),
+//// and [`on_topic_message`](#on_topic_message) fires for each client-incoming
+//// topic message:
+////
+//// ```gleam
+//// server.on_connect(server, fn(client_id) {
+////   logging.info("client connected: " <> client_id)
+//// })
+////
+//// server.on_message(server, fn(message, _model, _client_id) {
+////   case message {
+////     Session(SaveDocument(doc)) -> db.write(doc)
+////     _ -> Nil
+////   }
+//// })
+//// ```
+////
+//// When the server itself needs to change a client's state, rather than react
+//// to something the client sent, reach for [`dispatch_to`](#dispatch_to). It
+//// applies a message to one client's session store and pushes the update
+//// straight back to them, ideal for seeding a session right after connect or
+//// for delivering the result of some async work once it lands (it's safe to
+//// call from any process, so spawn the slow thing and dispatch when it's
+//// ready):
+////
+//// ```gleam
+//// server.on_connect(server, fn(client_id) {
+////   server.dispatch_to(server, client_id:, message: WelcomeUser(client_id))
+//// })
+//// ```
+////
+//// [`dispatch_to_all`](#dispatch_to_all) does the same to every connected
+//// client at once, for a server-wide change that also mutates session state
+//// like a feature-flag refresh. If you only want to fan something out without
+//// touching session state, broadcast through a
+//// [topic](./topic.html#broadcast) instead.
+////
+//// Shut a server down with [`stop`](#stop), which asks every topic to stop
+//// first so subscribers' slices reset cleanly before the underlying actor
+//// terminates.
 
 // =============================================================================
 // IMPORTS
@@ -102,7 +181,7 @@ pub type ServerTopicEntry(model, message) {
 /// frames back to this specific client.
 ///
 /// ```gleam
-/// server.connect(srv, client_id: id, send: process.send(outgoing_subject, _))
+/// server.connect(server, client_id: id, send: process.send(outgoing_subject, _))
 /// ```
 pub fn connect(
   server: Server(model, message),
@@ -131,8 +210,8 @@ pub fn disconnect(
 /// `dispatch_to` when the result is ready.
 ///
 /// ```gleam
-/// server.on_connect(srv, fn(client_id) {
-///   server.dispatch_to(srv, client_id:, message: WelcomeUser(client_id))
+/// server.on_connect(server, fn(client_id) {
+///   server.dispatch_to(server, client_id:, message: WelcomeUser(client_id))
 /// })
 /// ```
 pub fn dispatch_to(
@@ -150,7 +229,7 @@ pub fn dispatch_to(
 /// instead.
 ///
 /// ```gleam
-/// server.dispatch_to_all(srv, message: SystemBannerUpdated(banner))
+/// server.dispatch_to_all(server, message: SystemBannerUpdated(banner))
 /// ```
 pub fn dispatch_to_all(
   server: Server(model, message),
@@ -165,7 +244,7 @@ pub fn dispatch_to_all(
 ///
 /// ```gleam
 /// let client_id = server.generate_client_id()
-/// server.connect(srv, client_id:, send:)
+/// server.connect(server, client_id:, send:)
 /// ```
 pub fn generate_client_id() -> String {
   ffi_generate_client_id()
@@ -208,7 +287,7 @@ pub fn new(
 /// [`dispatch_to`](#dispatch_to).
 ///
 /// ```gleam
-/// server.on_connect(srv, fn(client_id) {
+/// server.on_connect(server, fn(client_id) {
 ///   logging.info("client connected: " <> client_id)
 /// })
 /// ```
@@ -223,7 +302,7 @@ pub fn on_connect(
 /// id that just left. Use for presence cleanup or audit logging.
 ///
 /// ```gleam
-/// server.on_disconnect(srv, fn(client_id) {
+/// server.on_disconnect(server, fn(client_id) {
 ///   logging.info("client disconnected: " <> client_id)
 /// })
 /// ```
@@ -239,7 +318,7 @@ pub fn on_disconnect(
 /// applied to this client's session store, and the originating client id.
 ///
 /// ```gleam
-/// server.on_message(srv, fn(message, model, client_id) {
+/// server.on_message(server, fn(message, model, client_id) {
 ///   case message {
 ///     Session(SaveDocument(doc)) -> db.write(doc)
 ///     _ -> Nil
@@ -260,7 +339,7 @@ pub fn on_message(
 /// server-initiated `topic.dispatch` / `topic.broadcast` calls.
 ///
 /// ```gleam
-/// server.on_topic_message(srv, fn(message, topic_id, _client_id) {
+/// server.on_topic_message(server, fn(message, topic_id, _client_id) {
 ///   logging.auto_log(logging.Info, #(topic_id, message))
 /// })
 /// ```
@@ -276,7 +355,7 @@ pub fn on_topic_message(
 /// Topics are added then afterwards via `topic.new(server, ...)`.
 ///
 /// ```gleam
-/// let assert Ok(srv) =
+/// let assert Ok(server) =
 ///   server.new(
 ///     initial: shared.initial_model(),
 ///     serialiser: shared.serialiser(),

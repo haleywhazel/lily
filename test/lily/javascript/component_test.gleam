@@ -552,9 +552,11 @@ pub fn switch_events_inside_build_are_ignored_test() {
     mount(runtime, fn(_model) {
       component.switch(on: fn(m: Model) { m.active_tab }, case_of: fn(_tab) {
         component.static(fn(_) { "<button id=\"ignored\">+</button>" })
-        |> event.on(event: event.click, selector: "#ignored", handler: fn(_) {
-          Increment
-        })
+        |> event.on_global(
+          event: event.click,
+          selector: "#ignored",
+          handler: fn(_) { Increment },
+        )
       })
     })
   test_dom.click("#ignored")
@@ -579,7 +581,7 @@ pub fn switch_events_on_switch_itself_fire_test() {
           "<button id=\"fires\" data-message=\"increment\">+</button>"
         })
       })
-      |> event.on_decoded(
+      |> event.on_global_decoded(
         event: event.click,
         selector: "#fires",
         decoder: fn(_) { Ok(Increment) },
@@ -607,9 +609,11 @@ pub fn event_on_fragment_root_test() {
           "<button id=\"frag\" data-message=\"go\">+</button>"
         }),
       ])
-      |> event.on_decoded(event: event.click, selector: "#frag", decoder: fn(_) {
-        Ok(Increment)
-      })
+      |> event.on_global_decoded(
+        event: event.click,
+        selector: "#frag",
+        decoder: fn(_) { Ok(Increment) },
+      )
     })
   test_dom.click("#frag")
   client.get_current_model(runtime).count
@@ -629,7 +633,7 @@ pub fn event_pipe_order_event_then_require_connection_test() {
       component.static(fn(_) {
         "<button id=\"pipe-a\" data-message=\"go\">+</button>"
       })
-      |> event.on_decoded(
+      |> event.on_global_decoded(
         event: event.click,
         selector: "#pipe-a",
         decoder: fn(_) { Ok(Increment) },
@@ -654,7 +658,7 @@ pub fn event_pipe_order_require_connection_then_event_test() {
         "<button id=\"pipe-b\" data-message=\"go\">+</button>"
       })
       |> component.require_connection(fn(_) { True })
-      |> event.on_decoded(
+      |> event.on_global_decoded(
         event: event.click,
         selector: "#pipe-b",
         decoder: fn(_) { Ok(Increment) },
@@ -681,7 +685,7 @@ pub fn event_on_slot_child_of_live_test() {
         component.static(fn(_) {
           "<button id=\"slotted\" data-message=\"go\">+</button>"
         })
-        |> event.on_decoded(
+        |> event.on_global_decoded(
           event: event.click,
           selector: "#slotted",
           decoder: fn(_) { Ok(Increment) },
@@ -711,9 +715,11 @@ pub fn event_inside_each_live_initial_ignored_test() {
         key: fn(id: Int) { int.to_string(id) },
         initial: fn(_id) {
           component.static(fn(_) { "<button id=\"inner\">+</button>" })
-          |> event.on(event: event.click, selector: "#inner", handler: fn(_) {
-            Increment
-          })
+          |> event.on_global(
+            event: event.click,
+            selector: "#inner",
+            handler: fn(_) { Increment },
+          )
         },
         patch: fn(_) { [] },
       )
@@ -808,7 +814,7 @@ pub fn multi_mount_events_globally_delegated_test() {
       to_slot: to_slot,
       view: fn(_model) {
         component.static(fn(_) { "" })
-        |> event.on_decoded(
+        |> event.on_global_decoded(
           event: event.click,
           selector: "#global-btn",
           decoder: fn(_) { Ok(Increment) },
@@ -999,7 +1005,7 @@ pub fn transition_events_on_outer_wrapper_test() {
         exit: "fade-out",
         duration_milliseconds: 10,
       )
-      |> event.on_decoded(
+      |> event.on_global_decoded(
         event: event.click,
         selector: "#tx-btn",
         decoder: fn(_) { Ok(Increment) },

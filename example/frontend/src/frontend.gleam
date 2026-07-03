@@ -66,7 +66,10 @@ pub fn main() {
     case message {
       // A room message from someone else pops a notification; our own echoes
       // back to the input so typing keeps flowing.
-      shared.RoomMessage(room_id:, message: shared.SendMessage(body:, sender_id:)) ->
+      shared.RoomMessage(
+        room_id:,
+        message: shared.SendMessage(body:, sender_id:),
+      ) ->
         case sender_id == model.session.username {
           True -> event.focus(runtime, "#room-input")
           False ->
@@ -296,7 +299,7 @@ fn app(
       [SetAttribute(".app-root", "data-theme", theme)]
     },
   )
-  |> event.on_decoded(
+  |> event.on_global_decoded(
     event: event.click,
     selector: "#app",
     decoder: parse_click,
@@ -653,20 +656,22 @@ fn room_composer() -> component.Component(
     },
   )
   |> component.structural
-  |> event.on(event: event.input, selector: "#room-input", handler: fn(text) {
-    shared.Session(shared.UpdateDraft(text))
-  })
-  |> event.on_decoded(
+  |> event.on_global(
+    event: event.input,
+    selector: "#room-input",
+    handler: fn(text) { shared.Session(shared.UpdateDraft(text)) },
+  )
+  |> event.on_global_decoded(
     event: event.form_submit,
     selector: "#username-form",
     decoder: parse_username_submit,
   )
-  |> event.on_decoded(
+  |> event.on_global_decoded(
     event: event.form_submit,
     selector: "#join-room-form",
     decoder: parse_join_room,
   )
-  |> event.on_decoded(
+  |> event.on_global_decoded(
     event: event.form_submit,
     selector: "#room-form",
     decoder: parse_room_submit,

@@ -3,20 +3,25 @@
 //// [`Store`](./store.html#Store), so anything the user does on the page
 //// becomes a tidy little `Message` value somewhere downstream.
 ////
-//// The public API is two type-safe binders, [`on()`](#on) and
-//// [`on_decoded()`](#on_decoded), paired with one constant per DOM event
-//// (`event.click`, `event.mouse_down`, `event.key_down`, etc.). The
-//// constant fixes the payload type, so the compiler enforces that the
-//// handler matches. Bindings live on the [`Component`](./component.html#Component)
-//// they relate to and are registered once at
-//// [`component.mount()`](./component.html#mount).
+//// The public API is a pair of scoped binders, [`on()`](#on) and
+//// [`on_decoded()`](#on_decoded), their page-level counterparts
+//// [`on_global()`](#on_global) and [`on_global_decoded()`](#on_global_decoded),
+//// and one constant per DOM event (`event.click`, `event.mouse_down`,
+//// `event.key_down`, etc.). The constant fixes the payload type, so the
+//// compiler enforces that the handler matches. Bindings live on the
+//// [`Component`](./component.html#Component) they relate to and are registered
+//// once at [`component.mount()`](./component.html#mount).
 ////
-//// Selectors are standard CSS, matched globally via document-level event
-//// delegation. Locality is organisational, the framework does not scope
-//// matches to the component the binding is attached to. Patterns like
-//// `on(event.click, selector: "#app")` paired with `data-message` attributes
-//// keep working as you patch the DOM. Bindings declared inside
-//// [`each`](./component.html#each) and
+//// Locality is **behavioural**: [`on()`](#on) confines its listener to the
+//// component's own subtree, matched against the component's scope selector
+//// (its `id`, recorded with
+//// [`component.scoped`](./component.html#scoped)). To narrow, attach to a
+//// narrower component; to widen, attach to a wider ancestor. For listeners
+//// that belong to the page rather than to any one component (a `document`
+//// keydown, a `window` resize, a root `data-message` click decoder), use
+//// [`on_global()`](#on_global) with an explicit selector. Both still delegate
+//// from `document`, so a single registration keeps working as you patch the
+//// DOM. Bindings declared inside [`each`](./component.html#each) and
 //// [`each_live`](./component.html#each_live) item bodies are not collected,
 //// place them on the each/each_live wrapper or any static ancestor.
 ////
@@ -32,14 +37,15 @@
 ////       slice: fn(model: Model) { model.search },
 ////       render: fn(value, _) { html.input([attribute.value(value)]) },
 ////     )
-////     |> event.on(event: event.input, selector: "#search", handler: Search),
+////     |> component.scoped("#search")
+////     |> event.on(event: event.input, handler: Search),
 ////   ])
-////   |> event.on_decoded(
+////   |> event.on_global_decoded(
 ////     event: event.click,
 ////     selector: "#app",
 ////     decoder: parse_click,
 ////   )
-////   |> event.on(
+////   |> event.on_global(
 ////     event: event.key_down,
 ////     selector: "document",
 ////     handler: fn(ke) { KeyPressed(ke.key) },
@@ -76,9 +82,9 @@
 ////
 //// ```gleam
 //// component.simple(slice: ..., render: ...)
+//// |> component.scoped("#search")
 //// |> event.on_with_options(
 ////   event: event.input,
-////   selector: "#search",
 ////   options: event.options() |> event.debounce_milliseconds(200),
 ////   handler: Search,
 //// )
@@ -116,11 +122,8 @@
 //// }
 ////
 //// component.simple(slice: ..., render: ...)
-//// |> event.on_decoded(
-////   event: event.form_submit,
-////   selector: "#login-form",
-////   decoder: login_decoder,
-//// )
+//// |> component.scoped("#login-form")
+//// |> event.on_decoded(event: event.form_submit, decoder: login_decoder)
 //// ```
 ////
 //// Store the returned `Form(model)` in your application model on the error
@@ -141,7 +144,6 @@ import gleam/result
 
 @target(javascript)
 import lily/client.{type Runtime}
-@target(javascript)
 import lily/component.{type Component}
 import lily/internal/auto_codec
 
@@ -195,7 +197,7 @@ pub type KeyEvent {
   KeyEvent(key: String, ctrl: Bool, shift: Bool, alt: Bool, meta: Bool)
 }
 
-/// Axis a [`focus_group`](#focus_group) navigates with the arrow keys:
+/// Axis a [`arrow_group`](#arrow_group) navigates with the arrow keys:
 /// `Horizontal` listens to Left and Right, `Vertical` to Up and Down, and
 /// `Both` to all four.
 pub type Orientation {
@@ -277,49 +279,90 @@ pub fn focus(_runtime: Runtime(model, message), selector: String) -> Nil {
   setup_focus(selector)
 }
 
+@target(erlang)
+/// Erlang no-op twin of [`arrow_grid`](#arrow_grid): returns the component
+/// unchanged so shared views compile on the server, where focus groups never
+/// register (mount is JavaScript-only).
+pub fn arrow_grid(
+  component: Component(model, message, html),
+  items _items: String,
+  columns _columns: Int,
+  wrap _wrap: Bool,
+) -> Component(model, message, html) {
+  component
+}
+
 @target(javascript)
 /// Make a set of elements an arrow-navigable grid of `columns` columns (the
 /// roving-tabindex pattern in two dimensions). Left and right move focus by
 /// one cell, up and down by a full row. `wrap` decides whether moving past an
-/// edge loops around. Pair with [`release_focus_group`](#release_focus_group)
-/// to remove a transient grid.
-pub fn focus_grid(
-  _runtime: Runtime(model, message),
+/// edge loops around.
+///
+/// Pipe-friendly and scoped like [`on`](#on): `items` is a selector
+/// **relative to the component's scope** (its `id`), so `"[role=gridcell]"`
+/// composes to `#<id> [role=gridcell]`. The group registers at
+/// [`component.mount()`](./component.html#mount) and re-queries its items on
+/// every keypress, so items rendered later (an overlay opening) are picked
+/// up automatically.
+pub fn arrow_grid(
+  component: Component(model, message, html),
   items items: String,
   columns columns: Int,
   wrap wrap: Bool,
-) -> Nil {
-  setup_focus_grid(items, columns, wrap)
+) -> Component(model, message, html) {
+  let selector = compose_items(component, items)
+  component.attach_event(component, fn(_runtime) {
+    setup_focus_grid(selector, columns, wrap)
+  })
+}
+
+@target(erlang)
+/// Erlang no-op twin of [`arrow_group`](#arrow_group): returns the component
+/// unchanged so shared views compile on the server, where focus groups never
+/// register (mount is JavaScript-only).
+pub fn arrow_group(
+  component: Component(model, message, html),
+  items _items: String,
+  orientation _orientation: Orientation,
+  wrap _wrap: Bool,
+) -> Component(model, message, html) {
+  component
 }
 
 @target(javascript)
 /// Make a set of sibling elements a single arrow-navigable group (the
-/// "roving tabindex" accessibility pattern). `items` is a CSS selector for
-/// the navigable elements, for example `"#menu [role=menuitem]"`; while
-/// focus is on one of them, the arrow keys allowed by `orientation` (plus
-/// Home and End) move focus to the previous or next item. `wrap` decides
-/// whether moving past either end loops around.
+/// "roving tabindex" accessibility pattern). While focus is on one of them,
+/// the arrow keys allowed by `orientation` (plus Home and End) move focus to
+/// the previous or next item. `wrap` decides whether moving past either end
+/// loops around.
+///
+/// Pipe-friendly and scoped like [`on`](#on): `items` is a selector
+/// **relative to the component's scope** (its `id`), so `"[role=menuitem]"`
+/// composes to `#<id> [role=menuitem]`. The group registers at
+/// [`component.mount()`](./component.html#mount) and re-queries its items on
+/// every keypress, so a transient overlay's items are handled the moment it
+/// opens, with no per-open wiring.
 ///
 /// Unlike [`focus_trap`](#focus_trap), which is a stack with one active
 /// entry, several groups coexist; the active group on any keypress is the
-/// one whose `items` include the focused element. Focus moves with
+/// one whose items include the focused element. Focus moves with
 /// `element.focus()`, so the non-active items may carry `tabindex="-1"`
 /// (the usual roving-tabindex render) and still be reached by the arrows.
-///
-/// Pair with [`release_focus_group`](#release_focus_group) to remove a
-/// transient group (for example a menu) when it closes.
-pub fn focus_group(
-  _runtime: Runtime(model, message),
+pub fn arrow_group(
+  component: Component(model, message, html),
   items items: String,
   orientation orientation: Orientation,
   wrap wrap: Bool,
-) -> Nil {
+) -> Component(model, message, html) {
+  let selector = compose_items(component, items)
   let orientation_value = case orientation {
     Horizontal -> "horizontal"
     Vertical -> "vertical"
     Both -> "both"
   }
-  setup_focus_group(items, orientation_value, wrap)
+  component.attach_event(component, fn(_runtime) {
+    setup_focus_group(selector, orientation_value, wrap)
+  })
 }
 
 @target(javascript)
@@ -353,36 +396,33 @@ pub fn focus_trap(
 /// Bind an event handler to a component. The handler always dispatches a
 /// message; the `event` argument fixes the payload type so the handler
 /// signature is checked at compile time. The binding is registered during
-/// [`component.mount()`](./component.html#mount), and a single registration
-/// covers every DOM element matching `selector` via document-level
-/// delegation.
+/// [`component.mount()`](./component.html#mount).
 ///
-/// Selectors are global CSS selectors, not scoped to the component the
-/// binding is attached to. Locality is organisational, the framework does
-/// not constrain which elements the listener matches. Bindings declared
-/// inside [`each`](./component.html#each) and
-/// [`each_live`](./component.html#each_live) item bodies are ignored,
-/// attach them to the each/each_live wrapper or any static ancestor.
+/// The listener is **scoped to the component's own subtree**: it fires only
+/// for `event`s inside the element matched by the component's scope selector
+/// (its `id`, recorded via [`component.scoped`](./component.html#scoped)).
+/// To narrow, attach to a narrower component; to widen, attach to a
+/// wider ancestor. For page-level listeners (`document` keydown, `window`
+/// resize, a root `data-message` click decoder) use [`on_global`](#on_global).
+///
+/// A component with no scope still works: the binding falls back to a
+/// document-wide listener and a development warning nudges you to add an
+/// `id` (or call `component.scoped`). Bindings declared inside
+/// [`each`](./component.html#each) and
+/// [`each_live`](./component.html#each_live) item bodies are ignored, attach
+/// them to the each/each_live wrapper or any static ancestor.
 ///
 /// ```gleam
 /// component.simple(slice: ..., render: ...)
-/// |> event.on(event: event.input, selector: "#search", handler: Search)
-/// |> event.on(
-///   event: event.mouse_down,
-///   selector: ".card",
-///   handler: fn(payload) {
-///     let #(x, y, element) = payload
-///     Pressed(x, y, element)
-///   },
-/// )
+/// |> component.scoped("#search")
+/// |> event.on(event: event.input, handler: Search)
 /// ```
 pub fn on(
   component: Component(model, message, html),
   event event: Event(payload),
-  selector selector: String,
   handler handler: fn(payload) -> message,
 ) -> Component(model, message, html) {
-  on_with_options(component, event, selector, options(), handler)
+  on_with_options(component, event, options(), handler)
 }
 
 @target(javascript)
@@ -393,30 +433,97 @@ pub fn on(
 ///
 /// ```gleam
 /// component.fragment([...])
-/// |> event.on_decoded(
-///   event: event.click,
-///   selector: "#app",
-///   decoder: parse_click,
-/// )
-/// |> event.on_decoded(
-///   event: event.form_submit,
-///   selector: "#todo-form",
-///   decoder: submit_todo,
-/// )
+/// |> component.scoped("#todo-form")
+/// |> event.on_decoded(event: event.form_submit, decoder: submit_todo)
 /// ```
 pub fn on_decoded(
   component: Component(model, message, html),
   event event: Event(payload),
-  selector selector: String,
   decoder decoder: fn(payload) -> Result(message, Nil),
 ) -> Component(model, message, html) {
-  on_decoded_with_options(component, event, selector, options(), decoder)
+  on_decoded_with_options(component, event, options(), decoder)
 }
 
 @target(javascript)
 /// Like [`on_decoded`](#on_decoded) with an extra
 /// [`EventOptions`](#EventOptions) parameter. See [`options()`](#options).
 pub fn on_decoded_with_options(
+  component: Component(model, message, html),
+  event event: Event(payload),
+  options options: EventOptions,
+  decoder decoder: fn(payload) -> Result(message, Nil),
+) -> Component(model, message, html) {
+  let selector = resolve_scope(component)
+  let binding = fn(runtime: Runtime(model, message)) {
+    let dispatch = fn(payload: payload) {
+      case decoder(payload) {
+        Ok(message) -> client.send_message(runtime, message)
+        Error(Nil) -> Nil
+      }
+    }
+    register_event(event, selector, options, dispatch)
+  }
+  component.attach_event(component, binding)
+}
+
+@target(javascript)
+/// The page-level counterpart to [`on`](#on): bind a handler with an
+/// explicit, verbatim `selector` rather than scoping to the component's
+/// subtree. Use it for listeners that are genuinely tied to the page and
+/// not to any one component: `document` keydown, `window` resize, or the
+/// app-root `data-message` click decoder.
+///
+/// It still takes a `component` first so it composes into the view tree the
+/// same way (pipe it onto your root component); the component's scope is
+/// deliberately ignored, only the mount-time tree walk that collects the
+/// binding matters. `selector` is used exactly as given (`"document"`,
+/// `"window"`, or any CSS selector), so the listener survives arbitrary DOM
+/// churn.
+///
+/// ```gleam
+/// root
+/// |> event.on_global(
+///   event: event.key_down,
+///   selector: "document",
+///   handler: fn(ke) { KeyPressed(ke.key) },
+/// )
+/// ```
+pub fn on_global(
+  component: Component(model, message, html),
+  event event: Event(payload),
+  selector selector: String,
+  handler handler: fn(payload) -> message,
+) -> Component(model, message, html) {
+  on_global_with_options(component, event, selector, options(), handler)
+}
+
+@target(javascript)
+/// The [`on_decoded`](#on_decoded) counterpart to [`on_global`](#on_global):
+/// a page-level binding whose decoder may decline with `Error(Nil)`. The
+/// canonical use is the app-root click decoder that recovers every
+/// `data-message` dispatch.
+///
+/// ```gleam
+/// root
+/// |> event.on_global_decoded(
+///   event: event.click,
+///   selector: ".lily-ui-root",
+///   decoder: event.decode_message,
+/// )
+/// ```
+pub fn on_global_decoded(
+  component: Component(model, message, html),
+  event event: Event(payload),
+  selector selector: String,
+  decoder decoder: fn(payload) -> Result(message, Nil),
+) -> Component(model, message, html) {
+  on_global_decoded_with_options(component, event, selector, options(), decoder)
+}
+
+@target(javascript)
+/// Like [`on_global_decoded`](#on_global_decoded) with an extra
+/// [`EventOptions`](#EventOptions) parameter. See [`options()`](#options).
+pub fn on_global_decoded_with_options(
   component: Component(model, message, html),
   event event: Event(payload),
   selector selector: String,
@@ -436,14 +543,33 @@ pub fn on_decoded_with_options(
 }
 
 @target(javascript)
+/// Like [`on_global`](#on_global) with an extra
+/// [`EventOptions`](#EventOptions) parameter. See [`options()`](#options).
+pub fn on_global_with_options(
+  component: Component(model, message, html),
+  event event: Event(payload),
+  selector selector: String,
+  options options: EventOptions,
+  handler handler: fn(payload) -> message,
+) -> Component(model, message, html) {
+  let binding = fn(runtime: Runtime(model, message)) {
+    let dispatch = fn(payload: payload) {
+      client.send_message(runtime, handler(payload))
+    }
+    register_event(event, selector, options, dispatch)
+  }
+  component.attach_event(component, binding)
+}
+
+@target(javascript)
 /// Like [`on`](#on) with an extra [`EventOptions`](#EventOptions)
 /// parameter. See [`options()`](#options).
 ///
 /// ```gleam
 /// component.simple(slice: ..., render: ...)
+/// |> component.scoped("#search")
 /// |> event.on_with_options(
 ///   event: event.input,
-///   selector: "#search",
 ///   options: event.options() |> event.debounce_milliseconds(200),
 ///   handler: Search,
 /// )
@@ -451,10 +577,10 @@ pub fn on_decoded_with_options(
 pub fn on_with_options(
   component: Component(model, message, html),
   event event: Event(payload),
-  selector selector: String,
   options options: EventOptions,
   handler handler: fn(payload) -> message,
 ) -> Component(model, message, html) {
+  let selector = resolve_scope(component)
   let binding = fn(runtime: Runtime(model, message)) {
     let dispatch = fn(payload: payload) {
       client.send_message(runtime, handler(payload))
@@ -495,11 +621,11 @@ pub fn prevent_default(options: EventOptions) -> EventOptions {
 }
 
 @target(javascript)
-/// Remove a focus group registered with [`focus_group`](#focus_group),
+/// Remove a focus group registered with [`arrow_group`](#arrow_group),
 /// matched by the same `items` selector. No-op if no such group is
 /// registered. Call when a transient group (a menu, say) closes; persistent
 /// groups (a radio group always on the page) need never release.
-pub fn release_focus_group(
+pub fn release_arrow_group(
   _runtime: Runtime(model, message),
   items items: String,
 ) -> Nil {
@@ -804,6 +930,20 @@ type EventType {
 // =============================================================================
 
 @target(javascript)
+fn compose_items(
+  component: Component(model, message, html),
+  items: String,
+) -> String {
+  // `items` is relative to the component's scope, so an arrow group declares
+  // `[role=menuitem]` and it resolves against `#<id>`. A scopeless component
+  // falls back to treating `items` as an absolute selector.
+  case component.scope(component) {
+    option.Some(scope) -> scope <> " " <> items
+    option.None -> items
+  }
+}
+
+@target(javascript)
 fn register_event(
   event: Event(payload),
   selector: String,
@@ -912,6 +1052,20 @@ fn register_event(
       setup_wheel_event_with_options(selector, unpacked, fn(delta_x, delta_y) {
         typed(#(delta_x, delta_y))
       })
+    }
+  }
+}
+
+@target(javascript)
+fn resolve_scope(component: Component(model, message, html)) -> String {
+  // Scoped binders confine the listener to the component's own subtree. A
+  // scopeless component still works via a document-wide fallback, but that is
+  // the old global footgun, so warn to nudge an `id` / `component.scoped`.
+  case component.scope(component) {
+    option.Some(selector) -> selector
+    option.None -> {
+      warn_scopeless()
+      "document"
     }
   }
 }
@@ -1080,3 +1234,7 @@ fn watch_file_drops_ffi() -> Nil
 @target(javascript)
 @external(javascript, "./event.ffi.mjs", "watchFocusTraps")
 fn watch_focus_traps_ffi() -> Nil
+
+@target(javascript)
+@external(javascript, "./event.ffi.mjs", "warnScopeless")
+fn warn_scopeless() -> Nil

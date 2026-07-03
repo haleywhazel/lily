@@ -1,20 +1,18 @@
-//// Erlang has a perfectly good [`logging`](https://hex.pm/packages/logging)
-//// package, JavaScript does not.
+//// Logging that reads the same on both runtimes. Erlang already has a solid
+//// [`logging`](https://hex.pm/packages/logging) package (the same one `mist`
+//// and `wisp` log through), JavaScript has the `console`, and Lily runs on
+//// both, so this module papers over the gap and hands you one API that
+//// behaves identically whether you're on the BEAM or in a browser or Node.
 ////
-//// Lily runs on both runtimes, so this module creates a wrapper over the
-//// available Erlang one while (through FFI) also does the JS one.
+//// On Erlang it's a thin wrapper over that `logging` package, so your lines
+//// blend in with the framework's own output. On JavaScript they go to
+//// `console.error` / `console.warn` / `console.info` / `console.debug` by
+//// level, wearing the same colour palette the Erlang package uses so the two
+//// look the same side by side.
 ////
-//// On Erlang, this is a thin wrapper around the `logging` hex package
-//// (the same logger used by `mist` and `wisp`), so Lily log lines blend
-//// in with framework logs.
-////
-//// On JavaScript, log lines go to `console.error` / `console.warn` /
-//// `console.info` / `console.debug` by level, with the same colour palette
-//// the Erlang package uses for consistency.
-////
-//// On Erlang, `configure` installs the `logging` package's formatter and
-//// `set_level` sets the minimum level. On JavaScript, `configure` is a no-op
-//// and `set_level` maintains a programmatic level filter.
+//// Call [`configure`](#configure) once at startup, optionally pick a minimum
+//// level with [`set_level`](#set_level) (anything below it is dropped), then
+//// log with the level shortcuts:
 ////
 //// ```gleam
 //// import lily/logging
@@ -22,12 +20,21 @@
 //// pub fn main() {
 ////   logging.configure()
 ////   logging.set_level(logging.Info)
+////
 ////   logging.info("server ready")
-////   // Logs `INFO SomeMessage("hello")`:
-////   logging.auto_info(SomeMessage("hello"))
+////   logging.warning("cache miss")
+////   logging.error("payment gateway timed out")
+////   logging.debug("dropped while the level is Info")
 //// }
 //// ```
+////
+//// From there, [`auto_info`](#auto_info) and its siblings log any value with
+//// `string.inspect` (and skip the work when the level is suppressed), and
+//// [`request`](#request) prints one compact line per HTTP request from a
+//// [`RequestLog`](#RequestLog).
 
+import gleam/int
+import gleam/option
 import gleam/string
 @target(erlang)
 import logging as erlang_logging
@@ -47,6 +54,26 @@ pub type Level {
   Info
   Notice
   Warning
+}
+
+/// A single HTTP request to log. The four core fields are always present; the
+/// rest are `option.None` until the transport fills them in. Build one with
+/// [`request_log()`](#request_log) and emit it with [`request()`](#request).
+///
+/// Request and response bodies are deliberately absent: logging them risks
+/// leaking passwords, tokens, and other GDPR-protected data, so the transport
+/// should never put them here.
+pub type RequestLog {
+  RequestLog(
+    method: String,
+    path: String,
+    status: Int,
+    duration_milliseconds: Int,
+    bytes: option.Option(Int),
+    remote_ip: option.Option(String),
+    request_id: option.Option(String),
+    user_agent: option.Option(String),
+  )
 }
 
 // =============================================================================
@@ -77,7 +104,7 @@ pub fn auto_error(value: a) -> Nil {
 /// This is probably used the most.
 ///
 /// ```gleam
-/// server.on_message(srv, fn(message, _model, _client_id) {
+/// server.on_message(server, fn(message, _model, _client_id) {
 ///   logging.auto_info(message)  // e.g. logs "INFO AddTodo(\"milk\")"
 /// })
 /// ```
@@ -129,6 +156,57 @@ pub fn is_enabled(level: Level) -> Bool {
 /// Log a message at the given level.
 pub fn log(level: Level, message: String) -> Nil {
   do_log(level, message)
+}
+
+/// Emit a compact request log line through the same sink as the other helpers,
+/// so it inherits the level tag and colour. The level is derived from the
+/// status (5xx is `Error`, 4xx is `Warning`, everything else `Info`), so a
+/// failing route stands out by colour. Suppressed levels short-circuit before
+/// the line is built.
+///
+/// ```gleam
+/// logging.request_log(
+///   method: "GET",
+///   path: "/controls",
+///   status: 200,
+///   duration_milliseconds: 12,
+/// )
+/// |> logging.request
+/// // Logs `INFO GET /controls 200 in 12ms`
+/// ```
+pub fn request(entry: RequestLog) -> Nil {
+  let level = level_for_status(entry.status)
+  case is_enabled(level) {
+    False -> Nil
+    True -> do_log(level, request_pretty(entry))
+  }
+}
+
+/// Build a [`RequestLog`](#RequestLog) from the four fields every transport
+/// can supply, leaving the optional fields (`bytes`, `remote_ip`,
+/// `request_id`, `user_agent`) as `option.None`. Set the extras with a record
+/// update where the transport has them.
+///
+/// ```gleam
+/// logging.request_log(method: "GET", path: "/", status: 200, duration_milliseconds: 3)
+/// |> fn(entry) { logging.RequestLog(..entry, request_id: option.Some(id)) }
+/// ```
+pub fn request_log(
+  method method: String,
+  path path: String,
+  status status: Int,
+  duration_milliseconds duration_milliseconds: Int,
+) -> RequestLog {
+  RequestLog(
+    method:,
+    path:,
+    status:,
+    duration_milliseconds:,
+    bytes: option.None,
+    remote_ip: option.None,
+    request_id: option.None,
+    user_agent: option.None,
+  )
 }
 
 /// Set the minimum level of log messages to emit. Messages below this level
@@ -190,6 +268,14 @@ fn do_set_level(level: Level) -> Nil {
   ffi_set_level(level_severity(level))
 }
 
+fn level_for_status(status: Int) -> Level {
+  case status {
+    status if status >= 500 -> Error
+    status if status >= 400 -> Warning
+    _ -> Info
+  }
+}
+
 @target(javascript)
 fn level_severity(level: Level) -> Int {
   case level {
@@ -201,6 +287,22 @@ fn level_severity(level: Level) -> Int {
     Notice -> 5
     Info -> 6
     Debug -> 7
+  }
+}
+
+fn request_pretty(entry: RequestLog) -> String {
+  let line =
+    entry.method
+    <> " "
+    <> entry.path
+    <> " "
+    <> int.to_string(entry.status)
+    <> " in "
+    <> int.to_string(entry.duration_milliseconds)
+    <> "ms"
+  case entry.request_id {
+    option.Some(id) -> line <> " #" <> id
+    option.None -> line
   }
 }
 

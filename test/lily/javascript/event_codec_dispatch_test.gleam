@@ -62,7 +62,7 @@ pub fn slotted_encoded_message_dispatches_via_root_decoder_test() {
       component.simple(slice: fn(_) { Nil }, render: fn(_, slot) {
         "<div>" <> slot(encoded_child()) <> "</div>"
       })
-      |> event.on_decoded(
+      |> event.on_global_decoded(
         event: event.click,
         selector: "#app",
         decoder: event.decode_message,
@@ -99,7 +99,7 @@ pub fn slotted_value_carrying_message_dispatches_via_root_decoder_test() {
       component.simple(slice: fn(_) { Nil }, render: fn(_, slot) {
         "<div>" <> slot(child) <> "</div>"
       })
-      |> event.on_decoded(
+      |> event.on_global_decoded(
         event: event.click,
         selector: "#app",
         decoder: event.decode_message,

@@ -708,6 +708,13 @@ function renderSimple(handle, component, model, toHtml, toSlot) {
       cachedElement.innerHTML = html;
       // Run child handlers after innerHTML is set so their selectors find DOM
       runChildHandlers(handle, newChildIds, model);
+      // Drain the bindings queued while re-rendering the slot children above.
+      // Mount drains once in renderTree, but a re-render (e.g. a route change)
+      // rebuilds these children, so their co-located `event.on*` bindings must
+      // re-register here. Registration is idempotent (replace by event +
+      // selector), so a binding that was already live is swapped for its fresh
+      // closure rather than stacked, and one that first appears now attaches.
+      handle.drainBindings();
     }
   });
 

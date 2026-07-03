@@ -1,11 +1,49 @@
 //// The [`Store`](#Store) holds your application state and update logic,
-//// shared across client and server. The [`Wiring`](#Wiring) tells the
-//// runtime how to dispatch messages to the right store slice and how to
-//// merge incoming snapshots from the server.
+//// shared across client and server. The mental model is very simple, each
+//// store holds a basic model type and an update function
+//// `fn(model, message) -> model`. The store is agnostic to how your frontend
+//// actually displays these components, with the view function or rendering
+//// completely detached (unlike Lustre and closer to Redux).
 ////
-//// Build a `Wiring` in your `shared` package and import it in both the
-//// client (passed to [`client.start`](./client.html#start)) and the server
-//// (passed to [`server.new`](./server.html#new)):
+//// Here's a minimal example of a counter:
+////
+//// ```gleam
+//// pub type Model {
+////   Model(count: Int)
+//// }
+////
+//// pub type Message {
+////   Increment
+////   Decrement
+//// }
+////
+//// pub fn update(model: Model, message: Message) -> Model {
+////   case message {
+////     Increment -> Model(count: model.count + 1)
+////     Decrement -> Model(count: model.count - 1)
+////   }
+//// }
+////
+//// // this should be in your client/frontend code
+//// let store = store.new(Model(count: 0), with: update)
+//// ```
+////
+//// You wrap it with `store.new` on the client and pipe the result into
+//// [`client.start`](./client.html#start).
+////
+//// The server is then set up separately via [`server.new`](./server.html#new),
+//// where [`Wiring`](#Wiring) comes into play. Syncing your model with the
+//// server splits your model into a per-connection `session` slice and then
+//// shared `topic` slices (see the [topic](./topic.html) module for more info).
+//// For each message, the wiring allows us to figure out which message belongs
+//// where (through `extract`), how the slice should update (`update`), and how
+//// to read and write the slice on the outer model (`field_get`/`field_set`).
+//// It also merges server snapshots back into the right slice.
+//// server snapshots back into the right slice.
+////
+//// Build one `Wiring` in your `shared` package and hand the same value to
+//// both the client (passed to [`client.start`](./client.html#start)) and the
+//// server (passed to [`server.new`](./server.html#new)):
 ////
 //// ```gleam
 //// import lily/store
@@ -35,6 +73,7 @@
 ////     field_get: fn(model: Model) { model.chat },
 ////     field_set: fn(model, chat) { Model(..model, chat:) },
 ////   )
+////   // you can chain more topics by determining a different topic id
 //// }
 //// ```
 ////

@@ -72,15 +72,24 @@ export function setupClickEventWithOptions(selector, options, handler) {
     stopPropagation,
   );
   if (preventDefault) listener = preventDefaultFirst(listener);
-  document.addEventListener("click", listener);
+  registerDelegatedListener(
+    "click\x1f" + selector,
+    document,
+    "click",
+    false,
+    listener,
+  );
 }
 
 /**
- * Attaches a coordinate event with x,y position, the matched element's
- * data-* attributes, and options. preventDefault is hoisted outside
- * debounce/throttle so drop targets stay receptive even when the inner
- * handler is suppressed. Uses event delegation via document so it works on
- * dynamically-rendered lists.
+ * Attaches a coordinate event with x,y position, the concrete target's
+ * data-* attributes, and options. The selector is the match gate (the event
+ * must happen within it); the ElementData is read from event.target, the
+ * concrete element that fired, so a scoped listener on `#<id>` still
+ * distinguishes the sub-element the user acted on. preventDefault is hoisted
+ * outside debounce/throttle so drop targets stay receptive even when the
+ * inner handler is suppressed. Uses event delegation via document so it works
+ * on dynamically-rendered lists.
  */
 export function setupCoordinateElementEventWithOptions(
   selector,
@@ -92,13 +101,12 @@ export function setupCoordinateElementEventWithOptions(
   const [debounceMs, throttleMs, once, stopPropagation, preventDefault] =
     options;
   let listener = (event) => {
+    if (!matchesSelectorScope(event, selector)) return;
     if (event.target.closest("[data-lily-disabled]")) return;
-    const matched = event.target.closest(selector);
-    if (!matched) return;
     handler(
       event.clientX,
       event.clientY,
-      makeElementData(datasetToList(matched)),
+      makeElementData(datasetToList(event.target)),
     );
   };
   listener = applyOptions(
@@ -109,7 +117,13 @@ export function setupCoordinateElementEventWithOptions(
     stopPropagation,
   );
   if (preventDefault) listener = preventDefaultFirst(listener);
-  document.addEventListener(eventName, listener);
+  registerDelegatedListener(
+    "coordel\x1f" + eventName + "\x1f" + selector,
+    document,
+    eventName,
+    false,
+    listener,
+  );
 }
 
 /**
@@ -137,7 +151,13 @@ export function setupCoordinateEventWithOptions(
     stopPropagation,
   );
   if (preventDefault) listener = preventDefaultFirst(listener);
-  delegationRoot(selector).addEventListener(eventName, listener);
+  registerDelegatedListener(
+    "coord\x1f" + eventName + "\x1f" + selector,
+    delegationRoot(selector),
+    eventName,
+    false,
+    listener,
+  );
 }
 
 /**
@@ -157,9 +177,9 @@ export function setupElementEventWithOptions(
     options;
   const domEvent = delegatedEventName(eventName);
   let listener = (event) => {
+    if (!matchesSelectorScope(event, selector)) return;
     if (event.target.closest("[data-lily-disabled]")) return;
-    const matched = event.target.closest(selector);
-    if (!matched) return;
+    const matched = event.target;
     if (shouldSkipDelegatedEvent(eventName, matched, event.relatedTarget))
       return;
     handler(makeElementData(datasetToList(matched)));
@@ -172,7 +192,13 @@ export function setupElementEventWithOptions(
     stopPropagation,
   );
   if (preventDefault) listener = preventDefaultFirst(listener);
-  document.addEventListener(domEvent, listener);
+  registerDelegatedListener(
+    "el\x1f" + eventName + "\x1f" + selector,
+    document,
+    domEvent,
+    false,
+    listener,
+  );
 }
 
 /** Move focus to the first match of selector after the next paint. */
@@ -234,11 +260,9 @@ export function setupFormChangeEventWithOptions(selector, options, handler) {
   const [debounceMs, throttleMs, once, stopPropagation, preventDefault] =
     options;
   let listener = (event) => {
-    if (event.target.closest("[data-lily-disabled]")) return;
-    const matched = event.target.closest(selector);
-    if (!matched) return;
-    const form =
-      matched instanceof HTMLFormElement ? matched : matched.closest("form");
+    if (!matchesSelectorScope(event, selector)) return;
+    if (event.target.closest?.("[data-lily-disabled]")) return;
+    const form = event.target.closest?.("form");
     if (!(form instanceof HTMLFormElement)) return;
     handler(formDataToList(form));
   };
@@ -250,7 +274,13 @@ export function setupFormChangeEventWithOptions(selector, options, handler) {
     stopPropagation,
   );
   if (preventDefault) listener = preventDefaultFirst(listener);
-  document.addEventListener("input", listener);
+  registerDelegatedListener(
+    "formchange\x1f" + selector,
+    document,
+    "input",
+    false,
+    listener,
+  );
 }
 
 /**
@@ -267,9 +297,8 @@ export function setupKeyFullEventWithOptions(
   const [debounceMs, throttleMs, once, stopPropagation, preventDefault] =
     options;
   let listener = (event) => {
-    if (event.target.closest("[data-lily-disabled]")) return;
-    const matched = event.target.closest(selector);
-    if (!matched) return;
+    if (!matchesSelectorScope(event, selector)) return;
+    if (event.target.closest?.("[data-lily-disabled]")) return;
     handler(
       makeKeyEvent(
         event.key,
@@ -288,7 +317,13 @@ export function setupKeyFullEventWithOptions(
     stopPropagation,
   );
   if (preventDefault) listener = preventDefaultFirst(listener);
-  document.addEventListener(eventName, listener);
+  registerDelegatedListener(
+    "key\x1f" + eventName + "\x1f" + selector,
+    document,
+    eventName,
+    false,
+    listener,
+  );
 }
 
 /**
@@ -318,7 +353,13 @@ export function setupScrollPositionEventWithOptions(
     stopPropagation,
   );
   if (preventDefault) listener = preventDefaultFirst(listener);
-  delegationRoot(selector).addEventListener("scroll", listener, true);
+  registerDelegatedListener(
+    "scroll\x1f" + selector,
+    delegationRoot(selector),
+    "scroll",
+    true,
+    listener,
+  );
 }
 
 /** Attaches a simple event with no event data, with options */
@@ -343,7 +384,13 @@ export function setupSimpleEventWithOptions(
     stopPropagation,
   );
   if (preventDefault) listener = preventDefaultFirst(listener);
-  delegationRoot(selector).addEventListener(eventName, listener);
+  registerDelegatedListener(
+    "simple\x1f" + eventName + "\x1f" + selector,
+    delegationRoot(selector),
+    eventName,
+    false,
+    listener,
+  );
 }
 
 /**
@@ -356,7 +403,8 @@ export function setupSimpleEventWithOptions(
 export function setupSubmitFormEventWithOptions(selector, options, handler) {
   const [debounceMs, throttleMs, once, stopPropagation] = options;
   let listener = (event) => {
-    const form = event.target.closest(selector);
+    if (!matchesSelectorScope(event, selector)) return;
+    const form = event.target.closest?.("form");
     if (!(form instanceof HTMLFormElement)) return;
     if (form.closest("[data-lily-disabled]")) return;
     handler(formDataToList(form));
@@ -378,7 +426,13 @@ export function setupSubmitFormEventWithOptions(selector, options, handler) {
     event.preventDefault();
     inner(event);
   };
-  document.addEventListener("submit", listener);
+  registerDelegatedListener(
+    "formsubmit\x1f" + selector,
+    document,
+    "submit",
+    false,
+    listener,
+  );
 }
 
 /** Attaches an input/change event with input value, with options */
@@ -403,7 +457,13 @@ export function setupValueEventWithOptions(
     stopPropagation,
   );
   if (preventDefault) listener = preventDefaultFirst(listener);
-  document.addEventListener(eventName, listener);
+  registerDelegatedListener(
+    "value\x1f" + eventName + "\x1f" + selector,
+    document,
+    eventName,
+    false,
+    listener,
+  );
 }
 
 /** Attaches a wheel event with deltaX and deltaY values, with options */
@@ -423,7 +483,28 @@ export function setupWheelEventWithOptions(selector, options, handler) {
     stopPropagation,
   );
   if (preventDefault) listener = preventDefaultFirst(listener);
-  document.addEventListener("wheel", listener);
+  registerDelegatedListener(
+    "wheel\x1f" + selector,
+    document,
+    "wheel",
+    false,
+    listener,
+  );
+}
+
+/**
+ * Warn that an `event.on*` binding was attached to a component with no scope,
+ * so it fell back to a document-wide listener. Nudges the author to give the
+ * component an `id` (or call `component.scoped`) so the listener is confined
+ * to its own subtree.
+ */
+export function warnScopeless() {
+  console.warn(
+    "lily/event: on* was attached to a component with no scope; the listener " +
+      "falls back to document-wide matching. Give the component an id (or call " +
+      "component.scoped) to confine it, or use on_global for a deliberate " +
+      "page-level listener.",
+  );
 }
 
 /**
@@ -872,6 +953,30 @@ function preventDefaultFirst(listener) {
 }
 
 /**
+ * Register a delegated listener, replacing any prior one with the same key.
+ *
+ * `key` identifies the binding by its event semantics and selector (not the
+ * closure), so re-registering the same logical binding, which happens every
+ * time a component re-renders and its bindings drain again, swaps the stale
+ * listener for the fresh one instead of stacking a second. This keeps exactly
+ * one live listener per (event, selector): co-located events survive
+ * navigation without accumulating duplicate dispatches. Distinct events or
+ * selectors get distinct keys and coexist.
+ */
+function registerDelegatedListener(key, target, domEvent, capture, listener) {
+  const existing = delegatedListeners.get(key);
+  if (existing) {
+    existing.target.removeEventListener(
+      existing.domEvent,
+      existing.listener,
+      existing.capture,
+    );
+  }
+  target.addEventListener(domEvent, listener, capture);
+  delegatedListeners.set(key, { target, domEvent, listener, capture });
+}
+
+/**
  * Remove a specific trap by identity (it need not be the top, and may have
  * already been popped). Idempotent. Used by the focus-trap observer, whose
  * traps release either by the exit key (popped from the top) or by their
@@ -926,6 +1031,11 @@ function uninstallTrapKeydownHandler() {
 // =============================================================================
 
 const declaredTraps = new Map();
+
+// One live delegated listener per binding key (see registerDelegatedListener).
+// Keyed by event semantics + selector so a re-registered binding replaces its
+// predecessor rather than stacking; distinct events/selectors coexist.
+const delegatedListeners = new Map();
 
 // Standard focusable-elements selector, used by setupFocusTrap to enumerate
 // Tab stops inside a container.

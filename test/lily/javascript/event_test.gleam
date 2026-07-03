@@ -60,7 +60,7 @@ pub fn event_on_click_disabled_ignored_test() {
     "<div data-lily-disabled=\"true\"><button data-message=\"increment\">+</button></div>",
   )
   mount_event(runtime, fn(component) {
-    event.on_decoded(
+    event.on_global_decoded(
       component,
       event: event.click,
       selector: "#app",
@@ -81,7 +81,7 @@ pub fn event_on_click_with_data_message_test() {
     "<button data-message=\"increment\">+</button>",
   )
   mount_event(runtime, fn(component) {
-    event.on_decoded(
+    event.on_global_decoded(
       component,
       event: event.click,
       selector: "#app",
@@ -104,7 +104,7 @@ pub fn event_on_click_without_data_message_ignored_test() {
   let runtime = new_runtime()
   test_dom.set_inner_html("#app", "<button id=\"no-msg\">+</button>")
   mount_event(runtime, fn(component) {
-    event.on_decoded(
+    event.on_global_decoded(
       component,
       event: event.click,
       selector: "#app",
@@ -198,7 +198,7 @@ pub fn event_on_change_extracts_value_test() {
   let runtime = new_runtime()
   test_dom.set_inner_html("#app", "<input id=\"name-ch\" />")
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.change,
       selector: "#name-ch",
@@ -216,7 +216,7 @@ pub fn event_on_input_extracts_value_test() {
   let runtime = new_runtime()
   test_dom.set_inner_html("#app", "<input id=\"name-in\" />")
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.input,
       selector: "#name-in",
@@ -226,6 +226,126 @@ pub fn event_on_input_extracts_value_test() {
   test_dom.input_event("#name-in", "Alice")
   client.get_current_model(runtime).name
   |> should.equal("Alice")
+}
+
+// =============================================================================
+// COMPONENT SCOPING
+// =============================================================================
+
+@target(javascript)
+pub fn event_duplicate_registration_replaces_not_stacks_test() {
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  test_dom.set_inner_html(
+    "#app",
+    "<button data-message=\"increment\">+</button>",
+  )
+  // Registering the same (event, selector) binding twice, as a re-render does,
+  // must leave one live listener, not two.
+  let attach = fn(component) {
+    event.on_global_decoded(
+      component,
+      event: event.click,
+      selector: "#app",
+      decoder: fn(name) {
+        case name {
+          "increment" -> Ok(Increment)
+          _ -> Error(Nil)
+        }
+      },
+    )
+  }
+  mount_event(runtime, attach)
+  mount_event(runtime, attach)
+  test_dom.click("[data-message=\"increment\"]")
+  // One listener, so one dispatch: count is 1, not 2.
+  client.get_current_model(runtime).count
+  |> should.equal(1)
+}
+
+@target(javascript)
+pub fn event_binding_registers_when_it_appears_on_rerender_test() {
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  // The scoped field is absent at mount and only appears once `count` becomes
+  // non-zero, so its binding must register on the re-render, not just at mount.
+  let _ =
+    component.mount(
+      runtime,
+      selector: "#app",
+      to_html: fn(html) { html },
+      to_slot: fn() { "<lily-slot></lily-slot>" },
+      view: fn(_model) {
+        component.simple(
+          slice: fn(m: Model) { m.count },
+          render: fn(count, slot) {
+            case count {
+              0 -> "<div id=\"host\"></div>"
+              _ ->
+                "<div id=\"host\">"
+                <> slot(
+                  component.static(fn(_) { "<input id=\"late-field\" />" })
+                  |> component.scoped("#late-field")
+                  |> event.on(event: event.input, handler: SetName),
+                )
+                <> "</div>"
+            }
+          },
+        )
+      },
+    )
+  // Force the re-render that first renders the scoped field.
+  client.dispatch(runtime)(Increment)
+  test_dom.input_event("#late-field", "typed")
+  client.get_current_model(runtime).name
+  |> should.equal("typed")
+}
+
+@target(javascript)
+pub fn event_arrow_group_scopes_items_to_component_test() {
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  mount_focus_group_dom()
+  // Relative items compose against the component's scope: `button` under
+  // `#g` becomes `#g button`.
+  mount_event(runtime, fn(component) {
+    component
+    |> component.scoped("#g")
+    |> event.arrow_group(
+      items: "button",
+      orientation: event.Vertical,
+      wrap: True,
+    )
+  })
+  test_dom.focus("#i1")
+  test_dom.key_event("#g", "keydown", "ArrowDown")
+  test_dom.active_element_id()
+  |> should.equal("i2")
+  event.release_arrow_group(runtime, "#g button")
+}
+
+@target(javascript)
+pub fn event_on_scoped_fires_only_within_scope_test() {
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  test_dom.set_inner_html(
+    "#app",
+    "<div id=\"scope-in\"><input id=\"inner-field\" /></div>"
+      <> "<input id=\"outer-field\" />",
+  )
+  mount_event(runtime, fn(component) {
+    component
+    |> component.scoped("#scope-in")
+    |> event.on(event: event.input, handler: SetName)
+  })
+  // An input inside the scope dispatches.
+  test_dom.input_event("#inner-field", "Inside")
+  client.get_current_model(runtime).name
+  |> should.equal("Inside")
+  // An input outside the scope is ignored: the model keeps the last value.
+  test_dom.input_event("#outer-field", "Outside")
+  client.get_current_model(runtime).name
+  |> should.equal("Inside")
 }
 
 // =============================================================================
@@ -239,7 +359,7 @@ pub fn event_on_key_down_extracts_key_test() {
   test_dom.set_inner_html("#app", "<div id=\"key-tgt\" tabindex=\"0\"></div>")
   let captured = test_ref.new("")
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.key_down,
       selector: "#key-tgt",
@@ -261,7 +381,7 @@ pub fn event_on_key_up_extracts_key_test() {
   test_dom.set_inner_html("#app", "<div id=\"key-up\" tabindex=\"0\"></div>")
   let captured = test_ref.new("")
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.key_up,
       selector: "#key-up",
@@ -286,7 +406,7 @@ pub fn event_on_blur_fires_test() {
   let runtime = new_runtime()
   test_dom.set_inner_html("#app", "<input id=\"blur-in\" />")
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.blur,
       selector: "#blur-in",
@@ -304,7 +424,7 @@ pub fn event_on_submit_fires_test() {
   let runtime = new_runtime()
   test_dom.set_inner_html("#app", "<form id=\"test-form\"></form>")
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.submit,
       selector: "#test-form",
@@ -328,7 +448,7 @@ pub fn event_on_mouse_down_extracts_coordinates_test() {
   let x_ref = test_ref.new(0)
   let y_ref = test_ref.new(0)
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.mouse_down,
       selector: "#coord-tgt",
@@ -354,7 +474,7 @@ pub fn event_on_pointer_move_extracts_coordinates_test() {
   test_dom.set_inner_html("#app", "<div id=\"ptr-tgt\"></div>")
   let x_ref = test_ref.new(0)
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.pointer_move,
       selector: "#ptr-tgt",
@@ -382,7 +502,7 @@ pub fn event_on_wheel_extracts_deltas_test() {
   let dx_ref = test_ref.new(0.0)
   let dy_ref = test_ref.new(0.0)
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.wheel,
       selector: "#wheel-tgt",
@@ -415,7 +535,7 @@ pub fn event_on_form_submit_passes_fields_test() {
   )
   let captured = test_ref.new("")
   mount_event(runtime, fn(component) {
-    event.on_decoded(
+    event.on_global_decoded(
       component,
       event: event.form_submit,
       selector: "#sub-form",
@@ -450,7 +570,7 @@ pub fn event_on_form_change_fires_on_input_test() {
   )
   let fired = test_ref.new(False)
   mount_event(runtime, fn(component) {
-    event.on_decoded(
+    event.on_global_decoded(
       component,
       event: event.form_change,
       selector: "#chg-form",
@@ -475,7 +595,7 @@ pub fn event_on_form_change_passes_fields_test() {
   )
   let captured = test_ref.new("")
   mount_event(runtime, fn(component) {
-    event.on_decoded(
+    event.on_global_decoded(
       component,
       event: event.form_change,
       selector: "#chg2-form",
@@ -508,7 +628,7 @@ pub fn event_on_click_with_once_fires_only_once_test() {
     "<button data-message=\"increment\">+</button>",
   )
   mount_event(runtime, fn(component) {
-    event.on_decoded_with_options(
+    event.on_global_decoded_with_options(
       component,
       event: event.click,
       selector: "#app",
@@ -537,7 +657,7 @@ pub fn event_on_click_with_stop_propagation_blocks_parent_test() {
   )
   mount_event(runtime, fn(component) {
     component
-    |> event.on_decoded_with_options(
+    |> event.on_global_decoded_with_options(
       event: event.click,
       selector: "#sp-inner",
       options: event.options() |> event.stop_propagation,
@@ -548,7 +668,7 @@ pub fn event_on_click_with_stop_propagation_blocks_parent_test() {
         }
       },
     )
-    |> event.on_decoded(
+    |> event.on_global_decoded(
       event: event.click,
       selector: "#sp-outer",
       decoder: fn(name) {
@@ -575,7 +695,7 @@ pub fn event_on_input_with_no_options_fires_normally_test() {
   test_dom.set_inner_html("#app", "<input id=\"in-with\" />")
   let captured = test_ref.new("")
   mount_event(runtime, fn(component) {
-    event.on_with_options(
+    event.on_global_with_options(
       component,
       event: event.input,
       selector: "#in-with",
@@ -597,7 +717,7 @@ pub fn event_on_input_with_throttle_limits_rate_test() {
   let runtime = new_runtime()
   test_dom.set_inner_html("#app", "<input id=\"throttle-in\" />")
   mount_event(runtime, fn(component) {
-    event.on_with_options(
+    event.on_global_with_options(
       component,
       event: event.input,
       selector: "#throttle-in",
@@ -622,9 +742,12 @@ pub fn event_on_copy_fires_test() {
   let runtime = new_runtime()
   test_dom.set_inner_html("#app", "<div id=\"copy-el\"></div>")
   mount_event(runtime, fn(component) {
-    event.on(component, event: event.copy, selector: "#copy-el", handler: fn(_) {
-      Increment
-    })
+    event.on_global(
+      component,
+      event: event.copy,
+      selector: "#copy-el",
+      handler: fn(_) { Increment },
+    )
   })
   test_dom.simple_event("#copy-el", "copy")
   client.get_current_model(runtime).count
@@ -637,9 +760,12 @@ pub fn event_on_cut_fires_test() {
   let runtime = new_runtime()
   test_dom.set_inner_html("#app", "<div id=\"cut-el\"></div>")
   mount_event(runtime, fn(component) {
-    event.on(component, event: event.cut, selector: "#cut-el", handler: fn(_) {
-      Increment
-    })
+    event.on_global(
+      component,
+      event: event.cut,
+      selector: "#cut-el",
+      handler: fn(_) { Increment },
+    )
   })
   test_dom.simple_event("#cut-el", "cut")
   client.get_current_model(runtime).count
@@ -652,7 +778,7 @@ pub fn event_on_paste_fires_test() {
   let runtime = new_runtime()
   test_dom.set_inner_html("#app", "<div id=\"paste-el\"></div>")
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.paste,
       selector: "#paste-el",
@@ -671,7 +797,7 @@ pub fn event_on_resize_fires_test() {
   test_dom.set_inner_html("#app", "<div id=\"resize-el\"></div>")
   let fired = test_ref.new(False)
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.resize,
       selector: "#resize-el",
@@ -692,7 +818,7 @@ pub fn event_on_resize_with_once_fires_only_once_test() {
   let runtime = new_runtime()
   test_dom.set_inner_html("#app", "<div id=\"resize-w-el\"></div>")
   mount_event(runtime, fn(component) {
-    event.on_with_options(
+    event.on_global_with_options(
       component,
       event: event.resize,
       selector: "#resize-w-el",
@@ -716,7 +842,7 @@ pub fn event_on_double_click_fires_test() {
   let runtime = new_runtime()
   test_dom.set_inner_html("#app", "<div id=\"dbl-el\"></div>")
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.double_click,
       selector: "#dbl-el",
@@ -734,7 +860,7 @@ pub fn event_on_focus_fires_test() {
   let runtime = new_runtime()
   test_dom.set_inner_html("#app", "<input id=\"foc-el\" tabindex=\"0\" />")
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.focus_event,
       selector: "#foc-el",
@@ -752,7 +878,7 @@ pub fn event_on_mouse_enter_fires_test() {
   let runtime = new_runtime()
   test_dom.set_inner_html("#app", "<div id=\"enter-el\"></div>")
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.mouse_enter,
       selector: "#enter-el",
@@ -771,7 +897,7 @@ pub fn event_on_mouse_leave_fires_test() {
   let runtime = new_runtime()
   test_dom.set_inner_html("#app", "<div id=\"leave-el\"></div>")
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.mouse_leave,
       selector: "#leave-el",
@@ -793,7 +919,7 @@ pub fn event_on_drag_end_fires_test() {
     "<div id=\"dragend-el\" draggable=\"true\"></div>",
   )
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.drag_end,
       selector: "#dragend-el",
@@ -811,7 +937,7 @@ pub fn event_on_touch_end_fires_test() {
   let runtime = new_runtime()
   test_dom.set_inner_html("#app", "<div id=\"tend-el\"></div>")
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.touch_end,
       selector: "#tend-el",
@@ -838,7 +964,7 @@ pub fn event_on_drag_extracts_coordinates_test() {
   let x_ref = test_ref.new(0)
   let y_ref = test_ref.new(0)
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.drag,
       selector: "#drag-el",
@@ -864,7 +990,7 @@ pub fn event_on_mouse_move_extracts_coordinates_test() {
   test_dom.set_inner_html("#app", "<div id=\"mmove-el\"></div>")
   let x_ref = test_ref.new(0)
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.mouse_move,
       selector: "#mmove-el",
@@ -887,7 +1013,7 @@ pub fn event_on_pointer_down_extracts_coordinates_test() {
   test_dom.set_inner_html("#app", "<div id=\"pdown-el\"></div>")
   let y_ref = test_ref.new(0)
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.pointer_down,
       selector: "#pdown-el",
@@ -910,7 +1036,7 @@ pub fn event_on_pointer_up_extracts_coordinates_test() {
   test_dom.set_inner_html("#app", "<div id=\"pup-el\"></div>")
   let x_ref = test_ref.new(0)
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.pointer_up,
       selector: "#pup-el",
@@ -934,7 +1060,7 @@ pub fn event_on_touch_start_extracts_coordinates_test() {
   let x_ref = test_ref.new(0)
   let y_ref = test_ref.new(0)
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.touch_start,
       selector: "#tstart-el",
@@ -960,7 +1086,7 @@ pub fn event_on_touch_move_extracts_coordinates_test() {
   test_dom.set_inner_html("#app", "<div id=\"tmove-el\"></div>")
   let x_ref = test_ref.new(0)
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.touch_move,
       selector: "#tmove-el",
@@ -989,7 +1115,7 @@ pub fn event_on_drag_with_once_fires_only_once_test() {
     "<div id=\"drag-w-el\" draggable=\"true\"></div>",
   )
   mount_event(runtime, fn(component) {
-    event.on_with_options(
+    event.on_global_with_options(
       component,
       event: event.drag,
       selector: "#drag-w-el",
@@ -1009,7 +1135,7 @@ pub fn event_on_mouse_move_with_once_fires_only_once_test() {
   let runtime = new_runtime()
   test_dom.set_inner_html("#app", "<div id=\"mmove-w-el\"></div>")
   mount_event(runtime, fn(component) {
-    event.on_with_options(
+    event.on_global_with_options(
       component,
       event: event.mouse_move,
       selector: "#mmove-w-el",
@@ -1029,7 +1155,7 @@ pub fn event_on_pointer_move_with_once_fires_only_once_test() {
   let runtime = new_runtime()
   test_dom.set_inner_html("#app", "<div id=\"pmove-w-el\"></div>")
   mount_event(runtime, fn(component) {
-    event.on_with_options(
+    event.on_global_with_options(
       component,
       event: event.pointer_move,
       selector: "#pmove-w-el",
@@ -1049,7 +1175,7 @@ pub fn event_on_touch_move_with_once_fires_only_once_test() {
   let runtime = new_runtime()
   test_dom.set_inner_html("#app", "<div id=\"tmove-w-el\"></div>")
   mount_event(runtime, fn(component) {
-    event.on_with_options(
+    event.on_global_with_options(
       component,
       event: event.touch_move,
       selector: "#tmove-w-el",
@@ -1076,7 +1202,7 @@ pub fn event_on_key_down_with_once_fires_only_once_test() {
     "<div id=\"kdown-w-el\" tabindex=\"0\"></div>",
   )
   mount_event(runtime, fn(component) {
-    event.on_with_options(
+    event.on_global_with_options(
       component,
       event: event.key_down,
       selector: "#kdown-w-el",
@@ -1102,7 +1228,7 @@ pub fn event_on_context_menu_extracts_coordinates_test() {
   let x_ref = test_ref.new(0)
   let y_ref = test_ref.new(0)
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.context_menu,
       selector: "#ctx-el",
@@ -1128,7 +1254,7 @@ pub fn event_on_drag_over_extracts_coordinates_test() {
   test_dom.set_inner_html("#app", "<div id=\"dragover-el\"></div>")
   let x_ref = test_ref.new(0)
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.drag_over,
       selector: "#dragover-el",
@@ -1154,7 +1280,7 @@ pub fn event_on_drag_start_extracts_coordinates_test() {
   )
   let y_ref = test_ref.new(0)
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.drag_start,
       selector: "#dragstart-el",
@@ -1178,7 +1304,7 @@ pub fn event_on_drop_extracts_coordinates_test() {
   let x_ref = test_ref.new(0)
   let y_ref = test_ref.new(0)
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.drop,
       selector: "#drop-el",
@@ -1205,7 +1331,7 @@ pub fn event_on_mouse_up_extracts_coordinates_test() {
   let x_ref = test_ref.new(0)
   let y_ref = test_ref.new(0)
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.mouse_up,
       selector: "#mup-el",
@@ -1234,7 +1360,7 @@ pub fn event_on_drag_over_with_once_fires_only_once_test() {
   let runtime = new_runtime()
   test_dom.set_inner_html("#app", "<div id=\"dragover-w-el\"></div>")
   mount_event(runtime, fn(component) {
-    event.on_with_options(
+    event.on_global_with_options(
       component,
       event: event.drag_over,
       selector: "#dragover-w-el",
@@ -1262,7 +1388,7 @@ pub fn event_on_scroll_fires_test() {
   )
   let fired = test_ref.new(False)
   mount_event(runtime, fn(component) {
-    event.on(
+    event.on_global(
       component,
       event: event.scroll,
       selector: "#scroll-el",
@@ -1286,7 +1412,7 @@ pub fn event_on_scroll_with_once_fires_only_once_test() {
     "<div id=\"scroll-w-el\" style=\"overflow:auto;height:50px;\"></div>",
   )
   mount_event(runtime, fn(component) {
-    event.on_with_options(
+    event.on_global_with_options(
       component,
       event: event.scroll,
       selector: "#scroll-w-el",
@@ -1310,7 +1436,7 @@ pub fn event_on_wheel_with_once_fires_only_once_test() {
   let runtime = new_runtime()
   test_dom.set_inner_html("#app", "<div id=\"wheel-w-el\"></div>")
   mount_event(runtime, fn(component) {
-    event.on_with_options(
+    event.on_global_with_options(
       component,
       event: event.wheel,
       selector: "#wheel-w-el",
@@ -1345,12 +1471,14 @@ pub fn event_focus_group_arrow_moves_focus_test() {
   test_setup.reset_dom()
   let runtime = new_runtime()
   mount_focus_group_dom()
-  event.focus_group(
-    runtime,
-    items: "#g button",
-    orientation: event.Vertical,
-    wrap: True,
-  )
+  mount_event(runtime, fn(c) {
+    event.arrow_group(
+      c,
+      items: "#g button",
+      orientation: event.Vertical,
+      wrap: True,
+    )
+  })
   test_dom.focus("#i1")
   test_dom.key_event("#g", "keydown", "ArrowDown")
   test_dom.active_element_id()
@@ -1358,7 +1486,7 @@ pub fn event_focus_group_arrow_moves_focus_test() {
   test_dom.key_event("#g", "keydown", "ArrowDown")
   test_dom.active_element_id()
   |> should.equal("i3")
-  event.release_focus_group(runtime, "#g button")
+  event.release_arrow_group(runtime, "#g button")
 }
 
 @target(javascript)
@@ -1366,12 +1494,14 @@ pub fn event_focus_group_wraps_past_the_ends_test() {
   test_setup.reset_dom()
   let runtime = new_runtime()
   mount_focus_group_dom()
-  event.focus_group(
-    runtime,
-    items: "#g button",
-    orientation: event.Vertical,
-    wrap: True,
-  )
+  mount_event(runtime, fn(c) {
+    event.arrow_group(
+      c,
+      items: "#g button",
+      orientation: event.Vertical,
+      wrap: True,
+    )
+  })
   test_dom.focus("#i3")
   test_dom.key_event("#g", "keydown", "ArrowDown")
   test_dom.active_element_id()
@@ -1379,7 +1509,7 @@ pub fn event_focus_group_wraps_past_the_ends_test() {
   test_dom.key_event("#g", "keydown", "ArrowUp")
   test_dom.active_element_id()
   |> should.equal("i3")
-  event.release_focus_group(runtime, "#g button")
+  event.release_arrow_group(runtime, "#g button")
 }
 
 @target(javascript)
@@ -1387,17 +1517,19 @@ pub fn event_focus_group_clamps_without_wrap_test() {
   test_setup.reset_dom()
   let runtime = new_runtime()
   mount_focus_group_dom()
-  event.focus_group(
-    runtime,
-    items: "#g button",
-    orientation: event.Vertical,
-    wrap: False,
-  )
+  mount_event(runtime, fn(c) {
+    event.arrow_group(
+      c,
+      items: "#g button",
+      orientation: event.Vertical,
+      wrap: False,
+    )
+  })
   test_dom.focus("#i1")
   test_dom.key_event("#g", "keydown", "ArrowUp")
   test_dom.active_element_id()
   |> should.equal("i1")
-  event.release_focus_group(runtime, "#g button")
+  event.release_arrow_group(runtime, "#g button")
 }
 
 @target(javascript)
@@ -1405,12 +1537,14 @@ pub fn event_focus_group_home_end_jump_test() {
   test_setup.reset_dom()
   let runtime = new_runtime()
   mount_focus_group_dom()
-  event.focus_group(
-    runtime,
-    items: "#g button",
-    orientation: event.Vertical,
-    wrap: False,
-  )
+  mount_event(runtime, fn(c) {
+    event.arrow_group(
+      c,
+      items: "#g button",
+      orientation: event.Vertical,
+      wrap: False,
+    )
+  })
   test_dom.focus("#i2")
   test_dom.key_event("#g", "keydown", "End")
   test_dom.active_element_id()
@@ -1418,7 +1552,7 @@ pub fn event_focus_group_home_end_jump_test() {
   test_dom.key_event("#g", "keydown", "Home")
   test_dom.active_element_id()
   |> should.equal("i1")
-  event.release_focus_group(runtime, "#g button")
+  event.release_arrow_group(runtime, "#g button")
 }
 
 @target(javascript)
@@ -1426,18 +1560,20 @@ pub fn event_focus_group_respects_orientation_test() {
   test_setup.reset_dom()
   let runtime = new_runtime()
   mount_focus_group_dom()
-  event.focus_group(
-    runtime,
-    items: "#g button",
-    orientation: event.Vertical,
-    wrap: True,
-  )
+  mount_event(runtime, fn(c) {
+    event.arrow_group(
+      c,
+      items: "#g button",
+      orientation: event.Vertical,
+      wrap: True,
+    )
+  })
   test_dom.focus("#i1")
   // A vertical group ignores horizontal arrows.
   test_dom.key_event("#g", "keydown", "ArrowRight")
   test_dom.active_element_id()
   |> should.equal("i1")
-  event.release_focus_group(runtime, "#g button")
+  event.release_arrow_group(runtime, "#g button")
 }
 
 @target(javascript)
@@ -1445,13 +1581,15 @@ pub fn event_focus_group_release_stops_navigation_test() {
   test_setup.reset_dom()
   let runtime = new_runtime()
   mount_focus_group_dom()
-  event.focus_group(
-    runtime,
-    items: "#g button",
-    orientation: event.Vertical,
-    wrap: True,
-  )
-  event.release_focus_group(runtime, "#g button")
+  mount_event(runtime, fn(c) {
+    event.arrow_group(
+      c,
+      items: "#g button",
+      orientation: event.Vertical,
+      wrap: True,
+    )
+  })
+  event.release_arrow_group(runtime, "#g button")
   test_dom.focus("#i1")
   test_dom.key_event("#g", "keydown", "ArrowDown")
   test_dom.active_element_id()

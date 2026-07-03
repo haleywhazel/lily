@@ -142,7 +142,7 @@
 ////       ])
 ////     },
 ////   )
-////   |> event.on_decoded(
+////   |> event.on_global_decoded(
 ////     event: event.click,
 ////     selector: "#app",
 ////     decoder: parse_click,
@@ -183,6 +183,7 @@
 
 import gleam/dynamic.{type Dynamic}
 import gleam/list
+import gleam/option.{type Option}
 import gleam/string
 
 @target(javascript)
@@ -213,9 +214,14 @@ pub opaque type Component(model, message, html) {
   /// `decorations` (cross-cutting attributes layered on top: a CSS
   /// transition, event listeners, a connection gate). Decorations are
   /// applied innermost-first in list order, so the last one wraps outermost.
+  ///
+  /// `scope` is the component's own CSS selector (usually `#<id>`), recorded
+  /// by [`scoped`](#scoped). The `event.on*` binders read it to confine their
+  /// listeners to this component's subtree; `None` means no scope was set.
   Component(
     component_type: ComponentType(model, message, html),
     decorations: List(Decoration(model)),
+    scope: Option(String),
   )
 }
 
@@ -865,6 +871,26 @@ pub fn register_bindings(
   }
 }
 
+/// Read a component's recorded scope selector (see [`scoped`](#scoped)).
+/// Returns `None` when no scope was set. Consumed by `lily/event`'s binders
+/// to confine a listener to the component's own subtree.
+@internal
+pub fn scope(component: Component(model, message, html)) -> Option(String) {
+  component.scope
+}
+
+/// Record a component's own CSS selector (usually `#<id>`) as its scope, so
+/// the `event.on*` binders match only within its subtree. Intended to be
+/// called from component-library builders that already render `id=<id>` on
+/// their root, not by application code directly.
+@internal
+pub fn scoped(
+  component component: Component(model, message, html),
+  selector selector: String,
+) -> Component(model, message, html) {
+  Component(..component, scope: option.Some(selector))
+}
+
 /// Pure walker used by [`render_to_string`](#render_to_string). Recurses
 /// into every variant; slots are filled inline by walking the child and
 /// wrapping the resulting string via `from_string` before handing it back
@@ -947,7 +973,7 @@ fn make_slotter(
 fn new_component(
   component_type: ComponentType(model, message, html),
 ) -> Component(model, message, html) {
-  Component(component_type:, decorations: [])
+  Component(component_type:, decorations: [], scope: option.None)
 }
 
 // =============================================================================
