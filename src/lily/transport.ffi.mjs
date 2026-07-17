@@ -1,10 +1,9 @@
 /**
  * TRANSPORT FFI
  *
- * JSON auto-serialiser, WS/HTTP transport
- *
- * See lily/internal/auto_codec.gleam for auto-serialisation and the relevant
- * reflection FFIs.
+ * WS/HTTP transport and the register_types entry point. Auto-serialisation for
+ * both JSON and MessagePack lives in lily/internal/auto_codec.gleam over the
+ * reflection FFIs, this file no longer carries a codec of its own.
  *
  * Both transports persist offline queues to sessionStorage and flush them on
  * reconnection before sending Resync. sessionStorage (not localStorage) so the
@@ -17,124 +16,21 @@
 // IMPORTS
 // =============================================================================
 
-import { Ok, Error, NonEmpty, Empty, BitArray, toList } from "../gleam.mjs";
-import { Local } from "./store.mjs";
+import { BitArray } from "../gleam.mjs";
 import { registerModule as registerReflectionModule } from "./internal/reflection.ffi.mjs";
-import GleamDict, {
-  from as dictFrom,
-  fold as dictFold,
-} from "../../gleam_stdlib/dict.mjs";
-import { from_list as setFromList } from "../../gleam_stdlib/gleam/set.mjs";
 
 // =============================================================================
 // EXPORT FUNCTIONS
 // =============================================================================
 
 /**
- * Automatically decode JSON to a Gleam value using the constructor registry.
-
- * Returns Ok(value) on success, Error(undefined) on failure.
- *
- * Used by decode.new_primitive_decoder in transport.gleam's JSON path.
- */
-export function autoDecode(json) {
-  try {
-    return new Ok(autoDecodeInner(json));
-  } catch (_e) {
-    return new Error(undefined);
-  }
-}
-
-/**
- * Automatically encode any Gleam value to JSON using positional fields.
- */
-export function autoEncode(value) {
-  if (value === null || value === undefined) return null;
-  if (typeof value === "boolean") return value;
-  if (typeof value === "string") return value;
-  if (typeof value === "number") return value;
-
-  // Gleam lists are encoded as JSON arrays.
-  if (value instanceof Empty || value instanceof NonEmpty) {
-    const result = [];
-    let current = value;
-    // Empty check makes sure that empty singletons don't fall through to the
-    // CustomType branch lower below and becomes `{"_": "Empty"}`, although
-    // Erlang's auto-encoder emits a proper JSON array `[]`.
-    while (current instanceof NonEmpty) {
-      result.push(autoEncode(current.head));
-      current = current.tail;
-    }
-    return result;
-  }
-
-  // Gleam tuples (`#(a, b)`) compile to plain JS arrays, distinguished from
-  // CustomTypes which are class instances with `_`-style tagging.
-  if (Array.isArray(value)) {
-    const encoded = {};
-    for (let i = 0; i < value.length; i++) {
-      encoded[String(i)] = autoEncode(value[i]);
-    }
-    return encoded;
-  }
-
-  // Gleam Dict (gleam_stdlib `dict.Dict`) encoded as a tagged shape.
-  if (value instanceof GleamDict) {
-    const entries = [];
-    dictFold(value, undefined, (_acc, k, v) => {
-      entries.push([autoEncode(k), autoEncode(v)]);
-      return undefined;
-    });
-    return { _: "$dict", 0: entries };
-  }
-
-  // Gleam Set (gleam_stdlib `set.Set`) is implemented internally as
-  // `Set(dict: Dict(member, Token))`, so the class instance has a
-  // `.dict` field that's a `GleamDict`. Encode the members as an array.
-  if (
-    value &&
-    value.constructor &&
-    value.constructor.name === "Set" &&
-    value.dict instanceof GleamDict
-  ) {
-    const members = [];
-    dictFold(value.dict, undefined, (_acc, k, _v) => {
-      members.push(autoEncode(k));
-      return undefined;
-    });
-    return { _: "$set", 0: members };
-  }
-
-  if (value && typeof value === "object" && value.constructor) {
-    const ctor = value.constructor;
-    const name = ctor.name;
-    if (!constructorRegistry.has(name)) {
-      constructorRegistry.set(name, ctor);
-    }
-    // Gleam JS classes store fields as named properties, so Object.keys
-    // preserves constructor assignment order.
-    const encoded = { _: name };
-    Object.keys(value).forEach((field, index) => {
-      encoded[String(index)] = autoEncode(value[field]);
-    });
-    return encoded;
-  }
-  return value;
-}
-
-/**
- * Walk a module namespace and register every class that extends CustomType.
- * Pass the result of `import * as mod from "..."`. Forwards to the reflection
- * registry as well so the MessagePack auto-decoder can also reconstruct
- * these constructors.
+ * Register the CustomType classes in a module namespace so the auto-decoder
+ * can reconstruct them. Pass the result of `import * as mod from "..."`. Kept
+ * here as the stable entry point for user register_types shims, it forwards to
+ * the reflection registry that both the JSON and MessagePack paths decode
+ * through.
  */
 export function registerModule(moduleNamespace) {
-  for (const key in moduleNamespace) {
-    const value = moduleNamespace[key];
-    if (typeof value === "function" && isCustomTypeClass(value)) {
-      constructorRegistry.set(value.name, value);
-    }
-  }
   registerReflectionModule(moduleNamespace);
 }
 
@@ -383,82 +279,6 @@ export function transportSend(handle, bytes) {
 // FUNCTIONS
 // =============================================================================
 
-/**
- * Inner recursive JSON decode. Returns the raw decoded value or throws on
- * an unknown constructor name.
- */
-function autoDecodeInner(json) {
-  // Local is registered lazily to avoid TDZ errors from the circular import
-  // cycle: transport.ffi.mjs to store.mjs to transport.mjs to transport.ffi.mjs
-  if (!constructorRegistry.has("Local"))
-    constructorRegistry.set("Local", Local);
-
-  if (json === null) return undefined;
-  if (typeof json === "boolean") return json;
-  if (typeof json === "string") return json;
-  if (typeof json === "number") return json;
-
-  if (Array.isArray(json)) {
-    // Build Gleam list right-to-left using NonEmpty/Empty
-    let result = new Empty();
-    for (let i = json.length - 1; i >= 0; i--) {
-      const decodedItem = autoDecodeInner(json[i]);
-      result = new NonEmpty(decodedItem, result);
-    }
-    return result;
-  }
-
-  if (json && typeof json === "object" && "_" in json) {
-    const tag = json._;
-
-    // Reserved sentinel tags for collection types that don't fit the
-    // plain CustomType shape. Decoded into the corresponding gleam_stdlib
-    // structures so round-trips preserve type.
-    if (tag === "$dict") {
-      const pairs = json["0"] || [];
-      const decoded = pairs.map((pair) => [
-        autoDecodeInner(pair[0]),
-        autoDecodeInner(pair[1]),
-      ]);
-      return dictFrom(decoded);
-    }
-    if (tag === "$set") {
-      const members = json["0"] || [];
-      const decoded = members.map(autoDecodeInner);
-      return setFromList(toList(decoded));
-    }
-
-    const ctor = constructorRegistry.get(tag);
-    if (!ctor) {
-      throw new globalThis.Error(
-        `Unknown constructor: ${tag}. Did you forget to call register_types()?`,
-      );
-    }
-    const fields = [];
-    let fieldIndex = 0;
-    while (String(fieldIndex) in json) {
-      fields.push(autoDecodeInner(json[String(fieldIndex)]));
-      fieldIndex++;
-    }
-    return new ctor(...fields);
-  }
-
-  // Tag-less JSON object with numeric keys is a Gleam tuple.
-  if (json && typeof json === "object") {
-    const keys = Object.keys(json);
-    if (keys.length > 0 && keys.every((k) => /^\d+$/.test(k))) {
-      const fields = [];
-      for (let i = 0; i < keys.length; i++) {
-        if (!(String(i) in json)) break;
-        fields.push(autoDecodeInner(json[String(i)]));
-      }
-      return fields;
-    }
-  }
-
-  return json;
-}
-
 /** Decode a base64 string back to a Uint8Array. */
 function base64ToFrame(b64) {
   const binary = globalThis.atob(b64);
@@ -471,8 +291,8 @@ function base64ToFrame(b64) {
 
 /**
  * Factory that returns a closure-scoped offline queue backed by
- * sessionStorage — per-tab, so tabs don't share (and corrupt) one key. The
- * in-memory `pending` array is the source of truth for the live tab; storage
+ * sessionStorage, per-tab, so tabs don't share (and corrupt) one key. The
+ * in-memory `pending` array is the source of truth for the live tab, storage
  * only backs it so a reload of the same tab doesn't drop unsent frames.
  */
 function createOfflineQueue(storageKey) {
@@ -486,7 +306,7 @@ function createOfflineQueue(storageKey) {
         JSON.stringify(pending.map(frameToBase64)),
       );
     } catch (_error) {
-      // Quota exceeded; frames remain in-memory and are sent on reconnect
+      // Quota exceeded, frames remain in-memory and are sent on reconnect
     }
   }
 
@@ -545,22 +365,9 @@ function frameToBase64(frame) {
   return globalThis.btoa(binary);
 }
 
-function isCustomTypeClass(fn) {
-  let proto = fn.prototype;
-  while (proto) {
-    if (proto.constructor && proto.constructor.name === "CustomType")
-      return true;
-    proto = Object.getPrototypeOf(proto);
-  }
-  return false;
-}
-
 // =============================================================================
 // PRIVATE CONSTANTS
 // =============================================================================
-
-/** Maps constructor name to constructor function for the JSON auto-decoder. */
-const constructorRegistry = new Map();
 
 const STORAGE_KEY_HTTP_PENDING = "lily_http_pending";
 const STORAGE_KEY_WS_PENDING = "lily_ws_pending";

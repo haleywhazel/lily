@@ -109,10 +109,12 @@
 // IMPORTS
 // =============================================================================
 
+import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/option.{type Option}
 import gleam/result
 import gleam/string
+import lily/logging
 import lily/server.{type Server, type ServerTopicEntry, ServerTopicEntry}
 import lily/store
 import lily/transport.{type Serialiser}
@@ -136,9 +138,9 @@ pub type Ephemeral
 pub type Stateful
 
 /// Opaque handle to a running topic. The `kind` phantom parameter is
-/// `Ephemeral` after `topic.new` and `Stateful` after `topic.with_store`.
-/// This is enforced at compile time so `topic.dispatch` cannot be called
-/// on an ephemeral topic.
+/// `Ephemeral` after `topic.new` and `Stateful` after `topic.with_store`,
+/// enforced at compile time so `topic.dispatch` cannot be called on an
+/// ephemeral topic.
 pub opaque type Topic(model, message, kind) {
   Topic(
     id: String,
@@ -196,9 +198,8 @@ pub fn dispatch(topic: Topic(model, message, Stateful), message: message) -> Nil
 /// parses the suffix via `parse_id` and calls `configure(parsed, topic)` to
 /// configure a pre-started `Topic` lazily.
 ///
-/// The pre-started topic is passed to `configure`. Call `with_store`,
-/// `with_can_subscribe`, etc. on it and return the result. Do not call
-/// `topic.new` inside `configure`, the topic actor is already started.
+/// Call `with_store`, `with_can_subscribe`, and so on inside `configure` and
+/// return the result. Don't call `topic.new`, the actor is already started.
 ///
 /// A stateful kind (one that calls `with_store`) reads its store from the
 /// [`store.topic_kind`](./store.html#topic_kind) wiring entry sharing this
@@ -247,7 +248,7 @@ pub fn kind(
 }
 
 /// Register a topic on the given server. Returns an ephemeral handle
-/// (broadcast-only) by default; pipe through `with_store` to make it
+/// (broadcast-only) by default, pipe through `with_store` to make it
 /// stateful.
 ///
 /// ```gleam
@@ -492,48 +493,69 @@ fn handle_dispatch_logic(
   from: Option(String),
   message: message,
 ) -> TopicActorState(model, message) {
+  // A client may only write to a topic it is subscribed to, since subscribing
+  // already cleared `can_subscribe`. Server dispatches carry `from = None` and
+  // are trusted. An unsubscribed client's message is dropped silently.
+  let authorised = case from {
+    option.Some(client_id) -> dict.has_key(state.subscribers, client_id)
+    option.None -> True
+  }
+  use <- bool.guard(when: !authorised, return: state)
   case state.store {
-    // Ephemeral topic: no store to apply to, so relay the client's message
+    // Ephemeral topic with no store to apply to, so relay the client's message
     // straight to the other subscribers as a Push (no sequence, no replay).
     // The originator is skipped, it already applied the message optimistically.
     // This makes client-to-client signalling fan out without an
     // `on_topic_message` hook.
     option.None -> handle_broadcast_logic(state, message, from)
-    option.Some(store) -> {
-      let new_model = store.apply_message(store.current, message)
-      let new_seq = store.sequence + 1
-      case dict.is_empty(state.subscribers) {
-        True -> Nil
-        False -> {
-          let update_frame =
-            transport.encode(
-              transport.TopicUpdate(
-                topic_id: state.id,
-                sequence: new_seq,
-                payload: message,
-              ),
-              serialiser: state.serialiser,
-            )
-          let ack_frame =
-            transport.encode(
-              transport.Acknowledge(
-                target: transport.Topic(state.id),
-                sequence: new_seq,
-              ),
-              serialiser: state.serialiser,
-            )
-          // Originator gets the ack; everyone else gets the update.
-          dict.each(state.subscribers, fn(id, send) {
-            case from {
-              option.Some(sender) if sender == id -> send(ack_frame)
-              option.Some(_) | option.None -> send(update_frame)
+    option.Some(store) ->
+      // A subscribed client can still send a payload the update function
+      // cannot match, so a crash here drops the frame, not the topic actor.
+      case server.rescue(fn() { store.apply_message(store.current, message) }) {
+        Error(reason) -> {
+          logging.warning(
+            "lily: dropped malformed topic message on "
+            <> state.id
+            <> ": "
+            <> reason,
+          )
+          state
+        }
+        Ok(new_model) -> {
+          let new_seq = store.sequence + 1
+          case dict.is_empty(state.subscribers) {
+            True -> Nil
+            False -> {
+              let update_frame =
+                transport.encode(
+                  transport.TopicUpdate(
+                    topic_id: state.id,
+                    sequence: new_seq,
+                    payload: message,
+                  ),
+                  serialiser: state.serialiser,
+                )
+              let ack_frame =
+                transport.encode(
+                  transport.Acknowledge(
+                    target: transport.Topic(state.id),
+                    sequence: new_seq,
+                  ),
+                  serialiser: state.serialiser,
+                )
+              // Originator gets the ack, everyone else gets the update.
+              dict.each(state.subscribers, fn(id, send) {
+                case from {
+                  option.Some(sender) if sender == id -> send(ack_frame)
+                  option.Some(_) | option.None -> send(update_frame)
+                }
+              })
             }
-          })
+          }
+          let store = TopicStore(..store, current: new_model, sequence: new_seq)
+          TopicActorState(..state, store: option.Some(store))
         }
       }
-      let store = TopicStore(..store, current: new_model, sequence: new_seq)
-      TopicActorState(..state, store: option.Some(store))
-    }
   }
 }
 

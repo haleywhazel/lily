@@ -219,6 +219,35 @@ pub fn component_live_applies_set_attribute_patch_test() {
 }
 
 @target(javascript)
+pub fn component_live_refuses_unsafe_attribute_patch_test() {
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  let _r =
+    mount(runtime, fn(_model) {
+      component.live(
+        slice: fn(m: Model) { m.count },
+        initial: fn(_) { "<div class=\"box\"></div>" },
+        patch: fn(_count) {
+          [
+            component.SetAttribute("", "onclick", "alert(1)"),
+            component.SetAttribute("", "href", "javascript:alert(1)"),
+            component.SetAttribute("", "data-safe", "ok"),
+          ]
+        },
+      )
+    })
+  client.dispatch(runtime)(Increment)
+  // The event-handler name and the script-URL are both refused.
+  test_dom.get_attribute("[data-lily-component]", "onclick")
+  |> should.equal("")
+  test_dom.get_attribute("[data-lily-component]", "href")
+  |> should.equal("")
+  // An ordinary data attribute still goes through.
+  test_dom.get_attribute("[data-lily-component]", "data-safe")
+  |> should.equal("ok")
+}
+
+@target(javascript)
 pub fn component_live_renders_initial_html_test() {
   test_setup.reset_dom()
   let runtime = new_runtime()
@@ -598,7 +627,7 @@ pub fn switch_events_on_switch_itself_fire_test() {
 
 @target(javascript)
 pub fn event_on_fragment_root_test() {
-  // Bindings attached to a Fragment get picked up by the walk; the walk
+  // Bindings attached to a Fragment get picked up by the walk, the walk
   // recurses into Fragment children too.
   test_setup.reset_dom()
   let runtime = new_runtime()
@@ -623,7 +652,7 @@ pub fn event_on_fragment_root_test() {
 @target(javascript)
 pub fn event_pipe_order_event_then_require_connection_test() {
   // `simple |> event.on |> require_connection` produces
-  // RequireConnection(WithEvents(Simple, [event])); the binding still
+  // RequireConnection(WithEvents(Simple, [event])), the binding still
   // gets registered (register_bindings recurses through RequireConnection
   // into WithEvents).
   test_setup.reset_dom()
@@ -648,7 +677,7 @@ pub fn event_pipe_order_event_then_require_connection_test() {
 @target(javascript)
 pub fn event_pipe_order_require_connection_then_event_test() {
   // The reverse pipe order: `simple |> require_connection |> event.on`.
-  // Produces WithEvents(RequireConnection(Simple), [event]); registration
+  // Produces WithEvents(RequireConnection(Simple), [event]), registration
   // is at the WithEvents wrapper, so the binding is still attached.
   test_setup.reset_dom()
   let runtime = new_runtime()
@@ -771,7 +800,7 @@ pub fn multi_mount_appends_handlers_test() {
 @target(javascript)
 pub fn multi_mount_remount_same_selector_replaces_test() {
   // Mounting A then B on the same selector replaces A. A's handlers
-  // are torn down; B's content is visible.
+  // are torn down, B's content is visible.
   test_setup.reset_dom()
   let runtime = new_runtime()
   let _r =
@@ -863,7 +892,7 @@ pub fn transition_enter_class_applied_on_mount_test() {
 
 @target(javascript)
 pub fn transition_exit_defers_removal_test() -> promise.Promise(Nil) {
-  // Drop an item; the wrapper should still be present with the exit
+  // Drop an item, the wrapper should still be present with the exit
   // class until the duration elapses. We sample synchronously (still
   // present) and after a delay (gone).
   test_setup.reset_dom()
@@ -991,7 +1020,7 @@ pub fn transition_inside_each_live_keeps_item_attribute_test() {
 @target(javascript)
 pub fn transition_events_on_outer_wrapper_test() {
   // event.on attached to a transitioned component is registered as a
-  // Listener decoration alongside the transition; the binding fires while
+  // Listener decoration alongside the transition, the binding fires while
   // the child is mounted.
   test_setup.reset_dom()
   let runtime = new_runtime()

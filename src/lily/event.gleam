@@ -138,7 +138,7 @@
 //// |> event.on_decoded(event: event.form_submit, decoder: login_decoder)
 //// ```
 ////
-//// Store the returned `Form(model)` in your model on the error branch; the
+//// Store the returned `Form(model)` in your model on the error branch, the
 //// view calls `form.field_error_messages(invalid_form, "email")` to render
 //// error text next to each field. Run the same schema inside your server-side
 //// update function to re-validate untrusted input.
@@ -165,8 +165,8 @@ import lily/internal/auto_codec
 @target(javascript)
 /// Data extracted from the DOM element that matched the event handler's
 /// selector. `dataset` contains all `data-*` attributes as name/value pairs
-/// using their original kebab-case names (e.g., `data-card-id` →
-/// `"card-id"`).
+/// using their original kebab-case names, so `data-card-id` becomes
+/// `"card-id"`.
 pub type ElementData {
   ElementData(dataset: List(#(String, String)))
 }
@@ -181,8 +181,8 @@ pub opaque type Event(payload) {
 }
 
 @target(javascript)
-/// Optional modifiers for an event handler: debounce, throttle, fire-once,
-/// stop-propagation, prevent-default. Build with [`options()`](#options)
+/// Modifiers for an event handler (debounce, throttle, fire-once,
+/// stop-propagation, prevent-default). Build with [`options()`](#options)
 /// and the dedicated builder functions.
 ///
 /// ```gleam
@@ -255,10 +255,9 @@ pub fn decode_message(encoded: String) -> Result(message, Nil) {
 
 /// Serialise `message` into an attribute-safe string for a `data-message`
 /// attribute, so a stateless element can carry a typed message that
-/// [`decode_message()`](#decode_message) recovers at the root. The value
-/// round-trips through Lily's reflection codec, the same one
-/// [`transport`](./transport.html) uses on the wire, so no separate encoder
-/// is needed and the constructor is cached at encode time.
+/// [`decode_message()`](#decode_message) recovers at the root. It round-trips
+/// through Lily's reflection codec, the same one
+/// [`transport`](./transport.html) uses, so no separate encoder is needed.
 ///
 /// ```gleam
 /// html.button(
@@ -354,11 +353,10 @@ pub fn arrow_group(
 /// every keypress, so a transient overlay's items are handled the moment it
 /// opens, with no per-open wiring.
 ///
-/// Unlike [`focus_trap`](#focus_trap), which is a stack with one active
-/// entry, several groups coexist; the active group on any keypress is the
-/// one whose items include the focused element. Focus moves with
-/// `element.focus()`, so the non-active items may carry `tabindex="-1"`
-/// (the usual roving-tabindex render) and still be reached by the arrows.
+/// Unlike [`focus_trap`](#focus_trap), which is a one-active stack, several
+/// groups coexist, the active one on a keypress is whichever contains the
+/// focused element. Focus moves with `element.focus()`, so non-active items
+/// can carry `tabindex="-1"` and still be reached by the arrows.
 pub fn arrow_group(
   component: Component(model, message, html),
   items items: String,
@@ -377,21 +375,17 @@ pub fn arrow_group(
 }
 
 @target(javascript)
-/// Confine Tab and Shift+Tab cycling to focusable descendants of the
-/// element matching `within`. Pushes a new trap onto a stack so nested
-/// overlays (a Combobox inside a Dialog inside a Drawer) each keep their
-/// own keyboard scope. Focusable elements are re-enumerated on every Tab
-/// press so dynamic content inside the container is handled.
+/// Confine Tab and Shift+Tab cycling to focusable descendants of the element
+/// matching `within`. Pushes onto a stack so nested overlays (a Combobox in a
+/// Dialog in a Drawer) each keep their own scope. Focusables are re-enumerated
+/// on every Tab press, so dynamic content is handled.
 ///
-/// While this trap is the top of the stack, `release_on` runs on every
-/// keydown; returning `True` pops the trap and dispatches the message
-/// produced by `on_exit`. Opening another trap on top suspends this one
-/// (Tab cycles within the new trap, `release_on` and `on_exit` come from
-/// the new trap); popping the top trap restores the one below.
+/// While this trap is on top, `release_on` runs on every keydown, and returning
+/// `True` pops the trap and dispatches `on_exit`'s message. Opening another
+/// trap suspends this one until it pops.
 ///
-/// Pair with [`focus`](#focus) to seed initial focus inside the trapped
-/// region, and [`release_focus_trap`](#release_focus_trap) for imperative
-/// release (e.g. clicking Cancel rather than pressing the exit key).
+/// Pair with [`focus`](#focus) to seed focus inside the region, and
+/// [`release_focus_trap`](#release_focus_trap) for imperative release.
 pub fn focus_trap(
   runtime: Runtime(model, message),
   within within: String,
@@ -404,24 +398,23 @@ pub fn focus_trap(
 }
 
 @target(javascript)
-/// Bind an event handler to a component. The handler always dispatches a
-/// message; the `event` argument fixes the payload type so the handler
-/// signature is checked at compile time. The binding is registered during
+/// Bind an event handler to a component. The handler dispatches a message, and
+/// the `event` argument fixes the payload type so the handler is checked at
+/// compile time. Registered during
 /// [`component.mount()`](./component.html#mount).
 ///
-/// The listener is **scoped to the component's own subtree**: it fires only
-/// for `event`s inside the element matched by the component's scope selector
-/// (its `id`, recorded via [`component.scoped`](./component.html#scoped)).
-/// To narrow, attach to a narrower component; to widen, attach to a
-/// wider ancestor. For page-level listeners (`document` keydown, `window`
-/// resize, a root `data-message` click decoder) use [`on_global`](#on_global).
+/// The listener is **scoped to the component's own subtree**, firing only for
+/// `event`s inside the element matched by the component's scope selector (its
+/// `id`, via [`component.scoped`](./component.html#scoped)). Attach to a
+/// narrower or wider component to narrow or widen. For page-level listeners
+/// (`document` keydown, `window` resize, a root `data-message` decoder) use
+/// [`on_global`](#on_global).
 ///
-/// A component with no scope still works: the binding falls back to a
-/// document-wide listener and a development warning nudges you to add an
-/// `id` (or call `component.scoped`). Bindings declared inside
+/// A scopeless component still works, the binding falls back to a document-wide
+/// listener and a dev warning nudges you to add an `id`. Bindings inside
 /// [`each`](./component.html#each) and
-/// [`each_live`](./component.html#each_live) item bodies are ignored, attach
-/// them to the each/each_live wrapper or any static ancestor.
+/// [`each_live`](./component.html#each_live) item bodies are ignored, so attach
+/// them to the wrapper or a static ancestor.
 ///
 /// ```gleam
 /// component.simple(slice: ..., render: ...)
@@ -478,18 +471,16 @@ pub fn on_decoded_with_options(
 }
 
 @target(javascript)
-/// The page-level counterpart to [`on`](#on): bind a handler with an
+/// The page-level counterpart to [`on`](#on), binding a handler with an
 /// explicit, verbatim `selector` rather than scoping to the component's
-/// subtree. Use it for listeners that are genuinely tied to the page and
-/// not to any one component: `document` keydown, `window` resize, or the
-/// app-root `data-message` click decoder.
+/// subtree. Use it for listeners genuinely tied to the page rather than one
+/// component, a `document` keydown, a `window` resize, or the app-root
+/// `data-message` click decoder.
 ///
 /// It still takes a `component` first so it composes into the view tree the
-/// same way (pipe it onto your root component); the component's scope is
-/// deliberately ignored, only the mount-time tree walk that collects the
-/// binding matters. `selector` is used exactly as given (`"document"`,
-/// `"window"`, or any CSS selector), so the listener survives arbitrary DOM
-/// churn.
+/// same way, the component's scope is ignored and only the mount-time tree walk
+/// that collects the binding matters. `selector` is used exactly as given, so
+/// the listener survives arbitrary DOM churn.
 ///
 /// ```gleam
 /// root
@@ -509,8 +500,8 @@ pub fn on_global(
 }
 
 @target(javascript)
-/// The [`on_decoded`](#on_decoded) counterpart to [`on_global`](#on_global):
-/// a page-level binding whose decoder may decline with `Error(Nil)`. The
+/// The [`on_decoded`](#on_decoded) counterpart to [`on_global`](#on_global), a
+/// page-level binding whose decoder may decline with `Error(Nil)`. The
 /// canonical use is the app-root click decoder that recovers every
 /// `data-message` dispatch.
 ///
@@ -634,7 +625,7 @@ pub fn prevent_default(options: EventOptions) -> EventOptions {
 @target(javascript)
 /// Remove a focus group registered with [`arrow_group`](#arrow_group),
 /// matched by the same `items` selector. No-op if no such group is
-/// registered. Call when a transient group (a menu, say) closes; persistent
+/// registered. Call when a transient group (a menu, say) closes, persistent
 /// groups (a radio group always on the page) need never release.
 pub fn release_arrow_group(
   _runtime: Runtime(model, message),
@@ -663,7 +654,7 @@ pub fn stop_propagation(options: EventOptions) -> EventOptions {
 
 @target(javascript)
 /// Set the throttle interval in milliseconds. Events fire at most once
-/// per interval; subsequent events within the window are dropped.
+/// per interval, subsequent events within the window are dropped.
 pub fn throttle_milliseconds(options: EventOptions, value: Int) -> EventOptions {
   EventOptions(..options, throttle_milliseconds: option.Some(value))
 }
@@ -703,10 +694,10 @@ pub fn watch_file_drops() -> Nil {
 /// update hook, an element declares its own trap and this manages the
 /// lifecycle. While the element is present, Tab and Shift+Tab are confined to
 /// it and focus is seeded to `data-lily-focus-trap-initial` (or the first
-/// focusable descendant); when it leaves the DOM, focus returns to whatever
+/// focusable descendant), when it leaves the DOM, focus returns to whatever
 /// was focused before. If it also carries `data-lily-focus-trap-dismiss` (a
 /// CSS selector), the Escape key clicks that element, so dismissal flows
-/// through the ordinary `data-message` delegation; without it Escape is inert.
+/// through the ordinary `data-message` delegation, without it Escape is inert.
 ///
 /// The primitive has no notion of dialogs or modals: any element can declare
 /// a trap (a wizard step, a command palette, a modal recipe). A component

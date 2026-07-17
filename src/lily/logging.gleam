@@ -97,12 +97,11 @@ pub type Level {
   Warning
 }
 
-/// A single HTTP request to log. The four core fields are always present;
-/// `request_id` is an optional correlation id that, when set, is echoed into
-/// the line as `#<id>`. Build one with [`request_log()`](#request_log) and
-/// emit it with [`request()`](#request).
+/// A single HTTP request to log. `request_id` is an optional correlation id
+/// that, when set, is echoed into the line as `#<id>`. Build one with
+/// [`request_log()`](#request_log) and emit it with [`request()`](#request).
 ///
-/// Request and response bodies are deliberately absent: logging them risks
+/// Request and response bodies are deliberately absent. Logging them risks
 /// leaking passwords, tokens, and other GDPR-protected data, so the transport
 /// should never put them here.
 pub type RequestLog {
@@ -197,11 +196,11 @@ pub fn log(level: Level, message: String) -> Nil {
   do_log(level, message)
 }
 
-/// Emit a compact request log line through the same sink as the other helpers,
-/// so it inherits the level tag and colour. The level is derived from the
+/// Emit a compact request log line through the same sink as the other
+/// helpers, so it inherits the level tag and colour. The level comes from the
 /// status (5xx is `Error`, 4xx is `Warning`, everything else `Info`), so a
-/// failing route stands out by colour. Suppressed levels short-circuit before
-/// the line is built.
+/// failing route stands out. Suppressed levels short-circuit before the line
+/// is built.
 ///
 /// ```gleam
 /// logging.request_log(

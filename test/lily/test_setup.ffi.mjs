@@ -120,7 +120,7 @@ export function historyLength() {
 }
 
 export function resetUrl() {
-  // jsdom keeps history across tests; reset to "/" so URL-sensitive tests
+  // jsdom keeps history across tests, reset to "/" so URL-sensitive tests
   // start from a known state.
   dom.window.history.replaceState({}, "", "/");
 }
@@ -164,7 +164,7 @@ export function triggerWebSocketClose(ws) {
 }
 
 export function getWebSocketSent(ws) {
-  // Convert JS array to Gleam list; decode ArrayBuffers to UTF-8 strings so
+  // Convert JS array to Gleam list, decode ArrayBuffers to UTF-8 strings so
   // tests can use string.contains() on the sent frames.
   let result = new Empty();
   for (let i = ws._sent.length - 1; i >= 0; i--) {

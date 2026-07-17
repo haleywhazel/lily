@@ -292,13 +292,13 @@ pub fn roundtrip_unsubscribe_test() {
 }
 
 // =============================================================================
-// COLLECTION TYPES (tuple, dict, set) — cross-target wire format
+// COLLECTION TYPES (tuple, dict, set) cross-target wire format
 // =============================================================================
 // These are values the auto-serialiser couldn't previously handle. The
 // shapes are: tuples encode as tag-less `{"0":...,"1":...}` objects;
-// dicts encode as `{"_":"$dict","0":[[k,v],...]}`; sets encode as
+// dicts encode as `{"_":"$dict","0":[[k,v],...]}`, sets encode as
 // `{"_":"$set","0":[v,...]}`. Empty bytes are pinned so cross-target
-// divergence trips immediately; non-empty cases use roundtrip rather
+// divergence trips immediately, non-empty cases use roundtrip rather
 // than byte-pinning because dict/set iteration order isn't guaranteed.
 
 /// Tuple inside a CustomType wrapper. Tuple `#(1, "hi")` encodes as
@@ -321,7 +321,7 @@ pub fn roundtrip_tuple_test() {
 }
 
 /// Empty Dict encodes as `{"_":"$dict","0":[]}`. The trailing `90` is
-/// MessagePack fixarray length 0 — same as the empty-list case we
+/// MessagePack fixarray length 0 same as the empty-list case we
 /// fixed earlier.
 pub fn snapshot_empty_dict_test() {
   assert_encoded_generic(

@@ -131,7 +131,7 @@ import lily/internal/message_pack.{
 
 /// Opaque transport connector. Built by
 /// [`websocket_connect`](#websocket_connect) and
-/// [`http_connect`](#http_connect); passed to
+/// [`http_connect`](#http_connect), passed to
 /// [`client.connect`](./client.html#connect).
 pub opaque type Connector {
   Connector(connect: fn(Handler) -> Transport)
@@ -161,6 +161,14 @@ pub type Target {
 /// Wire-format envelope used between client and server. Sequence numbers
 /// are assigned by the server and tracked separately per [`Target`](#Target),
 /// so each store stays in sync independently.
+///
+/// Sequence numbers are ordering metadata, not a security control. The client
+/// records whatever sequence a frame carries without a monotonicity check, so
+/// they give no replay or reorder protection on their own. The server is the
+/// trust anchor (it assigns ids and sequences and ignores server-to-client
+/// frames arriving from a client), and confidentiality and integrity rest on
+/// the transport. Run over secure connections in production. The built-in
+/// connectors already select `wss` automatically on an HTTPS page.
 @internal
 pub type Protocol(model, message) {
   /// Sent by the server after applying a `SessionMessage` or `TopicMessage`
@@ -217,20 +225,20 @@ pub type Protocol(model, message) {
   /// sequence after applying.
   TopicUpdate(topic_id: String, sequence: Int, payload: message)
 
-  /// Sent by the client to leave a topic. Fire-and-forget: the server
+  /// Sent by the client to leave a topic. Fire-and-forget, the server
   /// removes the subscriber and sends no confirmation frame back.
   Unsubscribe(topic_id: String)
 }
 
 /// Serialises and deserialises `Protocol` values to and from bytes. The
 /// `Auto` variant uses positional encoding and works for any Gleam custom
-/// type without configuration; its `format` field selects JSON or MessagePack
+/// type without configuration, its `format` field selects JSON or MessagePack
 /// at runtime. `CustomJson` and `CustomBinary` carry user-supplied codecs and
 /// have a fixed format.
 ///
 /// Construct via [`automatic`](#automatic), [`custom_json`](#custom_json), or
 /// [`custom_binary`](#custom_binary). Toggle the auto format using
-/// [`use_json`](#use_json) and [`use_message_pack`](#use_message_pack); these
+/// [`use_json`](#use_json) and [`use_message_pack`](#use_message_pack), these
 /// are no-ops on custom serialisers.
 pub opaque type Serialiser(model, message) {
   Auto(format: AutoFormat, codec: BinaryCodec(model, message))
@@ -246,7 +254,7 @@ pub opaque type Serialiser(model, message) {
 /// Transport handle returned by a [`Connector`](#Connector). Carries `send`
 /// to transmit bytes and `close` to terminate the connection. Constructed
 /// inside the transport module by [`websocket_connect`](#websocket_connect)
-/// and [`http_connect`](#http_connect); not user-facing.
+/// and [`http_connect`](#http_connect), not user-facing.
 @internal
 pub opaque type Transport {
   Transport(send: fn(BitArray) -> Nil, close: fn() -> Nil)
@@ -290,6 +298,7 @@ type BinaryCodec(model, message) {
     decode_message: fn(BitArray) -> Result(message, Nil),
     encode_model: fn(model) -> BitArray,
     decode_model: fn(BitArray) -> Result(model, Nil),
+    max_decode_depth: Int,
   )
 }
 
@@ -316,40 +325,36 @@ type WsHandle
 /// transport.automatic() |> transport.use_message_pack()
 /// ```
 ///
-/// On JavaScript, constructors must be registered before connecting so the
-/// decoder can reconstruct all types, including those that only arrive from
-/// the server or from other clients. The recommended pattern is a FFI shim in
-/// your shared types module that calls `registerModule` from
-/// `transport.ffi.mjs`. Multiple modules are supported by calling
-/// `registerModule` once per file. See the module documentation for the
-/// full pattern.
+/// On JavaScript, constructors must be registered before connecting,
+/// otherwise the decoder can't reconstruct types that only arrive from the
+/// server or other clients. Use an FFI shim in your shared types module
+/// that calls `registerModule` from `transport.ffi.mjs`, once per file for
+/// multiple modules. See the module documentation for the full pattern.
 ///
 /// ## Supported value shapes
 ///
-/// The auto-serialiser handles every Gleam value the model and message
-/// types are likely to contain:
+/// Every Gleam value the model and message types are likely to hold:
 ///
 /// - **Primitives:** `Int`, `Float`, `String`, `Bool`, `Nil`.
 /// - **Custom types:** records and variants, encoded as a tagged map
 ///   whose `_` field carries the PascalCase constructor name.
 /// - **Lists:** encoded as arrays.
 /// - **Tuples:** `#(a, b)` encoded as tag-less maps with positional
-///   keys (`{"0":a,"1":b}`), distinguishable from CustomTypes by the
+///   keys (`{"0":a,"1":b}`), told apart from custom types by the
 ///   absence of `_`.
 /// - **`gleam/dict.Dict`:** encoded as `{"_":"$dict","0":[[k,v],...]}`.
 /// - **`gleam/set.Set`:** encoded as `{"_":"$set","0":[v,...]}`.
 ///
 /// ## Not supported: `BitArray`
 ///
-/// `BitArray` fields in synced types are not auto-encoded. The Erlang
-/// runtime represents both `String` and `BitArray` as native binaries,
-/// so the reflection layer cannot distinguish them at runtime: a byte
-/// sequence like `<<104,101,108,108,111>>` is simultaneously a valid
-/// `String` and a valid `BitArray`. Encoding the wrong type would
-/// silently corrupt data.
+/// `BitArray` fields in synced types are not auto-encoded. The Erlang runtime
+/// represents both `String` and `BitArray` as native binaries, so the
+/// reflection layer can't tell them apart at runtime, a byte sequence like
+/// `<<104,101,108,108,111>>` is both a valid `String` and a valid `BitArray`.
+/// Encoding the wrong one would silently corrupt data.
 ///
-/// If your model needs raw bytes, wrap them in a marker CustomType and
-/// encode them yourself with [`custom_binary`](#custom_binary) or
+/// If your model needs raw bytes, wrap them in a marker CustomType and encode
+/// them yourself with [`custom_binary`](#custom_binary) or
 /// [`custom_json`](#custom_json):
 ///
 /// ```gleam
@@ -358,17 +363,12 @@ type WsHandle
 /// }
 /// ```
 ///
-/// Then provide custom encode/decode functions that base64-encode the
-/// inner field.
+/// Then provide custom encode/decode functions that base64-encode the inner
+/// field.
 pub fn automatic() -> Serialiser(model, message) {
   Auto(
     format: AutoJson,
-    codec: BinaryCodec(
-      encode_message: ffi_auto_encode_message_pack,
-      decode_message: ffi_auto_decode_message_pack,
-      encode_model: ffi_auto_encode_message_pack,
-      decode_model: ffi_auto_decode_message_pack,
-    ),
+    codec: auto_binary_codec(message_pack.default_max_depth),
   )
 }
 
@@ -381,7 +381,7 @@ pub fn close(transport: Transport) -> Nil {
 
 /// Create a serialiser from explicit binary encode/decode functions. Use
 /// this to provide a custom binary codec (MessagePack, CBOR, or any binary
-/// format). The format is fixed to binary; the [`use_json`](#use_json) and
+/// format). The format is fixed to binary, the [`use_json`](#use_json) and
 /// [`use_message_pack`](#use_message_pack) toggles are no-ops on this
 /// serialiser.
 pub fn custom_binary(
@@ -395,12 +395,13 @@ pub fn custom_binary(
     decode_message:,
     encode_model:,
     decode_model:,
+    max_decode_depth: message_pack.default_max_depth,
   ))
 }
 
 /// Create a serialiser from explicit JSON encode/decode functions. Useful
 /// when the auto format is not suitable (third-party APIs, human-readable
-/// JSON, backwards compatibility). The format is fixed to JSON; the
+/// JSON, backwards compatibility). The format is fixed to JSON, the
 /// [`use_json`](#use_json) and [`use_message_pack`](#use_message_pack)
 /// toggles are no-ops on this serialiser.
 pub fn custom_json(
@@ -451,20 +452,18 @@ pub fn encode(
   }
 }
 
-/// Encode a model as an inline hydration payload to embed inside
-/// pre-rendered HTML. Returns
-/// `<script type="application/json" id="lily-snapshot">...</script>` with
-/// a JSON-encoded `Snapshot(Session, 0, model)` frame inside.
-/// [`client.hydrate`](./client.html#hydrate) reads this on mount and uses
-/// the embedded model as the initial state, avoiding a round-trip on
-/// first paint. The snapshot is a fixed initial state baked into the page,
-/// not data rendered per request.
+/// Encode a model as an inline hydration payload for pre-rendered HTML.
+/// Returns `<script type="application/json" id="lily-snapshot">...</script>`
+/// wrapping a JSON `Snapshot(Session, 0, model)` frame.
+/// [`client.hydrate`](./client.html#hydrate) reads it on mount and uses the
+/// embedded model as the initial state, saving a round-trip on first paint.
+/// The snapshot is a fixed initial state baked into the page, not per-request
+/// data.
 ///
-/// Always uses JSON regardless of the serialiser's `automatic` format
-/// toggle, since binary MessagePack is not safe to inline inside HTML.
-/// `CustomBinary` serialisers will produce a snapshot whose payload is a
-/// base16-encoded representation of the binary bytes; prefer `automatic`
-/// or `custom_json` for the embedded snapshot.
+/// Always JSON regardless of the serialiser's format toggle, since binary
+/// MessagePack isn't safe to inline in HTML. A `CustomBinary` serialiser
+/// produces a base16-encoded payload, so prefer `automatic` or `custom_json`
+/// here.
 ///
 /// ```gleam
 /// let body = "<!DOCTYPE html><html><body>"
@@ -476,7 +475,7 @@ pub fn encode(
 ///   <> "</body></html>"
 /// ```
 ///
-/// Do note that this isn't proper SSR, as it only renders the initial snapshot.
+/// This isn't proper SSR, it only renders the initial snapshot.
 pub fn encode_initial_snapshot(
   serialiser serialiser: Serialiser(model, message),
   model model: model,
@@ -498,7 +497,7 @@ pub fn encode_initial_snapshot(
 @target(javascript)
 /// Set the maximum number of queued messages POSTed in parallel when the
 /// HTTP/SSE connection reconnects. Reducing this limits concurrent POST
-/// requests during a reconnect burst; increasing it flushes the queue faster.
+/// requests during a reconnect burst, increasing it flushes the queue faster.
 /// Default is 10.
 pub fn flush_batch_size(config: HttpConfig, size: Int) -> HttpConfig {
   HttpConfig(..config, flush_batch_size: size)
@@ -588,7 +587,7 @@ pub fn reconnect_base_milliseconds(
 
 @target(javascript)
 /// Set the jitter ratio applied to each WebSocket reconnection delay. A ratio
-/// of `0.25` produces ±25% randomisation, which spreads reconnects across
+/// of `0.25` produces plus or minus 25% randomisation, which spreads reconnects across
 /// clients after a mass disconnect so the server doesn't get stampeded. Must
 /// be between 0.0 (no jitter) and 1.0 (full randomisation). Default is 0.25.
 pub fn reconnect_jitter_ratio(
@@ -629,13 +628,38 @@ pub fn send(transport: Transport, bytes: BitArray) -> Nil {
 
 /// Switch the serialiser to JSON encoding. Useful for development when you
 /// want human-readable frames in DevTools. Only meaningful on
-/// [`automatic`](#automatic) serialisers; no-op on `custom_json` or
+/// [`automatic`](#automatic) serialisers, no-op on `custom_json` or
 /// `custom_binary`.
 ///
 /// ```gleam
 /// // Dev: readable JSON in DevTools
 /// transport.automatic() |> transport.use_json()
 /// ```
+/// Set the maximum nesting depth the MessagePack decoder will parse. This
+/// bounds stack use on hostile deeply-nested frames. The default is generous,
+/// so raise it only if your model legitimately nests beyond it. No-op on a
+/// `custom_json` serialiser, which does not use the MessagePack decoder.
+///
+/// ```gleam
+/// transport.automatic()
+/// |> transport.use_message_pack()
+/// |> transport.max_decode_depth(256)
+/// ```
+pub fn max_decode_depth(
+  serialiser: Serialiser(model, message),
+  depth: Int,
+) -> Serialiser(model, message) {
+  case serialiser {
+    Auto(format:, ..) -> Auto(format:, codec: auto_binary_codec(depth))
+    CustomBinary(codec:) ->
+      CustomBinary(codec: BinaryCodec(..codec, max_decode_depth: depth))
+    CustomJson(..) -> serialiser
+  }
+}
+
+/// Switch the serialiser to JSON encoding. Only meaningful on
+/// [`automatic`](#automatic) serialisers, no-op on `custom_json` or
+/// `custom_binary`.
 pub fn use_json(
   serialiser: Serialiser(model, message),
 ) -> Serialiser(model, message) {
@@ -647,7 +671,7 @@ pub fn use_json(
 
 /// Switch the serialiser back to MessagePack encoding after
 /// [`use_json`](#use_json) was called. Only meaningful on
-/// [`automatic`](#automatic) serialisers; no-op on `custom_json` or
+/// [`automatic`](#automatic) serialisers, no-op on `custom_json` or
 /// `custom_binary`.
 pub fn use_message_pack(
   serialiser: Serialiser(model, message),
@@ -963,12 +987,42 @@ fn unsubscribe_decoder() -> decode.Decoder(Protocol(model, message)) {
   decode.success(Unsubscribe(topic_id:))
 }
 
+// Build the auto codec, capturing `max_decode_depth` so both the envelope and
+// the payload parse honour the configured cap.
+fn auto_binary_codec(max_decode_depth: Int) -> BinaryCodec(model, message) {
+  BinaryCodec(
+    encode_message: ffi_auto_encode_message_pack,
+    decode_message: fn(bytes) {
+      ffi_auto_decode_message_pack(bytes, max_decode_depth)
+    },
+    encode_model: ffi_auto_encode_message_pack,
+    decode_model: fn(bytes) {
+      ffi_auto_decode_message_pack(bytes, max_decode_depth)
+    },
+    max_decode_depth:,
+  )
+}
+
+fn ffi_auto_decode(value: Dynamic) -> Result(a, a) {
+  case auto_codec.decode_json(value) {
+    Ok(decoded) -> Ok(unsafe_coerce_dynamic(decoded))
+    Error(_) -> Error(unsafe_coerce_dynamic(value))
+  }
+}
+
+fn ffi_auto_encode(value: a) -> Json {
+  auto_codec.encode_json(value)
+}
+
 fn ffi_auto_encode_message_pack(value: a) -> BitArray {
   auto_codec.encode_message_pack(value)
 }
 
-fn ffi_auto_decode_message_pack(bytes: BitArray) -> Result(a, Nil) {
-  case auto_codec.decode_message_pack(bytes) {
+fn ffi_auto_decode_message_pack(
+  bytes: BitArray,
+  max_depth: Int,
+) -> Result(a, Nil) {
+  case auto_codec.decode_message_pack_bounded(bytes, max_depth) {
     Ok(value) -> Ok(unsafe_coerce_dynamic(value))
     Error(_) -> Error(Nil)
   }
@@ -1101,7 +1155,10 @@ fn decode_message_pack_protocol(
   bytes: BitArray,
   codec: BinaryCodec(model, message),
 ) -> Result(Protocol(model, message), Nil) {
-  use #(top_value, _) <- result.try(message_pack.decode(bytes))
+  use #(top_value, _) <- result.try(message_pack.decode_bounded(
+    bytes,
+    codec.max_decode_depth,
+  ))
   case top_value {
     ValueMap(entries) -> decode_message_pack_envelope(entries, codec)
     _ -> Error(Nil)
@@ -1280,20 +1337,6 @@ fn value_array(value: Value) -> Result(List(Value), Nil) {
 // =============================================================================
 // PRIVATE FFI
 // =============================================================================
-
-/// Auto-decode a dynamic value (JSON path)
-@external(erlang, "lily_transport_ffi", "auto_decode")
-@external(javascript, "./transport.ffi.mjs", "autoDecode")
-fn ffi_auto_decode(_value: Dynamic) -> Result(a, a) {
-  panic as "auto_decode is implemented in FFI"
-}
-
-/// Auto-encode a value to JSON (JSON path)
-@external(erlang, "lily_transport_ffi", "auto_encode")
-@external(javascript, "./transport.ffi.mjs", "autoEncode")
-fn ffi_auto_encode(_value: a) -> Json {
-  panic as "auto_encode is implemented in FFI"
-}
 
 @target(javascript)
 @external(javascript, "./transport.ffi.mjs", "transportClose")

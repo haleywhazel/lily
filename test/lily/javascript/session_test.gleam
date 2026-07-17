@@ -128,10 +128,10 @@ pub fn session_only_writes_changed_fields_test() {
     )
   // Dispatch SetName, changes name, does NOT change count
   client.dispatch(runtime)(test_fixtures.SetName("Alice"))
-  // name was changed → should be persisted
+  // name was changed, so it should be persisted
   read_local_storage("lily_session_name")
   |> should.not_equal("")
-  // count was unchanged → should NOT be written
+  // count was unchanged, so it should NOT be written
   read_local_storage("lily_session_count")
   |> should.equal("")
 }

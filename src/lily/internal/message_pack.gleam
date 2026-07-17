@@ -1,31 +1,28 @@
-//// Pure-Gleam MessagePack primitives. Encodes and decodes the byte format
-//// shared by [transport.gleam](../transport.html)'s auto-serialiser. Lives
-//// here so the wire format has a single source of truth on both Erlang and
-//// JavaScript targets, replacing the previously duplicated codec FFI files.
+//// The byte-level half of the MessagePack wire format, encode on one side and
+//// decode on the other. It only knows about primitive MessagePack types, the
+//// nil byte, bools, the various int and float widths, strings, binaries,
+//// arrays, and maps. Turning an actual Gleam value into those primitives is
+//// [`auto_codec`](./auto_codec.html)'s job, and the runtime introspection that
+//// feeds it is [`reflection`](./reflection.html)'s.
 ////
-//// The high-level auto-encoder lives in
-//// [`lily/internal/auto_codec`](./auto_codec.html); the value introspection
-//// (atom/tuple inspection on Erlang, class/keys inspection on JS) is in
-//// [`lily/internal/reflection`](./reflection.html). This module deals only
-//// with byte-level encoding of primitive MessagePack types.
-////
-//// Supported types: nil, bool, fixint (positive and negative), uint8/16/32/64,
-//// int8/16/32/64, float32/64, fixstr/str8/16/32, bin8/16/32, fixarray/
-//// array16/32, fixmap/map16/32. Same coverage as the previous Erlang and JS
-//// codecs.
+//// It lives here in pure Gleam so both targets share one source of truth for
+//// the format, replacing the two hand-written codec FFIs that used to drift
+//// apart. Decoding caps how deeply it will recurse so a hostile frame can't
+//// blow the stack.
 
 // =============================================================================
 // IMPORTS
 // =============================================================================
 
 import gleam/bit_array
+import gleam/bool
 import gleam/list
 
 // =============================================================================
 // INTERNAL TYPES
 // =============================================================================
 
-/// Decoded MessagePack value. The result of parsing a byte stream; the
+/// Decoded MessagePack value. The result of parsing a byte stream, the
 /// auto-decoder turns this into a Gleam value via reflection.
 @internal
 pub type Value {
@@ -44,21 +41,23 @@ pub type Value {
 // =============================================================================
 
 /// Encode a list of `(key, value)` entries as a MessagePack map. Keys must be
-/// pre-encoded BitArrays; this lets callers cheaply use string keys without
+/// pre-encoded BitArrays, this lets callers cheaply use string keys without
 /// re-wrapping.
 @internal
 pub fn encode_map(entries: List(#(BitArray, BitArray))) -> BitArray {
-  let header = map_header(list.length(entries))
-  list.fold(entries, header, fn(acc, entry) {
-    bit_array.concat([acc, entry.0, entry.1])
-  })
+  // Flatten to [key0, value0, key1, value1, ...] and concat once. Folding with
+  // `bit_array.concat` instead would recopy the whole accumulator per entry,
+  // making a map with n entries quadratic.
+  let body = list.flat_map(entries, fn(entry) { [entry.0, entry.1] })
+  bit_array.concat([map_header(list.length(entries)), ..body])
 }
 
 /// Encode a list of MessagePack-encoded items as a MessagePack array.
 @internal
 pub fn encode_array(items: List(BitArray)) -> BitArray {
-  let header = array_header(list.length(items))
-  list.fold(items, header, fn(acc, item) { bit_array.append(acc, item) })
+  // Single concat over header and items. See `encode_map` for why folding
+  // would be quadratic.
+  bit_array.concat([array_header(list.length(items)), ..items])
 }
 
 /// Encode an Int as the smallest MessagePack int that fits.
@@ -70,14 +69,14 @@ pub fn encode_int(value: Int) -> BitArray {
     n if n >= 0 && n <= 0xffff -> <<0xcd, n:16-big>>
     n if n >= 0 && n <= 0xffffffff -> <<0xce, n:32-big>>
     n if n >= 0 -> <<0xcf, n:64-big>>
-    // Two's complement for signed values; the destination width truncates
+    // Two's complement for signed values, the destination width truncates
     // to the low N bits, so adding 2^N before encoding is what we want.
     n if n >= -32 -> <<{ 0x100 + n }:8>>
     n if n >= -128 -> <<0xd0, { 0x100 + n }:8>>
     n if n >= -32_768 -> <<0xd1, { 0x10000 + n }:16-big>>
     n if n >= -2_147_483_648 -> <<0xd2, { 0x100000000 + n }:32-big>>
     // 64-bit values beyond JS Int range fall through to a saturated
-    // representation; integer payloads at this magnitude are not part of
+    // representation, integer payloads at this magnitude are not part of
     // Lily's wire format in practice.
     n -> <<0xd3, n:64-big>>
   }
@@ -128,10 +127,35 @@ pub fn encode_nil() -> BitArray {
   <<0xc0>>
 }
 
-/// Decode a MessagePack value at the start of `bytes`. Returns the parsed
+/// Default nesting cap for [`decode`](#decode). A hostile frame can nest
+/// arrays and maps without bound, so without a cap the recursive decode would
+/// exhaust the stack. Real Lily models stay far below this.
+@internal
+pub const default_max_depth = 128
+
+/// Decode a MessagePack value at the start of `bytes`, capping nesting at
+/// [`default_max_depth`](#default_max_depth). Returns the parsed
 /// [`Value`](#Value) and the remaining bytes after it.
 @internal
 pub fn decode(bytes: BitArray) -> Result(#(Value, BitArray), Nil) {
+  decode_bounded(bytes, default_max_depth)
+}
+
+/// Like [`decode`](#decode) but with a caller-chosen nesting cap.
+@internal
+pub fn decode_bounded(
+  bytes: BitArray,
+  max_depth: Int,
+) -> Result(#(Value, BitArray), Nil) {
+  decode_at(bytes, 0, max_depth)
+}
+
+fn decode_at(
+  bytes: BitArray,
+  depth: Int,
+  max_depth: Int,
+) -> Result(#(Value, BitArray), Nil) {
+  use <- bool.guard(when: depth > max_depth, return: Error(Nil))
   case bytes {
     <<0xc0, rest:bytes>> -> Ok(#(ValueNil, rest))
     <<0xc2, rest:bytes>> -> Ok(#(ValueBool(False), rest))
@@ -174,15 +198,19 @@ pub fn decode(bytes: BitArray) -> Result(#(Value, BitArray), Nil) {
 
     // Fixarray (0x90, 0x9f)
     <<b, rest0:bytes>> if b >= 0x90 && b <= 0x9f ->
-      decode_array(rest0, b - 0x90, [])
-    <<0xdc, length:16-big, rest0:bytes>> -> decode_array(rest0, length, [])
-    <<0xdd, length:32-big, rest0:bytes>> -> decode_array(rest0, length, [])
+      decode_array(rest0, b - 0x90, [], depth + 1, max_depth)
+    <<0xdc, length:16-big, rest0:bytes>> ->
+      decode_array(rest0, length, [], depth + 1, max_depth)
+    <<0xdd, length:32-big, rest0:bytes>> ->
+      decode_array(rest0, length, [], depth + 1, max_depth)
 
     // Fixmap (0x80, 0x8f)
     <<b, rest0:bytes>> if b >= 0x80 && b <= 0x8f ->
-      decode_map(rest0, b - 0x80, [])
-    <<0xde, length:16-big, rest0:bytes>> -> decode_map(rest0, length, [])
-    <<0xdf, length:32-big, rest0:bytes>> -> decode_map(rest0, length, [])
+      decode_map(rest0, b - 0x80, [], depth + 1, max_depth)
+    <<0xde, length:16-big, rest0:bytes>> ->
+      decode_map(rest0, length, [], depth + 1, max_depth)
+    <<0xdf, length:32-big, rest0:bytes>> ->
+      decode_map(rest0, length, [], depth + 1, max_depth)
 
     _ -> Error(Nil)
   }
@@ -245,13 +273,16 @@ fn decode_array(
   bytes: BitArray,
   remaining: Int,
   accumulator: List(Value),
+  depth: Int,
+  max_depth: Int,
 ) -> Result(#(Value, BitArray), Nil) {
   case remaining {
     0 -> Ok(#(ValueArray(list.reverse(accumulator)), bytes))
     n ->
-      case decode(bytes) {
+      case decode_at(bytes, depth, max_depth) {
         Error(_) -> Error(Nil)
-        Ok(#(item, rest)) -> decode_array(rest, n - 1, [item, ..accumulator])
+        Ok(#(item, rest)) ->
+          decode_array(rest, n - 1, [item, ..accumulator], depth, max_depth)
       }
   }
 }
@@ -260,17 +291,25 @@ fn decode_map(
   bytes: BitArray,
   remaining: Int,
   accumulator: List(#(Value, Value)),
+  depth: Int,
+  max_depth: Int,
 ) -> Result(#(Value, BitArray), Nil) {
   case remaining {
     0 -> Ok(#(ValueMap(list.reverse(accumulator)), bytes))
     n ->
-      case decode(bytes) {
+      case decode_at(bytes, depth, max_depth) {
         Error(_) -> Error(Nil)
         Ok(#(key, after_key)) ->
-          case decode(after_key) {
+          case decode_at(after_key, depth, max_depth) {
             Error(_) -> Error(Nil)
             Ok(#(value, after_value)) ->
-              decode_map(after_value, n - 1, [#(key, value), ..accumulator])
+              decode_map(
+                after_value,
+                n - 1,
+                [#(key, value), ..accumulator],
+                depth,
+                max_depth,
+              )
           }
       }
   }

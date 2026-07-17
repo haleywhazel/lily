@@ -64,12 +64,12 @@
 ////
 //// For client-side reactions that don't belong in `update`, focus management,
 //// analytics, kicking off a fetch, register a hook with
-//// [`on_message`](#on_message); it runs after each dispatched message with the
+//// [`on_message`](#on_message), it runs after each dispatched message with the
 //// full model. The connection lifecycle has its own hooks,
 //// [`on_connect`](#on_connect) fires once on the first acknowledged
 //// connection, [`on_disconnect`](#on_disconnect) and
 //// [`on_reconnect`](#on_reconnect) track drops and recoveries (pair them with
-//// [`connection_status`](#connection_status) for a "reconnecting…" banner),
+//// [`connection_status`](#connection_status) for a "reconnecting..." banner),
 //// and [`on_snapshot`](#on_snapshot) lets you decide how a fresh server
 //// snapshot merges into what the client already has.
 ////
@@ -80,7 +80,7 @@
 //// then move around with [`navigate`](#navigate) to push a new history entry or
 //// [`replace`](#replace) to swap the current one without leaving a back-button
 //// stop. To make ordinary `<a href>` links navigate warmly (no page reload),
-//// pipe on [`intercept_links`](#intercept_links); and when a path must actually
+//// pipe on [`intercept_links`](#intercept_links), and when a path must actually
 //// be handled by the server, use [`load`](#load) for a full page navigation.
 ////
 //// Because the wire only ever carries messages, an offline client keeps
@@ -88,7 +88,7 @@
 //// or a navigation, describe it once with
 //// [`session_persistence`](#session_persistence) plus
 //// [`session_field`](#session_field) and switch it on with
-//// [`attach_session`](#attach_session); each field is mirrored to
+//// [`attach_session`](#attach_session), each field is mirrored to
 //// localStorage. Model fields wrapped in [`store.Local`](./store.html#Local)
 //// stay client-only and are preserved when a reconnect snapshot lands.
 ////
@@ -142,14 +142,12 @@ pub opaque type InterceptOption {
 }
 
 @target(javascript)
-/// Complete session persistence configuration. It's kept opaque so that users
-/// avoid having to mess with the fields themselves which can look quite messy.
-///
-/// To interact with the session persistence:
+/// Session persistence configuration, kept opaque so you don't touch the
+/// fields directly.
 ///
 /// - Build using [`client.session_persistence`](#session_persistence)
 /// - Add fields with [`client.session_field`](#session_field)
-/// - Attach to the runtime  with [`client.attach_session`](#attach_session)
+/// - Attach to the runtime with [`client.attach_session`](#attach_session)
 pub opaque type Persistence(session) {
   Persistence(fields: List(Field(session)))
 }
@@ -166,12 +164,9 @@ pub opaque type Runtime(model, message) {
 // =============================================================================
 
 @target(javascript)
-/// Attach session persistence to the runtime to allow for data to persist
-/// across page navigation etc.. This allows for model hydration via local
-/// storage, and also allows for local state to be updated by the model through
-/// the provided `get` and `set` functions.
-///
-/// Pipe this in the chain after `client.start`.
+/// Attach session persistence so data survives page navigation. It hydrates
+/// the model from localStorage and lets local state update from the model
+/// through the `get` and `set` functions. Pipe it after `client.start`.
 ///
 /// ```gleam
 /// let persistence =
@@ -227,9 +222,8 @@ pub fn clear_session() -> Nil {
 
 @target(javascript)
 /// Inject the server-assigned client identifier into the model when a
-/// `Connected` frame arrives. The server sends this frame immediately after
-/// a WebSocket connection is established, so the model is updated before
-/// the first snapshot arrives.
+/// `Connected` frame arrives. The server sends that frame right after the
+/// WebSocket connects, so the model is updated before the first snapshot.
 ///
 /// ```gleam
 /// runtime
@@ -250,15 +244,13 @@ pub fn client_id(
 }
 
 @target(javascript)
-/// Connect the runtime to a server using the provided transport method. The
-/// connector function is obtained from a transport implementation, e.g.
+/// Connect the runtime to a server over the given transport. The connector
+/// comes from a transport implementation, e.g.
 /// [`websocket_connect(config)`](./transport.html#websocket_connect) or
-/// [`http_connect(config)`](./transport.html#http_connect).
-///
-/// This also creates all the handlers for handling incoming messages, and
-/// changes to connection status. Session messages are sent as `SessionMessage`
-/// frames; topic messages are routed to the correct topic using the wiring
-/// config passed to [`client.start`](#start).
+/// [`http_connect(config)`](./transport.html#http_connect). It also wires up
+/// the incoming-message and connection-status handlers, sending session
+/// messages as `SessionMessage` frames and routing topic messages by the
+/// wiring from [`client.start`](#start).
 ///
 /// ```gleam
 /// import lily/transport
@@ -319,19 +311,11 @@ pub fn connect(
 }
 
 @target(javascript)
-/// Often times you want to be able to track the connection status (for
-/// example, if you want to disable an element when there is no connection).
-/// This sets up tracking for the connection status in the model: Lily calls
-/// `set` with `True` when the transport connects and `False` when it
-/// disconnects. Components can slice this field to react to connectivity
-/// changes.
-///
-/// This should be called before [`client.connect`](#connect) to ensure the
-/// initial connection state is captured.
-///
-/// Also note that while this call is optional, connection status is tracked
-/// regardless internally, this mainly allows the status to be reflected within
-/// the model.
+/// Track connection status in the model, handy for disabling elements while
+/// offline. Lily calls `set` with `True` when the transport connects and
+/// `False` when it disconnects, and components can slice the field to react.
+/// Call it before [`client.connect`](#connect) to capture the initial state.
+/// It's optional, status is tracked internally either way.
 ///
 /// ```gleam
 /// runtime
@@ -355,10 +339,9 @@ pub fn connection_status(
 
 @target(javascript)
 /// Get a dispatch function that sends messages into the runtime's update
-/// loop. The [`Store`](./store.html#Store) is pure, so this is needed to
-/// handle side-effects (fetch callbacks, timers, etc.). After generating
-/// the dispatch function, you are able to use this to send updates whenever
-/// some side-effect is called to update the store again.
+/// loop. The [`Store`](./store.html#Store) is pure, so this is how you feed in
+/// side-effects like fetch callbacks and timers, calling it to update the
+/// store whenever the side-effect fires.
 ///
 /// ```gleam
 /// let runtime = client.start(store, shared.wiring())
@@ -374,10 +357,9 @@ pub fn dispatch(runtime: Runtime(model, message)) -> fn(message) -> Nil {
 }
 
 @target(javascript)
-/// Generate a random 32-character hex string suitable for use as a
-/// client-side session identifier. Each call returns a unique value derived
-/// from `crypto.getRandomValues`, so it is safe to call at application
-/// startup and store in the session model.
+/// Generate a random 32-character hex string for use as a client-side session
+/// identifier. Each call returns a unique value from `crypto.getRandomValues`,
+/// so it's safe to call at startup and store in the session model.
 ///
 /// ```gleam
 /// let session_id = client.generate_session_id()
@@ -391,24 +373,22 @@ pub fn generate_session_id() -> String {
 }
 
 @target(javascript)
-/// Variant of [`start`](#start) that adopts a pre-rendered DOM and
-/// reads the embedded snapshot from `<script id="lily-snapshot">`. Pair
-/// with [`transport.encode_initial_snapshot`](./transport.html#encode_initial_snapshot)
+/// Variant of [`start`](#start) that adopts a pre-rendered DOM and reads the
+/// embedded snapshot from `<script id="lily-snapshot">`. Pair with
+/// [`transport.encode_initial_snapshot`](./transport.html#encode_initial_snapshot)
 /// for the embedded state and
 /// [`component.render_to_string`](./component.html#render_to_string) for the
-/// surrounding HTML. This is hydration from a fixed initial snapshot (markup
+/// surrounding HTML. This hydrates from a fixed initial snapshot (markup
 /// rendered ahead of time), not per-request server-side rendering.
 ///
-/// If the embedded snapshot is missing or fails to decode, hydrate
-/// silently falls back to the model in the supplied store. No warning is
-/// raised: in production the script tag may legitimately be absent (a CDN
-/// stripping inline scripts, a CSP blocking inline content), and the
-/// store's model is a valid initial state by definition. Detect missing
-/// snapshots in dev by checking the embed yourself before calling hydrate.
+/// A missing or undecodable snapshot falls back to the store's model silently,
+/// since the script tag can legitimately be absent in production (a CDN
+/// stripping inline scripts, a CSP blocking them) and the store's model is a
+/// valid initial state. Check the embed yourself if you want to catch that in
+/// dev.
 ///
-/// Lenient hydration: components do not assert byte-equality with the
-/// pre-rendered DOM. The first event after hydrate triggers a full
-/// render, replacing any mismatched content.
+/// Hydration is lenient, components don't assert byte-equality, and the first
+/// event triggers a full render that replaces any mismatch.
 ///
 /// ```gleam
 /// pub fn main() {
@@ -451,13 +431,13 @@ pub fn hydrate(
 /// a left-click on a *same-origin* internal link is turned into a warm
 /// [`navigate`](#navigate) (history push + [`url`](#url) setter), with no full
 /// page reload. Everything that should stay a real navigation falls through
-/// untouched — external/cross-origin links, `target="_blank"`, `download`,
+/// untouched, external/cross-origin links, `target="_blank"`, `download`,
 /// `rel="external"`, `mailto:`/`tel:` schemes, modified/middle clicks,
 /// in-page `#fragment` anchors, and any link carrying the opt-out attribute
 /// (default `data-lily-native`). Pipe it once, after [`url`](#url).
 ///
-/// This is opt-in and deliberately minimal — Lily is not a router. Reach for it
-/// only when navigation should preserve the live socket and offline state;
+/// Opt-in and deliberately minimal, Lily is not a router. Reach for it only
+/// when navigation should preserve the live socket and offline state,
 /// otherwise let links do full server navigations.
 ///
 /// ```gleam
@@ -492,7 +472,7 @@ pub fn intercept_within(selector: String) -> InterceptOption {
 
 @target(javascript)
 /// Perform a full page navigation (`window.location.assign`), leaving the Lily
-/// app entirely — the counterpart to [`navigate`](#navigate)'s in-app history
+/// app entirely, the counterpart to [`navigate`](#navigate)'s in-app history
 /// push. Use it when a path must be handled by the *server*, not the client
 /// router: after a logout that clears a server cookie, entering a
 /// server-rendered flow, or otherwise "actually going to the server". The socket
@@ -657,11 +637,10 @@ pub fn replace(runtime: Runtime(model, message), path path: String) -> Nil {
 }
 
 @target(javascript)
-/// Add a field to the session persistence configuration. Each field represents
-/// a single value stored in `localStorage` under `lily_session_{key}`.
-///
-/// The `get` and `set` functions extract and inject the field from the session
-/// type. The `encode` and `decoder` handle JSON serialisation.
+/// Add a field to the session persistence config. Each field is one value
+/// stored in `localStorage` under `lily_session_{key}`. `get` and `set` pull
+/// it out of and back into the session type, and `encode` and `decoder` handle
+/// its JSON.
 ///
 /// ```gleam
 /// client.session_persistence()
@@ -743,7 +722,7 @@ pub fn start(
 
 @target(javascript)
 /// Subscribe this connection to a topic. The runtime sends a `Subscribe`
-/// frame to the server; on `Snapshot` arrival the topic's slice in the model
+/// frame to the server, on `Snapshot` arrival the topic's slice in the model
 /// is hydrated and components re-render. Idempotent, no-op if already
 /// subscribed. Must be called after [`client.connect`](#connect).
 ///
@@ -765,7 +744,7 @@ pub fn subscribe(
 /// Unsubscribe from a topic: sends an unsubscribe frame so the server stops
 /// pushing updates for it. Fire-and-forget, the server sends no confirmation
 /// and the topic's last slice value is left as-is in the model. Re-subscribing
-/// pulls a fresh snapshot that replaces it (for stateful topics); clear it
+/// pulls a fresh snapshot that replaces it (for stateful topics), clear it
 /// sooner with your own message if you need to. Must be called after
 /// [`client.connect`](#connect).
 ///
@@ -784,7 +763,7 @@ pub fn unsubscribe(
 
 @target(javascript)
 /// Track the browser URL in the model. The `set` callback receives the
-/// parsed [`uri.Uri`](https://hexdocs.pm/gleam_stdlib/gleam/uri.html); map
+/// parsed [`uri.Uri`](https://hexdocs.pm/gleam_stdlib/gleam/uri.html), map
 /// it to your own route ADT inside. The initial URL is read on attach,
 /// and changes from `popstate`, [`navigate`](#navigate), and
 /// [`replace`](#replace) all flow through the same setter.

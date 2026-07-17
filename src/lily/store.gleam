@@ -104,10 +104,9 @@ import lily/transport.{type Target}
 // PUBLIC TYPES
 // =============================================================================
 
-/// Model fields that are client-only and not synced to the server should be
-/// wrapped using `Local(_)`. The server holds `Local` fields at their initial
-/// values and the client runtime preserves them when applying a server
-/// snapshot on reconnect.
+/// Wrap client-only model fields that shouldn't sync to the server. The
+/// server holds `Local` fields at their initial values and the client
+/// preserves them when applying a server snapshot on reconnect.
 ///
 /// ```gleam
 /// pub type Model {
@@ -121,7 +120,7 @@ pub type Local(a) {
 /// The store with your application state and update logic. The same store
 /// runs on both the client (via [`client.start`](./client.html#start))
 /// and the server (via [`server.start`](./server.html#start)). Construct via
-/// [`new`](#new); fields are not exposed to keep the internal layout free
+/// [`new`](#new), fields are not exposed to keep the internal layout free
 /// to evolve.
 pub opaque type Store(model, message) {
   Store(model: model, update: fn(model, message) -> model)
@@ -161,8 +160,8 @@ pub fn new(
 }
 
 /// Register the session store entry in the wiring. The `extract` function
-/// identifies session messages; `update` applies them to the session
-/// sub-model; `field_get` and `field_set` map between the outer model and
+/// identifies session messages, `update` applies them to the session
+/// sub-model, `field_get` and `field_set` map between the outer model and
 /// the session sub-model.
 ///
 /// ```gleam
@@ -191,7 +190,7 @@ pub fn session(
 }
 
 /// Register a topic store entry in the wiring. The `id` is the topic
-/// identifier used in `client.subscribe`; the other parameters are the same
+/// identifier used in `client.subscribe`, the other parameters are the same
 /// as for [`session`](#session).
 ///
 /// ```gleam
@@ -226,12 +225,11 @@ pub fn topic(
 /// dynamic ids sharing `prefix` (`"room:1"`, `"room:2"`, and so on) to a
 /// keyed slice, so a client can be subscribed to many instances at once.
 ///
-/// `extract` returns the instance key together with the sub-message; the full
-/// topic id on the wire is `prefix <> key`. `field_get` and `field_set` read
-/// and write one instance's sub-model by key, so back them with a keyed
-/// collection such as `Dict(String, _)` on your model. This one entry is what
-/// lets an outgoing message route to the right instance, an incoming update
-/// apply to the right key, and a snapshot merge into the right key.
+/// `extract` returns the instance key together with the sub-message, and the
+/// full topic id on the wire is `prefix <> key`. `field_get` and `field_set`
+/// read and write one instance's sub-model by key, so back them with a keyed
+/// collection like `Dict(String, _)`. This single entry routes outgoing
+/// messages, incoming updates, and snapshot merges to the right key.
 ///
 /// ```gleam
 /// store.wiring()
@@ -357,9 +355,9 @@ pub fn merge_snapshot(
 }
 
 /// Determine which target a message should be routed to. Returns `Session`
-/// when no topic extract function accepts the message; this is the safe
+/// when no topic extract function accepts the message, this is the safe
 /// fallback for unrecognised messages. Session wins if both the session
-/// and a topic extract accept the same message; topic `extract` functions
+/// and a topic extract accept the same message, topic `extract` functions
 /// must be mutually exclusive.
 @internal
 pub fn route_message(wiring: Wiring(model, message), message: message) -> Target {

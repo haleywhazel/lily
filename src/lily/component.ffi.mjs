@@ -51,7 +51,7 @@ export function renderTree(runtime, rootSelector, component, model, toHtml, toSl
   // segment for the same selector (so re-mounts replace) while leaving
   // other mount points alone, which is what makes overlay-style portals
   // work without a separate variant. Component IDs continue counting
-  // across mounts; only the segment is selector-scoped.
+  // across mounts, only the segment is selector-scoped.
   handle.startMountSegment(rootSelector);
 
   const html = renderComponent(handle, component, model, toHtml, toSlot);
@@ -60,7 +60,7 @@ export function renderTree(runtime, rootSelector, component, model, toHtml, toSl
 
   // Trigger only this mount's handlers, not the global registry.
   // Otherwise a second mount would re-fire every previously-mounted
-  // tree's handlers; harmless (they're idempotent) but wasteful.
+  // tree's handlers, harmless (they're idempotent) but wasteful.
   // Handlers fire before bindings drain because the first handler call
   // for a `simple` / `switch` wraps innerHTML on its component root,
   // which would wipe any element-scoped listener that was attached to
@@ -93,11 +93,11 @@ export function renderTree(runtime, rootSelector, component, model, toHtml, toSl
  * (matching how the constructors append them):
  *
  *  - `Listener`: queues the binding to fire after renderTree's innerHTML
- *    pass; no element of its own (suppressed inside each / each_live /
+ *    pass, no element of its own (suppressed inside each / each_live /
  *    switch item bodies via handle.queueBinding).
  *  - `Transition`: wraps in a marker div carrying the enter class (scheduled
  *    for removal) plus the exit class and duration as data attributes for
- *    removeWithTransition; no reactive handler of its own.
+ *    removeWithTransition, no reactive handler of its own.
  *  - `Connection`: wraps in a div whose disabled / aria-disabled /
  *    lily-disconnected state tracks the connection predicate.
  */
@@ -119,9 +119,9 @@ function applyDecorations(handle, decorations, html, model) {
         );
         html =
           `<div data-lily-component="${componentId}" ` +
-          `data-lily-transition-exit="${exit}" ` +
+          `data-lily-transition-exit="${escapeAttribute(exit)}" ` +
           `data-lily-transition-duration="${durationMs}" ` +
-          `class="${enter}">${html}</div>`;
+          `class="${escapeAttribute(enter)}">${html}</div>`;
         break;
       }
 
@@ -311,7 +311,7 @@ function createEachLiveHandler(
  *
  * Callers supply two callbacks. `onDrop(keyStr)` runs after a child element
  * has been removed from the DOM, used to release per-key state. `onItem`
- * runs once per item; the caller decides whether to render, patch, or do
+ * runs once per item, the caller decides whether to render, patch, or do
  * nothing. Anything that must run after all items are positioned can be
  * pushed onto `deferred` from `onItem`.
  */
@@ -375,7 +375,7 @@ function createKeyedListHandler({ handle, selector, slice, getKey, onDrop, onIte
         // Re-add mid-exit: cancel the pending removal and strip the
         // exit class synchronously. The abort branch inside
         // removeWithTransition would strip it too, but that runs as a
-        // microtask after the current dispatch returns; doing it here
+        // microtask after the current dispatch returns, doing it here
         // means subsequent synchronous DOM reads see the cleaned-up
         // element immediately.
         handle.cancelPendingExit(element);
@@ -411,7 +411,7 @@ function createKeyedListHandler({ handle, selector, slice, getKey, onDrop, onIte
 /**
  * Returns `cached` if it's still in the document, otherwise re-queries
  * `selector`. Handlers cache their root element to skip a querySelector on
- * every model update; the re-query path is for re-mounts after detachment.
+ * every model update, the re-query path is for re-mounts after detachment.
  */
 function ensureCached(cached, selector) {
   return cached && cached.isConnected
@@ -420,10 +420,24 @@ function ensureCached(cached, selector) {
 }
 
 /**
+ * Escapes a value for interpolation into a double-quoted HTML attribute.
+ * Transition enter/exit classes are normally static literals, but nothing stops
+ * an app deriving them from the model, so escape the characters that could
+ * break out of the attribute or inject markup.
+ */
+function escapeAttribute(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+/**
  * Finds the Transition wrapper inside or at `element`. When a
  * Transition is placed as the top-level component of an each_live /
  * each item, the framework's key wrapper (`<div data-lily-key>`) sits
- * one level above it; for `switch`, the switch wrapper sits above it.
+ * one level above it, for `switch`, the switch wrapper sits above it.
  * Returns null when the subtree doesn't include a Transition (so the
  * removal proceeds synchronously).
  */
@@ -468,7 +482,7 @@ function parseCssDurationMs(value) {
  * first child's), applies the exit class to that wrapper, races
  * animationend vs the duration timer, then removes `element` from
  * `parent` and calls `onComplete`. If not, removes immediately. Async
- * because the await is genuine; callers don't have to await unless
+ * because the await is genuine, callers don't have to await unless
  * ordering matters.
  *
  * The pendingExits map on the handle is keyed by the outer `element`
@@ -539,14 +553,13 @@ async function removeWithTransition(handle, parent, element, onComplete) {
  * cleanup when the parent item is removed or re-rendered.
  */
 function renderChildAndCaptureIds(handle, child, model, toHtml, toSlot) {
-  const registry = handle.getComponentRegistry();
-  const beforeKeys = new Set(registry.keys());
-  const html = renderComponent(handle, child, model, toHtml, toSlot);
-  const newIds = [];
-  for (const k of registry.keys()) {
-    if (!beforeKeys.has(k)) newIds.push(k);
+  const newIds = handle.beginIdCapture();
+  try {
+    const html = renderComponent(handle, child, model, toHtml, toSlot);
+    return { html, newIds };
+  } finally {
+    handle.endIdCapture();
   }
-  return { html, newIds };
 }
 
 /**
@@ -798,7 +811,7 @@ function renderSwitch(handle, component, model, toHtml, toSlot) {
   handle.registerComponent(componentId, handler);
 
   // Initial render. The child's handlers are registered as a side effect
-  // of renderChildAndCaptureIds; the outer registry trigger in
+  // of renderChildAndCaptureIds, the outer registry trigger in
   // renderTree runs them with the model.
   const wasInitial = handle.suppressBindings();
   const initialChild = build(slice(model));
@@ -953,6 +966,6 @@ const RENDERERS = {
 };
 
 // Regex matching a single `<lily-slot></lily-slot>` placeholder (with
-// optional whitespace). Used by substituteSlots; passed to String.split,
+// optional whitespace). Used by substituteSlots, passed to String.split,
 // which always splits globally regardless of the `g` flag.
 const SLOT_RE = /<lily-slot[^>]*>\s*<\/lily-slot>/;

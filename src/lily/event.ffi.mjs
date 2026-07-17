@@ -84,7 +84,7 @@ export function setupClickEventWithOptions(selector, options, handler) {
 /**
  * Attaches a coordinate event with x,y position, the concrete target's
  * data-* attributes, and options. The selector is the match gate (the event
- * must happen within it); the ElementData is read from event.target, the
+ * must happen within it), the ElementData is read from event.target, the
  * concrete element that fired, so a scoped listener on `#<id>` still
  * distinguishes the sub-element the user acted on. preventDefault is hoisted
  * outside debounce/throttle so drop targets stay receptive even when the
@@ -226,7 +226,7 @@ export function setupFocusGrid(items, columns, wrap) {
 
 /**
  * Register a set of sibling elements as an arrow-navigable focus group (the
- * roving-tabindex pattern). Several groups coexist; the active one on a
+ * roving-tabindex pattern). Several groups coexist, the active one on a
  * keypress is whichever contains the focused element.
  */
 export function setupFocusGroup(items, orientation, wrap) {
@@ -236,7 +236,7 @@ export function setupFocusGroup(items, orientation, wrap) {
 
 /**
  * Push a new focus trap onto the stack. Tab cycles within `within` while
- * this trap is the top of the stack; releaseOn runs on every keydown and
+ * this trap is the top of the stack, releaseOn runs on every keydown and
  * returning true pops the trap and dispatches onExit. Activation is
  * deferred by two frames so a dispatch that just rendered the container
  * has a chance to flush, mirrors the rAF strategy in setupFocus.
@@ -534,7 +534,7 @@ export function watchFocusTraps() {
 /**
  * Install a document-level Escape-to-dismiss handler. Idempotent. On Escape,
  * the topmost (last in document order) element carrying
- * `data-lily-escape-dismiss` is consulted; its attribute value is a CSS
+ * `data-lily-escape-dismiss` is consulted, its attribute value is a CSS
  * selector, and the element it points at is clicked. This drives dismissal
  * through the ordinary data-message delegation, exactly like a focus trap's
  * dismiss, but without trapping focus, so non-modal overlays (popover, menu,
@@ -615,7 +615,7 @@ function activateDeclaredTrap(element) {
   const trap = {
     element,
     within: null,
-    // Escape dismisses only when the element names a dismiss target; without
+    // Escape dismisses only when the element names a dismiss target, without
     // one the trap is inert (e.g. an alertdialog forcing an explicit choice).
     releaseOn: (key) => dismiss !== "" && key === "Escape",
     // Dismiss flows through the normal data-message delegation. Click the
@@ -647,10 +647,10 @@ function activateDeclaredTrap(element) {
 /**
  * Wraps a raw DOM event listener with optional debounce, throttle, once, and
  * stopPropagation behaviours. debounceMs and throttleMs are -1 when disabled.
- * Applied in order: stopPropagation → once → throttle → debounce (outermost
- * last, so debounce gates before throttle fires).
+ * Applied in this order, stopPropagation then once then throttle then debounce
+ * (outermost last, so debounce gates before throttle fires).
  *
- * Note: preventDefault is handled separately in preventDefaultFirst so it
+ * preventDefault is handled separately in preventDefaultFirst so it
  * fires unconditionally even when the inner handler is throttled/debounced.
  */
 function applyOptions(listener, debounceMs, throttleMs, once, stopPropagation) {
@@ -715,7 +715,7 @@ function collectDeclaredTraps(node) {
 /**
  * Extracts all data-* attributes from an element as a Gleam list of
  * [name, value] tuples, preserving original kebab-case names.
- * e.g. data-card-id="3" → ["card-id", "3"]
+ * e.g. data-card-id="3" becomes ["card-id", "3"]
  */
 function datasetToList(element) {
   let list = new Empty();
@@ -768,7 +768,7 @@ function delegatedEventName(eventName) {
 
 /**
  * Pick the delegation root for a selector. Window-only events listen on
- * window; everything else delegates from document.
+ * window, everything else delegates from document.
  */
 function delegationRoot(selector) {
   return selector === "window" ? window : document;
@@ -868,7 +868,7 @@ function handleGroupKeydown(event) {
  */
 function handleTrapKeydown(event, trap) {
   if (trap.releaseOn(event.key)) {
-    // Escape is a stack: a non-modal overlay opened on top (popover, menu, …)
+    // Escape is a stack: a non-modal overlay opened on top (popover, menu, ...)
     // handles Escape first via watchEscapeDismiss and marks it handled. Only
     // dismiss this trapped modal once nothing shallower has claimed the key, so
     // one Escape closes exactly one overlay.
@@ -1039,7 +1039,7 @@ const declaredTraps = new Map();
 
 // One live delegated listener per binding key (see registerDelegatedListener).
 // Keyed by event semantics + selector so a re-registered binding replaces its
-// predecessor rather than stacking; distinct events/selectors coexist.
+// predecessor rather than stacking, distinct events/selectors coexist.
 const delegatedListeners = new Map();
 
 // Standard focusable-elements selector, used by setupFocusTrap to enumerate
@@ -1057,7 +1057,7 @@ const FOCUSABLE_SELECTOR = [
 
 // Registry of arrow-navigable focus groups, keyed by the items selector.
 // Unlike traps (a LIFO stack with one active entry), several groups coexist
-// on a page; the active group on a keypress is the one whose items include
+// on a page, the active group on a keypress is the one whose items include
 // the focused element. One document-level keydown listener serves them all.
 const focusGroups = new Map();
 
@@ -1084,7 +1084,7 @@ let fileDropsInstalled = false;
 let trapObserver = null;
 
 // Stack of focus traps. Each entry is { within, releaseOn, onExit }. The
-// top of the stack is the active trap; entries below are suspended until
+// top of the stack is the active trap, entries below are suspended until
 // the entries above them are popped. A single document-level keydown
 // listener (trapKeydownHandler) consults the top entry on every keypress,
 // so nested overlays each get deterministic focus behaviour without

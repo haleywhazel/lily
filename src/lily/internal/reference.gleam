@@ -1,11 +1,8 @@
-//// JS-only mutable reference cell. Used internally to host server and topic
-//// state across asynchronous browser callbacks (WebSocket onmessage, fetch
-//// resolutions, EventSource events, setTimeout). On Erlang, the same role
-//// is played by OTP actors; this module provides the equivalent on
-//// JavaScript.
-////
-//// All functions are marked `@internal` so sibling Lily modules can use
-//// them, but they are not part of the public API.
+//// A plain mutable cell, JavaScript only. The browser runtime has to keep its
+//// server and topic state somewhere it can reach again from an async callback,
+//// a WebSocket message, a fetch that resolved, an EventSource event, a timer,
+//// and on JavaScript there is no actor to hold it, so it lives in one of
+//// these. Erlang gets the real thing, an OTP process, and never needs this.
 
 // =============================================================================
 // INTERNAL TYPES

@@ -1,5 +1,8 @@
 # Lily
 
+[![Package Version](https://img.shields.io/hexpm/v/lily)](https://hex.pm/packages/lily)
+[![Hex Docs](https://img.shields.io/badge/hex-docs-ffaff3)](https://hexdocs.pm/lily/)
+
 Lily is a web framework for Gleam that focuses specifically on having real-time sync with the server while keeping client interactions for offline capabilities, e.g. document editing, preventing your Phoenix LiveView app from crumbling as soon as the internet connection is lost.
 
 In Lily, states are owned authoritatively by a single store that communicates with the server to prevent sprawling component states. Unlike Lustre, however, rendering is owned by each individual component and they can dictate exactly how they want rendering to occur.

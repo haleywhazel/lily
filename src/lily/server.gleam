@@ -117,6 +117,7 @@ import gleam/list
 import gleam/option.{type Option}
 import gleam/result
 import gleam/string
+import lily/logging
 import lily/store
 import lily/transport.{type Serialiser}
 
@@ -140,6 +141,7 @@ pub opaque type Builder(model, message) {
     initial_model: model,
     serialiser: Serialiser(model, message),
     wiring: store.Wiring(model, message),
+    max_topics: Int,
   )
 }
 
@@ -205,9 +207,8 @@ pub fn disconnect(
 /// timers that affect one user, async DB results.
 ///
 /// No-op if no client with `client_id` is currently connected. Safe to call
-/// from any process, including spawned tasks, so it composes with async
-/// work patterns, spawn a process to do the slow thing, then call
-/// `dispatch_to` when the result is ready.
+/// from any process, including spawned tasks, so spawn the slow work and
+/// call `dispatch_to` when the result is ready.
 ///
 /// ```gleam
 /// server.on_connect(server, fn(client_id) {
@@ -251,8 +252,8 @@ pub fn generate_client_id() -> String {
 }
 
 /// Process an incoming frame from a client. Decodes the frame and routes
-/// it: `SessionMessage` to the session store; `TopicMessage`,
-/// `Subscribe`, and `Unsubscribe` to the topic actor; `Resync` to a
+/// it: `SessionMessage` to the session store, `TopicMessage`,
+/// `Subscribe`, and `Unsubscribe` to the topic actor, `Resync` to a
 /// per-target snapshot fan-out.
 pub fn incoming(
   server: Server(model, message),
@@ -260,6 +261,22 @@ pub fn incoming(
   bytes bytes: BitArray,
 ) -> Nil {
   platform_incoming(server.handle, client_id, bytes)
+}
+
+/// Set the maximum number of live topic actors the server keeps at once. This
+/// bounds client-driven topic creation through parametric kinds. The default
+/// is generous enough that most servers never reach it. Raise it if your app
+/// legitimately needs more concurrent topics.
+///
+/// ```gleam
+/// server.new(initial:, serialiser:, wiring:)
+/// |> server.max_topics(500_000)
+/// ```
+pub fn max_topics(
+  builder: Builder(model, message),
+  maximum: Int,
+) -> Builder(model, message) {
+  Builder(..builder, max_topics: maximum)
 }
 
 /// Start building a server. Provide the shared initial model (used as
@@ -278,7 +295,12 @@ pub fn new(
   serialiser serialiser: Serialiser(model, message),
   wiring wiring: store.Wiring(model, message),
 ) -> Builder(model, message) {
-  Builder(initial_model: initial, serialiser:, wiring:)
+  Builder(
+    initial_model: initial,
+    serialiser:,
+    wiring:,
+    max_topics: default_max_topics,
+  )
 }
 
 /// Register a hook that runs after a client successfully connects, receiving
@@ -379,6 +401,7 @@ pub fn start(
       on_disconnect_hook: fn(_) { Nil },
       on_message_hook: fn(_, _, _) { Nil },
       on_topic_message_hook: fn(_, _, _) { Nil },
+      max_topics: builder.max_topics,
     )
 
   platform_start(initial_state)
@@ -393,7 +416,7 @@ pub fn start(
 }
 
 /// Stop a running server. Every registered topic actor is asked to stop
-/// first; each subscriber receives a final `Acknowledge(Topic(id), seq)`
+/// first, each subscriber receives a final `Acknowledge(Topic(id), seq)`
 /// so client slices reset cleanly. The underlying server actor then
 /// terminates (Erlang) or its `Reference` state cell is cleared
 /// (JavaScript). Connected session clients receive no extra frame.
@@ -442,7 +465,7 @@ pub fn register_topic(
 /// id that starts with `prefix` and no fixed topic with that id exists,
 /// `create` is called with the full topic id and must return a
 /// `ServerTopicEntry` on success or `None` to reject. The entry is
-/// inserted directly into the server state by `find_or_create_topic`; no
+/// inserted directly into the server state by `find_or_create_topic`, no
 /// server callback is needed.
 @internal
 pub fn register_topic_kind(
@@ -521,12 +544,16 @@ type ServerState(model, message) {
     on_disconnect_hook: fn(String) -> Nil,
     on_message_hook: fn(message, model, String) -> Nil,
     on_topic_message_hook: fn(message, String, String) -> Nil,
+    max_topics: Int,
   )
 }
 
 // =============================================================================
 // PRIVATE FUNCTIONS
 // =============================================================================
+
+// Default cap on live topic actors, overridable with `server.max_topics`.
+const default_max_topics = 100_000
 
 fn handle_connect_logic(
   state: ServerState(model, message),
@@ -636,33 +663,48 @@ fn handle_session_message_logic(
   case dict.get(state.sessions, client_id) {
     Error(_) -> state
     Ok(connection) -> {
-      let new_model = case state.session_apply {
-        option.None -> connection.model
-        option.Some(apply) -> apply(connection.model, message)
+      let applied = case state.session_apply {
+        option.None -> Ok(connection.model)
+        option.Some(apply) -> rescue(fn() { apply(connection.model, message) })
       }
-      let new_seq = connection.sequence + 1
-      case dict.get(state.clients, client_id) {
-        Ok(send) -> {
-          let ack_frame =
-            transport.encode(
-              transport.Acknowledge(
-                target: transport.Session,
-                sequence: new_seq,
-              ),
-              serialiser: state.serialiser,
-            )
-          send(ack_frame)
+      case applied {
+        // A crash means the frame decoded to a value the update function
+        // cannot match. Drop it without acking, keeping the actor alive.
+        Error(reason) -> {
+          logging.warning(
+            "lily: dropped malformed session message from "
+            <> client_id
+            <> ": "
+            <> reason,
+          )
+          state
         }
-        Error(_) -> Nil
+        Ok(new_model) -> {
+          let new_seq = connection.sequence + 1
+          case dict.get(state.clients, client_id) {
+            Ok(send) -> {
+              let ack_frame =
+                transport.encode(
+                  transport.Acknowledge(
+                    target: transport.Session,
+                    sequence: new_seq,
+                  ),
+                  serialiser: state.serialiser,
+                )
+              send(ack_frame)
+            }
+            Error(_) -> Nil
+          }
+          state.on_message_hook(message, new_model, client_id)
+          let sessions =
+            dict.insert(
+              state.sessions,
+              client_id,
+              ConnectionState(model: new_model, sequence: new_seq),
+            )
+          ServerState(..state, sessions:)
+        }
       }
-      state.on_message_hook(message, new_model, client_id)
-      let sessions =
-        dict.insert(
-          state.sessions,
-          client_id,
-          ConnectionState(model: new_model, sequence: new_seq),
-        )
-      ServerState(..state, sessions:)
     }
   }
 }
@@ -867,23 +909,29 @@ fn find_or_create_topic(
 ) -> #(ServerState(model, message), Option(ServerTopicEntry(model, message))) {
   case dict.get(state.topics, topic_id) {
     Ok(entry) -> #(state, option.Some(entry))
-    Error(_) -> {
-      let kind =
-        list.find(state.topic_kinds, fn(k) {
-          string.starts_with(topic_id, k.prefix)
-        })
-      case kind {
-        Error(_) -> #(state, option.None)
-        Ok(k) ->
-          case k.create(topic_id) {
-            option.None -> #(state, option.None)
-            option.Some(entry) -> {
-              let topics = dict.insert(state.topics, topic_id, entry)
-              #(ServerState(..state, topics:), option.Some(entry))
-            }
+    // Parametric topic ids come from the client, so refuse creation past the
+    // cap to stop one client spawning topics without bound.
+    Error(_) ->
+      case dict.size(state.topics) >= state.max_topics {
+        True -> #(state, option.None)
+        False -> {
+          let kind =
+            list.find(state.topic_kinds, fn(k) {
+              string.starts_with(topic_id, k.prefix)
+            })
+          case kind {
+            Error(_) -> #(state, option.None)
+            Ok(k) ->
+              case k.create(topic_id) {
+                option.None -> #(state, option.None)
+                option.Some(entry) -> {
+                  let topics = dict.insert(state.topics, topic_id, entry)
+                  #(ServerState(..state, topics:), option.Some(entry))
+                }
+              }
           }
+        }
       }
-    }
   }
 }
 
@@ -1252,3 +1300,12 @@ fn ffi_generate_client_id() -> String {
 fn ffi_generate_client_id() -> String {
   ""
 }
+
+/// Run `operation`, turning a runtime crash into `Error(description)`. Types
+/// are erased on Erlang, so a hostile frame can decode to a value the update
+/// function cannot match. Catching it keeps one bad frame from dropping the
+/// shared actor and every connection on it.
+@external(erlang, "lily_server_ffi", "rescue")
+@external(javascript, "./server.ffi.mjs", "rescue")
+@internal
+pub fn rescue(operation: fn() -> value) -> Result(value, String)

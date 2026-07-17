@@ -1,15 +1,14 @@
-//// Target-neutral reflection over Gleam runtime values.
+//// Reflection is how your types are serialised without needing a manual codec.
+//// Each target peeks at its own native representation, tagged tuples and atoms
+//// on Erlang, CustomType classes and `Object.keys` on JavaScript, and flattens
+//// the value into a [`Reflected`](#Reflected) tree the pure-Gleam codec can
+//// walk the same way on either side.
 ////
-//// Each target inspects its native representation (tagged tuples and atoms on
-//// Erlang, CustomType classes and `Object.keys` on JavaScript) and produces a
-//// [`Reflected`](#Reflected) value the pure-Gleam codec can walk.
-////
-//// The inverse, [`construct`](#construct), takes a [`Reflected`](#Reflected)
-//// produced by decoding and rebuilds a Gleam value. On JavaScript a
-//// constructor registry must be populated (via `transport.ffi.mjs`'s
-//// `registerModule`) before decoding can recover types whose constructors
-//// the runtime has not seen during encoding. On Erlang, atoms are
-//// self-describing and no registry is needed.
+//// [`construct`](#construct) runs the tree back the other way to rebuild a
+//// value. Erlang atoms are self-describing, so it just works there. JavaScript
+//// classes are not, so the constructor registry has to be seeded first
+//// (through `transport.ffi.mjs`'s `registerModule`) or decoding a type the
+//// runtime hasn't seen fails.
 
 // =============================================================================
 // IMPORTS
@@ -25,7 +24,7 @@ import gleam/dynamic.{type Dynamic}
 ///
 /// `ReflectedConstructor` carries the constructor's PascalCase name plus its
 /// positional fields. Zero-field constructors compile to atoms on Erlang and
-/// to instances of an empty class on JavaScript; both round-trip through
+/// to instances of an empty class on JavaScript, both round-trip through
 /// `ReflectedConstructor(name, [])`.
 ///
 /// `ReflectedTuple` is for raw Gleam tuples like `#(a, b)`, which have no
@@ -61,13 +60,10 @@ pub type Reflected {
 @internal
 pub fn reflect(value: a) -> Reflected
 
-/// Rebuild a Gleam runtime value from a [`Reflected`](#Reflected) tree. The
-/// caller is responsible for ensuring the result is the type the call site
-/// expects; on JavaScript, the constructor registry must contain every
-/// constructor name the tree references or this returns `Error(Nil)`.
-///
-/// The result is wrapped as `Dynamic` because the call site supplies the
-/// final type via `decode.Decoder` plumbing in transport.gleam.
+/// Rebuild a Gleam value from a [`Reflected`](#Reflected) tree. On JavaScript
+/// every constructor name in the tree must be in the registry, or this returns
+/// `Error(Nil)`. The result is `Dynamic` because the call site supplies the
+/// final type through the `decode.Decoder` plumbing in transport.gleam.
 @external(erlang, "lily_reflection_ffi", "construct")
 @external(javascript, "./reflection.ffi.mjs", "construct")
 @internal

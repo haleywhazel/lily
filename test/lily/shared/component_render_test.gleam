@@ -1,5 +1,5 @@
 // Tests for component.render_to_string, the pure SSR walker. Runs on both
-// targets; the same view function should produce the same HTML output on
+// targets, the same view function should produce the same HTML output on
 // Erlang and JavaScript.
 
 import gleam/int
@@ -89,7 +89,7 @@ pub fn render_switch_uses_built_component_test() {
 // =============================================================================
 
 pub fn render_each_renders_per_item_test() {
-  // initial_model has 3 default cards; render each one
+  // initial_model has 3 default cards, render each one
   render(fn(_) {
     component.each(
       slice: fn(_) { [1, 2, 3] },

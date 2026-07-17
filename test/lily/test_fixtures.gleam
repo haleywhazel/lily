@@ -17,7 +17,7 @@ pub type Model {
     count: Int,
     name: String,
     connected: Bool,
-    // Switch tests subscribe to active_tab; secondary_count and
+    // Switch tests subscribe to active_tab, secondary_count and
     // transition_item give disjoint slices for multi-mount and
     // each_live transition tests. `transition_item` is `Option(Int)`
     // (None or Some(id)) rather than `List(Int)` because the JS and

@@ -41,7 +41,11 @@ export function applyPatchesToElement(rootElement, patches) {
     if (patch instanceof SetText) {
       element.textContent = patch.value;
     } else if (patch instanceof SetAttribute) {
-      element.setAttribute(patch.name, patch.value);
+      if (isUnsafeAttribute(patch.name, patch.value)) {
+        logLine(4, `lily: refused unsafe attribute "${patch.name}" in a live patch`);
+      } else {
+        element.setAttribute(patch.name, patch.value);
+      }
     } else if (patch instanceof SetStyle) {
       element.style.setProperty(patch.property, patch.value);
     } else if (patch instanceof RemoveAttribute) {
@@ -76,15 +80,22 @@ export function createRuntime(store, apply) {
   let urlSetter = null;
   let popstateInstalled = false;
 
-  // Per-target sequence tracking (in-memory; keyed by target key string)
+  // Per-target sequence tracking (in-memory, keyed by target key string)
   const sequences = new Map();
 
   // Per-mount-selector tracking so multi-mount works. Each mount call
   // routes its newly-allocated component IDs into the segment for its
-  // selector; remounting the same selector tears down the prior segment
+  // selector, remounting the same selector tears down the prior segment
   // before the new render runs. Mounting a different selector appends.
   const mountSegments = new Map();
   let currentMountSegment = null;
+
+  // Stack of active id-capture frames. Each frame collects the component IDs
+  // registered while it is open, so renderChildAndCaptureIds can learn what a
+  // child render added without snapshotting and diffing the whole registry.
+  // A new ID is pushed onto every open frame, so an outer capture still sees
+  // IDs registered by a nested capture (the old set-diff had the same reach).
+  const idCaptureStack = [];
 
   // Pending transition exits, keyed by element. Lets the each/each_live
   // reconciler cancel an in-flight exit when the same key reappears
@@ -200,6 +211,17 @@ export function createRuntime(store, apply) {
       // IDs belong to it, used to tear down on re-mount of the same
       // selector.
       if (currentMountSegment) currentMountSegment.add(id);
+      // Feed every open capture frame so renderChildAndCaptureIds gets the
+      // new IDs without diffing the registry.
+      for (const frame of idCaptureStack) frame.push(id);
+    },
+    beginIdCapture() {
+      const frame = [];
+      idCaptureStack.push(frame);
+      return frame;
+    },
+    endIdCapture() {
+      idCaptureStack.pop();
     },
     unregisterComponent(id) {
       componentRegistry.delete(id);
@@ -300,7 +322,7 @@ export function createRuntime(store, apply) {
     },
     handleClientId(clientId) {
       // Connected is the server-acknowledged signal that the client has an
-      // identity. The first one fires user.on_connect; subsequent ones
+      // identity. The first one fires user.on_connect, subsequent ones
       // (after a reconnect) don't, since the user already saw on_connect
       // and any reconnect lifecycle is delivered via on_reconnect.
       if (!connectedAtLeastOnce) {
@@ -498,7 +520,7 @@ export function initialNotify(runtime) {
 }
 
 // Turn ordinary same-origin <a href> left-clicks into warm client navigations.
-// One idempotent document listener per runtime; everything that should stay a
+// One idempotent document listener per runtime, everything that should stay a
 // real navigation falls through untouched (see the ordered guards below).
 export function installLinkInterception(runtime, within, optOut) {
   if (typeof document === "undefined") return;
@@ -671,6 +693,23 @@ export function storeSendFrame(runtime, fn) {
 // PRIVATE FUNCTIONS
 // =============================================================================
 
+/**
+ * Guardrail for live-patch attributes. Patch values commonly derive from the
+ * server-driven model, which can carry other clients' input, so an on-handler
+ * name or a script-scheme URL would be a scripting vector. Returns true for
+ * those and lets everything else through. Embedded control characters and
+ * whitespace are stripped first so an obfuscated scheme can't slip past,
+ * matching how browsers normalise a URL scheme.
+ */
+function isUnsafeAttribute(name, value) {
+  if (name.toLowerCase().startsWith("on")) return true;
+  if (URL_ATTRIBUTES.has(name.toLowerCase())) {
+    const scheme = String(value).replace(/[\u0000-\u0020]+/g, "").toLowerCase();
+    if (UNSAFE_URL_SCHEME.test(scheme)) return true;
+  }
+  return false;
+}
+
 /** Merges local values to the model */
 function mergeLocal(incoming, current) {
   if (current instanceof StoreLocal) return current;
@@ -683,3 +722,23 @@ function mergeLocal(incoming, current) {
   }
   return merged;
 }
+
+// =============================================================================
+// PRIVATE CONSTANTS
+// =============================================================================
+
+// Attributes whose value the browser fetches or navigates to as a URL, where a
+// script scheme is a code-execution vector. Data URLs are deliberately allowed
+// through, since blocking them would break inline images, a common and benign
+// pattern.
+const URL_ATTRIBUTES = new Set([
+  "href",
+  "src",
+  "xlink:href",
+  "formaction",
+  "action",
+]);
+
+// Schemes that execute script when placed in a URL attribute. Matched against
+// the leading, control-and-whitespace-stripped scheme.
+const UNSAFE_URL_SCHEME = /^(?:javascript|vbscript):/;

@@ -110,7 +110,7 @@ export function reflect(value) {
     return new ReflectedConstructor(name, arrayToGleamList(fields));
   }
 
-  // Anything else falls back to nil; lily values are always one of the cases
+  // Anything else falls back to nil, lily values are always one of the cases
   // above in practice.
   return new ReflectedNil();
 }
@@ -175,7 +175,7 @@ function constructInner(reflected) {
     return gleamListToArray(reflected.fields).map(constructInner);
   }
   if (reflected instanceof ReflectedDict) {
-    // Entries are a Gleam list of 2-tuples; tuples are plain JS arrays
+    // Entries are a Gleam list of 2-tuples, tuples are plain JS arrays
     // on this target, so each entry is `[reflected_k, reflected_v]`.
     const entries = gleamListToArray(reflected.entries).map((entry) => [
       constructInner(entry[0]),

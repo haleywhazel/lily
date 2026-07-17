@@ -355,6 +355,29 @@ pub fn topic_with_can_subscribe_false_sends_rejected_test() {
   }
 }
 
+@target(erlang)
+pub fn topic_message_from_non_subscriber_is_dropped_test() {
+  let srv = new_server()
+  let _t = new_stateful_topic(srv)
+  let s1 = connect_client(srv, "c1")
+  let _s2 = connect_client(srv, "c2")
+  // Only c1 subscribes, c2 stays outside the topic.
+  server.incoming(srv, client_id: "c1", bytes: encode_subscribe("chat"))
+  // Drain c1's subscribe Snapshot.
+  let _ = recv(s1)
+  // c2, never subscribed, tries to write to the topic. The write must be
+  // dropped rather than mutating shared state and fanning out to subscribers.
+  server.incoming(
+    srv,
+    client_id: "c2",
+    bytes: encode_topic_message("chat", Increment),
+  )
+  process.sleep(20)
+  // The subscriber sees no TopicUpdate, the unauthorised write was ignored.
+  recv(s1)
+  |> should.be_error
+}
+
 // =============================================================================
 // ON SUBSCRIBE / ON UNSUBSCRIBE
 // =============================================================================
@@ -435,7 +458,7 @@ pub fn topic_kind_parse_failure_sends_rejected_test() {
       configure: fn(_, topic) { topic },
     )
   let s1 = connect_client(srv, "c1")
-  // "room:abc", "abc" fails int.parse → Rejected
+  // "room:abc", "abc" fails int.parse and is rejected
   server.incoming(srv, client_id: "c1", bytes: encode_subscribe("room:abc"))
   case recv(s1) {
     Ok(bytes) ->

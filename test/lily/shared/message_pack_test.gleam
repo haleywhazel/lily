@@ -322,3 +322,24 @@ pub fn roundtrip_map_test() {
     ]),
   )
 }
+
+// =============================================================================
+// DEPTH LIMIT
+// =============================================================================
+
+fn nested_array(depth: Int) -> BitArray {
+  case depth {
+    0 -> message_pack.encode_nil()
+    _ -> message_pack.encode_array([nested_array(depth - 1)])
+  }
+}
+
+pub fn decode_bounded_rejects_frames_past_the_cap_test() {
+  message_pack.decode_bounded(nested_array(50), 10)
+  |> should.be_error
+}
+
+pub fn decode_bounded_allows_frames_within_the_cap_test() {
+  message_pack.decode_bounded(nested_array(50), 200)
+  |> should.be_ok
+}

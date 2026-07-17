@@ -68,7 +68,7 @@ export function dispatchWheelEvent(selector, deltaX, deltaY) {
 export function dispatchSimpleEvent(selector, eventName) {
   const el = document.querySelector(selector);
   if (!el) return;
-  // blur/focus don't bubble; dispatch their bubbling equivalents so document-
+  // blur/focus don't bubble, dispatch their bubbling equivalents so document-
   // delegated listeners (focusout/focusin) fire correctly in tests.
   const actualEvent =
     eventName === "blur" ? "focusout" :

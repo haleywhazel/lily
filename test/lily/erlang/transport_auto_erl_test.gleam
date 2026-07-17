@@ -1,4 +1,4 @@
-// Tests for the Erlang auto-serialiser (lily_transport_ffi.erl).
+// Tests for the Erlang auto-serialiser (pure Gleam auto_codec + reflection FFI).
 // All functions are @target(erlang), skipped on JavaScript.
 
 @target(erlang)

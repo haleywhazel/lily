@@ -323,7 +323,7 @@ pub fn client_hydrate_uses_embedded_snapshot_test() {
 @target(javascript)
 pub fn client_hydrate_falls_back_to_store_when_snapshot_missing_test() {
   test_setup.reset_dom()
-  // No lily-snapshot script in the DOM; hydrate should silently use the
+  // No lily-snapshot script in the DOM, hydrate should silently use the
   // store's initial model.
   let runtime =
     store.new(test_fixtures.initial_model(), with: test_fixtures.update)
