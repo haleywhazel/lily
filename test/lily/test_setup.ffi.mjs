@@ -21,6 +21,7 @@ const dom = new JSDOM(
 globalThis.window = dom.window;
 globalThis.document = dom.window.document;
 globalThis.localStorage = dom.window.localStorage;
+globalThis.sessionStorage = dom.window.sessionStorage;
 // Use a synchronous requestAnimationFrame stub so notifications flush
 // immediately in tests. jsdom's RAF uses setTimeout internally which causes
 // recursion when globalThis.setTimeout is replaced.
@@ -111,6 +112,7 @@ export function resetDom() {
   dom.window.document.body.innerHTML =
     '<div id="app"></div><div id="overlays"></div>';
   dom.window.localStorage.clear();
+  dom.window.sessionStorage.clear();
 }
 
 export function historyLength() {

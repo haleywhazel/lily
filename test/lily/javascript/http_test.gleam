@@ -171,7 +171,7 @@ pub fn http_send_when_disconnected_queues_test() {
       serialiser: test_fixtures.custom_serialiser(),
     )
   client.dispatch(runtime)(test_fixtures.Increment)
-  let queued = read_local_storage("lily_http_pending")
+  let queued = read_session_storage("lily_http_pending")
   queued
   |> should.not_equal("")
 }
@@ -219,8 +219,8 @@ pub fn http_close_shuts_down_event_source_test() {
 // =============================================================================
 
 @target(javascript)
-@external(javascript, "./session_test.ffi.mjs", "readLocalStorage")
-fn read_local_storage(_key: String) -> String {
+@external(javascript, "./session_test.ffi.mjs", "readSessionStorage")
+fn read_session_storage(_key: String) -> String {
   ""
 }
 

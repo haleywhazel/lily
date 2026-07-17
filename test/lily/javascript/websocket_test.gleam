@@ -186,7 +186,7 @@ pub fn websocket_send_when_open_sends_directly_test() {
 }
 
 @target(javascript)
-pub fn websocket_send_when_closed_queues_to_localstorage_test() {
+pub fn websocket_send_when_closed_queues_to_sessionstorage_test() {
   test_setup.reset_dom()
   test_setup.reset_mocks()
   let runtime = new_runtime()
@@ -199,9 +199,9 @@ pub fn websocket_send_when_closed_queues_to_localstorage_test() {
       serialiser: test_fixtures.custom_serialiser(),
     )
   // Do NOT open the WS, remains in CONNECTING state
-  // Dispatch a message, should be queued in localStorage
+  // Dispatch a message, should be queued in sessionStorage
   client.dispatch(runtime)(test_fixtures.Increment)
-  let queued = read_local_storage("lily_ws_pending")
+  let queued = read_session_storage("lily_ws_pending")
   queued
   |> should.not_equal("")
 }
@@ -214,8 +214,8 @@ pub fn websocket_send_when_closed_queues_to_localstorage_test() {
 pub fn websocket_flush_pending_on_reconnect_test() {
   test_setup.reset_dom()
   test_setup.reset_mocks()
-  // Pre-seed the pending queue in localStorage
-  write_local_storage(
+  // Pre-seed the pending queue in sessionStorage
+  write_session_storage(
     "lily_ws_pending",
     "[\"queued-message-1\",\"queued-message-2\"]",
   )
@@ -240,14 +240,14 @@ pub fn websocket_flush_pending_on_reconnect_test() {
 // =============================================================================
 
 @target(javascript)
-@external(javascript, "./session_test.ffi.mjs", "writeLocalStorage")
-fn write_local_storage(_key: String, _value: String) -> Nil {
+@external(javascript, "./session_test.ffi.mjs", "writeSessionStorage")
+fn write_session_storage(_key: String, _value: String) -> Nil {
   Nil
 }
 
 @target(javascript)
-@external(javascript, "./session_test.ffi.mjs", "readLocalStorage")
-fn read_local_storage(_key: String) -> String {
+@external(javascript, "./session_test.ffi.mjs", "readSessionStorage")
+fn read_session_storage(_key: String) -> String {
   ""
 }
 
