@@ -6,9 +6,9 @@
 //// corrected state back, so the two stay in sync (see
 //// [transport](./transport.html) for the frames that carry it).
 ////
-//// It compiles for both targets, but you'll almost always want the Erlang one,
-//// the whole design leans on the BEAM's process-per-connection model and its
-//// cheap concurrency.
+//// It compiles for both targets, but not using the Erlang one means that you
+//// aren't leveraging BEAM's model and a full-stack JS model might be better
+//// suited.
 ////
 //// You build a server with [`new`](#new), handing it the same three values
 //// your client gets, the initial model, the serialiser, and the shared
@@ -17,6 +17,7 @@
 ////
 //// ```gleam
 //// import gleam/result
+////
 //// import lily/server
 //// import lily/topic
 ////
@@ -44,7 +45,7 @@
 //// The server never imports `mist` or `wisp`, it's completely
 //// transport-agnostic (the same way Lustre leaves the transport to you), so
 //// you wire it into whatever WebSocket or HTTP handler you're running with
-//// three calls. Mint a stable id for each connection with
+//// three calls. Create a stable id for each connection with
 //// [`generate_client_id`](#generate_client_id), register it with
 //// [`connect`](#connect) (handing over the `send` callback the server uses to
 //// push frames back to that one client), feed every inbound frame to
@@ -99,10 +100,9 @@
 //// ```
 ////
 //// [`dispatch_to_all`](#dispatch_to_all) does the same to every connected
-//// client at once, for a server-wide change that also mutates session state
-//// like a feature-flag refresh. If you only want to fan something out without
-//// touching session state, broadcast through a
-//// [topic](./topic.html#broadcast) instead.
+//// client at once, for a server-wide change that also mutates session state.
+//// If you only want to send something out without touching session state,
+//// broadcast through a [topic](./topic.html#broadcast) instead.
 ////
 //// Shut a server down with [`stop`](#stop), which asks every topic to stop
 //// first so subscribers' slices reset cleanly before the underlying actor

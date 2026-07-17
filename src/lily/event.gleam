@@ -1,29 +1,30 @@
-//// Event handlers attach browser events to DOM elements via CSS selectors.
-//// Each handler produces a message that flows into the
-//// [`Store`](./store.html#Store), so anything the user does on the page
-//// becomes a tidy little `Message` value somewhere downstream.
+//// Event handlers wire browser events onto DOM elements through CSS
+//// selectors. Each one turns whatever the user does, a click, a keypress, a
+//// form submission, into a `Message` that flows into your
+//// [`Store`](./store.html#Store), so the rest of your app only ever deals in
+//// tidy little message values.
 ////
-//// The public API is a pair of scoped binders, [`on()`](#on) and
+//// The core API is a pair of scoped binders, [`on()`](#on) and
 //// [`on_decoded()`](#on_decoded), their page-level counterparts
-//// [`on_global()`](#on_global) and [`on_global_decoded()`](#on_global_decoded),
-//// and one constant per DOM event (`event.click`, `event.mouse_down`,
-//// `event.key_down`, etc.). The constant fixes the payload type, so the
-//// compiler enforces that the handler matches. Bindings live on the
-//// [`Component`](./component.html#Component) they relate to and are registered
-//// once at [`component.mount()`](./component.html#mount).
+//// [`on_global()`](#on_global) and
+//// [`on_global_decoded()`](#on_global_decoded), and one constant per DOM event
+//// (`event.click`, `event.mouse_down`, `event.key_down`, and so on). The
+//// constant pins down the payload type, so the compiler makes sure your
+//// handler actually matches the event. Bindings live on the
+//// [`Component`](./component.html#Component) you pipe them onto and are
+//// registered once at [`component.mount()`](./component.html#mount).
 ////
-//// Locality is **behavioural**: [`on()`](#on) confines its listener to the
+//// Locality is behavioural. [`on()`](#on) confines its listener to the
 //// component's own subtree, matched against the component's scope selector
-//// (its `id`, recorded with
-//// [`component.scoped`](./component.html#scoped)). To narrow, attach to a
-//// narrower component; to widen, attach to a wider ancestor. For listeners
-//// that belong to the page rather than to any one component (a `document`
-//// keydown, a `window` resize, a root `data-message` click decoder), use
-//// [`on_global()`](#on_global) with an explicit selector. Both still delegate
-//// from `document`, so a single registration keeps working as you patch the
-//// DOM. Bindings declared inside [`each`](./component.html#each) and
-//// [`each_live`](./component.html#each_live) item bodies are not collected,
-//// place them on the each/each_live wrapper or any static ancestor.
+//// (its `id`, recorded with [`component.scoped`](./component.html#scoped)).
+//// For listeners that belong to the page rather than any one component (a
+//// `document` keydown, a `window` resize, a root `data-message` click
+//// decoder), reach for [`on_global()`](#on_global) with an explicit
+//// selector. Either way the listener delegates from `document`, so one
+//// registration keeps working as you patch the DOM underneath it. As with
+//// components, bindings declared inside [`each`](./component.html#each) and
+//// [`each_live`](./component.html#each_live) item bodies aren't collected, so
+//// put them on the each/each_live wrapper or any static ancestor.
 ////
 //// ```gleam
 //// import lily/client
@@ -75,10 +76,10 @@
 //// }
 //// ```
 ////
-//// For events that need debouncing, throttling, or `preventDefault`, build
-//// an [`EventOptions`](#EventOptions) with [`options()`](#options) and the
-//// builder functions, then use [`on_with_options()`](#on_with_options)
-//// or [`on_decoded_with_options()`](#on_decoded_with_options).
+//// When an event needs debouncing, throttling, or `preventDefault`, build an
+//// [`EventOptions`](#EventOptions) with [`options()`](#options) and the
+//// builder functions, then bind with [`on_with_options()`](#on_with_options)
+//// or [`on_decoded_with_options()`](#on_decoded_with_options):
 ////
 //// ```gleam
 //// component.simple(slice: ..., render: ...)
@@ -90,14 +91,25 @@
 //// )
 //// ```
 ////
+//// A handful of helpers cover keyboard accessibility. Because they act on the
+//// live DOM imperatively, they take a [`Runtime`](./client.html#Runtime) and
+//// are driven from a [`client.on_message`](./client.html#on_message) hook
+//// rather than piped onto a component. [`focus`](#focus) moves focus to a
+//// selector, [`focus_trap`](#focus_trap) confines Tab cycling to an overlay
+//// (stacked, so a dialog inside a drawer each keep their own scope), and
+//// [`arrow_group`](#arrow_group) / [`arrow_grid`](#arrow_grid) turn a set of
+//// elements into an arrow-navigable roving-tabindex group or grid. These scope
+//// their items relative to the component like [`on()`](#on) does and re-query
+//// on every keypress, so content that shows up later just works.
+////
 //// All event handlers are JavaScript-only (`@target(javascript)`).
 ////
 //// To validate a form submission with the
 //// [`formal`](https://hexdocs.pm/formal/) library, pass
 //// [`form_submit`](#form_submit) to [`on_decoded()`](#on_decoded) with a
 //// decoder that builds the form, adds the submitted values, and calls
-//// `form.run`. The error branch carries the whole `Form(model)` back so
-//// the view can render field-level errors via `form.field_error_messages`:
+//// `form.run`. The error branch carries the whole `Form(model)` back so the
+//// view can render field-level errors via `form.field_error_messages`:
 ////
 //// ```gleam
 //// import formal/form
@@ -126,11 +138,10 @@
 //// |> event.on_decoded(event: event.form_submit, decoder: login_decoder)
 //// ```
 ////
-//// Store the returned `Form(model)` in your application model on the error
-//// branch; the view calls `form.field_error_messages(invalid_form,
-//// "email")` to render error text next to each field. Run the same schema
-//// inside your server-side update function to re-validate untrusted input.
-////
+//// Store the returned `Form(model)` in your model on the error branch; the
+//// view calls `form.field_error_messages(invalid_form, "email")` to render
+//// error text next to each field. Run the same schema inside your server-side
+//// update function to re-validate untrusted input.
 
 // =============================================================================
 // IMPORTS
@@ -847,6 +858,14 @@ pub const mouse_up: Event(#(Int, Int, ElementData)) = Event(
   "mouseup",
   TypeCoordinatesElement,
 )
+
+@target(javascript)
+/// `offline` event (on `window`), fires when the browser loses connectivity.
+pub const offline: Event(Nil) = Event("offline", TypeEmpty)
+
+@target(javascript)
+/// `online` event (on `window`), fires when the browser regains connectivity.
+pub const online: Event(Nil) = Event("online", TypeEmpty)
 
 @target(javascript)
 /// `paste` event, fires when text is pasted from the clipboard.

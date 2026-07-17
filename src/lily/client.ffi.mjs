@@ -497,6 +497,62 @@ export function initialNotify(runtime) {
   runtime.initialNotify();
 }
 
+// Turn ordinary same-origin <a href> left-clicks into warm client navigations.
+// One idempotent document listener per runtime; everything that should stay a
+// real navigation falls through untouched (see the ordered guards below).
+export function installLinkInterception(runtime, within, optOut) {
+  if (typeof document === "undefined") return;
+  if (runtime.__linkInterceptionInstalled) return;
+  runtime.__linkInterceptionInstalled = true;
+
+  document.addEventListener("click", (event) => {
+    // 1. another handler (e.g. a data-message binding) already claimed it
+    if (event.defaultPrevented) return;
+    // 2. only plain left-clicks
+    if (event.button !== 0) return;
+    // 3. modifier keys = open-in-new-tab / download / new-window intents
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    // 4. nearest ancestor anchor of the click target
+    const target = event.target;
+    const anchor = target && target.closest ? target.closest("a") : null;
+    if (!anchor) return;
+    // 5. an <a> with no href is a target/placeholder, not a link
+    if (!anchor.hasAttribute("href")) return;
+    // 6. scope: only intercept inside `within` (default whole document)
+    if (within !== "document" && !anchor.closest(within)) return;
+    // 7. explicit per-link opt-out (default data-lily-native)
+    if (anchor.hasAttribute(optOut)) return;
+    // 8. a target other than the current frame
+    const anchorTarget = anchor.getAttribute("target");
+    if (anchorTarget && anchorTarget !== "_self") return;
+    // 9. downloads
+    if (anchor.hasAttribute("download")) return;
+    // 10. rel="external"
+    const rel = anchor.getAttribute("rel");
+    if (rel && rel.split(/\s+/).includes("external")) return;
+    // 11. non-http(s) schemes: mailto:, tel:, sms:, javascript:
+    if (anchor.protocol !== "http:" && anchor.protocol !== "https:") return;
+    // 12. cross-origin links go to the network
+    if (anchor.origin !== window.location.origin) return;
+    // 13. in-page #fragment on the current path: let the browser scroll
+    if (
+      anchor.pathname === window.location.pathname &&
+      anchor.search === window.location.search &&
+      anchor.hash !== ""
+    )
+      return;
+
+    // Accepted: warm navigation, no page reload.
+    event.preventDefault();
+    runtime.navigate(anchor.pathname + anchor.search + anchor.hash);
+  });
+}
+
+// A full page navigation: leave the app entirely and let the server handle it.
+export function load(_runtime, path) {
+  if (typeof window !== "undefined") window.location.assign(path);
+}
+
 export function mergeLocals(incoming, current) {
   return mergeLocal(incoming, current);
 }

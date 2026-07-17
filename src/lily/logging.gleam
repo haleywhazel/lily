@@ -4,7 +4,7 @@
 //// both, so this module papers over the gap and hands you one API that
 //// behaves identically whether you're on the BEAM or in a browser or Node.
 ////
-//// On Erlang it's a thin wrapper over that `logging` package, so your lines
+//// On Erlang it's a thin wrapper over the `logging` package, so your lines
 //// blend in with the framework's own output. On JavaScript they go to
 //// `console.error` / `console.warn` / `console.info` / `console.debug` by
 //// level, wearing the same colour palette the Erlang package uses so the two
@@ -28,10 +28,51 @@
 //// }
 //// ```
 ////
-//// From there, [`auto_info`](#auto_info) and its siblings log any value with
-//// `string.inspect` (and skip the work when the level is suppressed), and
-//// [`request`](#request) prints one compact line per HTTP request from a
-//// [`RequestLog`](#RequestLog).
+//// [`auto_info`](#auto_info) and its siblings log any value with
+//// `string.inspect`, skipping the work when the level is suppressed.
+////
+//// For an HTTP server you probably want one compact line per request.
+//// Build a [`RequestLog`](#RequestLog) with [`request_log`](#request_log) and
+//// emit it with [`request`](#request). In a real backend that's a small
+//// middleware that times the handler and mints a correlation id, sat behind
+//// your static-file serving so only real routes get a line:
+////
+//// ```gleam
+//// fn log_request(req: wisp.Request, handler) -> wisp.Response {
+////   let start = timestamp.system_time()
+////
+////   // Reuse an inbound correlation id when a proxy set one, otherwise make
+////   // one, so a request's log lines (and any downstream service's) tie
+////   // together.
+////   let request_id = case request.get_header(req, "x-request-id") {
+////     Ok(id) -> id
+////     Error(Nil) -> wisp.random_string(16)
+////   }
+////
+////   let response = handler()
+////
+////   logging.RequestLog(
+////     method: string.uppercase(http.method_to_string(req.method)),
+////     path: req.path,
+////     status: response.status,
+////     duration_milliseconds: elapsed_milliseconds(start),
+////     request_id: option.Some(request_id),
+////   )
+////   |> logging.request
+////
+////   // Echo the id back so clients and downstream services can correlate.
+////   response.set_header(response, "x-request-id", request_id)
+//// }
+////
+//// // wire it in behind static serving, so assets stay silent
+//// use <- wisp.serve_static(req, under: "/", from: "priv/static")
+//// use <- log_request(req)
+//// ```
+////
+//// The level is read from the status (5xx `Error`, 4xx `Warning`, else
+//// `Info`) so a failing route stands out by colour, and a
+//// [`RequestLog`](#RequestLog) has nowhere to put a request or response body,
+//// keeping secrets out of your logs.
 
 import gleam/int
 import gleam/option
@@ -56,9 +97,10 @@ pub type Level {
   Warning
 }
 
-/// A single HTTP request to log. The four core fields are always present; the
-/// rest are `option.None` until the transport fills them in. Build one with
-/// [`request_log()`](#request_log) and emit it with [`request()`](#request).
+/// A single HTTP request to log. The four core fields are always present;
+/// `request_id` is an optional correlation id that, when set, is echoed into
+/// the line as `#<id>`. Build one with [`request_log()`](#request_log) and
+/// emit it with [`request()`](#request).
 ///
 /// Request and response bodies are deliberately absent: logging them risks
 /// leaking passwords, tokens, and other GDPR-protected data, so the transport
@@ -69,10 +111,7 @@ pub type RequestLog {
     path: String,
     status: Int,
     duration_milliseconds: Int,
-    bytes: option.Option(Int),
-    remote_ip: option.Option(String),
     request_id: option.Option(String),
-    user_agent: option.Option(String),
   )
 }
 
@@ -183,9 +222,8 @@ pub fn request(entry: RequestLog) -> Nil {
 }
 
 /// Build a [`RequestLog`](#RequestLog) from the four fields every transport
-/// can supply, leaving the optional fields (`bytes`, `remote_ip`,
-/// `request_id`, `user_agent`) as `option.None`. Set the extras with a record
-/// update where the transport has them.
+/// can supply, leaving `request_id` as `option.None`. Add a correlation id
+/// with a record update where you have one.
 ///
 /// ```gleam
 /// logging.request_log(method: "GET", path: "/", status: 200, duration_milliseconds: 3)
@@ -202,10 +240,7 @@ pub fn request_log(
     path:,
     status:,
     duration_milliseconds:,
-    bytes: option.None,
-    remote_ip: option.None,
     request_id: option.None,
-    user_agent: option.None,
   )
 }
 

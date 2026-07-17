@@ -868,6 +868,11 @@ function handleGroupKeydown(event) {
  */
 function handleTrapKeydown(event, trap) {
   if (trap.releaseOn(event.key)) {
+    // Escape is a stack: a non-modal overlay opened on top (popover, menu, …)
+    // handles Escape first via watchEscapeDismiss and marks it handled. Only
+    // dismiss this trapped modal once nothing shallower has claimed the key, so
+    // one Escape closes exactly one overlay.
+    if (event.defaultPrevented) return;
     event.preventDefault();
     popFocusTrap();
     trap.onExit();

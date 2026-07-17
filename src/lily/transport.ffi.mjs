@@ -6,8 +6,11 @@
  * See lily/internal/auto_codec.gleam for auto-serialisation and the relevant
  * reflection FFIs.
  *
- * Both transports persist offline queues to localStorage and flush them on
- * reconnection before sending Resync.
+ * Both transports persist offline queues to sessionStorage and flush them on
+ * reconnection before sending Resync. sessionStorage (not localStorage) so the
+ * queue is scoped per tab: localStorage is shared across every tab on the
+ * origin, so two tabs would clobber each other's unsent frames on the one key
+ * (overwrite on persist, and removeItem on drain wiping the other tab's frames).
  */
 
 // =============================================================================
@@ -144,7 +147,7 @@ export function registerModule(moduleNamespace) {
  *
  * Server to client: SSE text frames (EventSource).
  * Client to server: binary POST (application/octet-stream).
- * Offline queue: base64-encoded frames persisted to localStorage.
+ * Offline queue: base64-encoded frames persisted to sessionStorage.
  */
 export function httpConnect(postUrl, eventsUrl, flushBatchSize, handler) {
   const queue = createOfflineQueue(STORAGE_KEY_HTTP_PENDING);
@@ -242,7 +245,7 @@ export function httpConnect(postUrl, eventsUrl, flushBatchSize, handler) {
 /**
  * Establish WebSocket connection with exponential-backoff reconnection and
  * offline queueing. Binary frames (ArrayBuffer) are used exclusively. Offline
- * queue is base64-encoded and persisted to localStorage.
+ * queue is base64-encoded and persisted to sessionStorage.
  */
 export function wsConnect(
   url,
@@ -468,7 +471,9 @@ function base64ToFrame(b64) {
 
 /**
  * Factory that returns a closure-scoped offline queue backed by
- * localStorage.
+ * sessionStorage — per-tab, so tabs don't share (and corrupt) one key. The
+ * in-memory `pending` array is the source of truth for the live tab; storage
+ * only backs it so a reload of the same tab doesn't drop unsent frames.
  */
 function createOfflineQueue(storageKey) {
   let pending = [];
@@ -476,7 +481,7 @@ function createOfflineQueue(storageKey) {
 
   function persist() {
     try {
-      localStorage.setItem(
+      sessionStorage.setItem(
         storageKey,
         JSON.stringify(pending.map(frameToBase64)),
       );
@@ -498,7 +503,7 @@ function createOfflineQueue(storageKey) {
     loadIfEmpty() {
       if (pending.length > 0) return;
       try {
-        const raw = localStorage.getItem(storageKey);
+        const raw = sessionStorage.getItem(storageKey);
         if (raw) pending = JSON.parse(raw).map(base64ToFrame);
       } catch (_error) {
         pending = [];
@@ -510,7 +515,7 @@ function createOfflineQueue(storageKey) {
       if (wasEmpty) {
         persist();
       } else if (!persistScheduled) {
-        // Coalesce subsequent writes to avoid O(n^2) localStorage writes
+        // Coalesce subsequent writes to avoid O(n^2) sessionStorage writes
         // during rapid bursts.
         persistScheduled = true;
         queueMicrotask(function () {
@@ -521,7 +526,7 @@ function createOfflineQueue(storageKey) {
     },
     drainSent(count) {
       if (count === pending.length) {
-        localStorage.removeItem(storageKey);
+        sessionStorage.removeItem(storageKey);
         pending = [];
       } else if (count > 0) {
         pending = pending.slice(count);
@@ -531,7 +536,7 @@ function createOfflineQueue(storageKey) {
   };
 }
 
-/** Encode a Uint8Array to a base64 string for localStorage persistence. */
+/** Encode a Uint8Array to a base64 string for sessionStorage persistence. */
 function frameToBase64(frame) {
   let binary = "";
   for (let i = 0; i < frame.byteLength; i++) {

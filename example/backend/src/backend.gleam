@@ -159,7 +159,8 @@ fn handle_http(
       from: "../frontend/build/dev/javascript",
     )
     case wisp.path_segments(request) {
-      [] ->
+      ["static", ..] -> wisp.not_found()
+      _ ->
         wisp.response(200)
         |> wisp.set_header("content-type", "text/html; charset=utf-8")
         |> wisp.set_body(wisp.File(
@@ -167,7 +168,6 @@ fn handle_http(
           offset: 0,
           limit: None,
         ))
-      _ -> wisp.not_found()
     }
   }
 

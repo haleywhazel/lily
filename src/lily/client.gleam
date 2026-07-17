@@ -1,19 +1,17 @@
-//// The client owns the browser-side [`Runtime`](#Runtime): the update
-//// loop, component subscriptions, local persistence, and server
-//// synchronisation all live here. When a transport is connected, it also
-//// watches online/offline status and tucks messages into localStorage
-//// while disconnected, replaying them once the server is back. This
-//// module is browser-only, Erlang need not apply.
+//// The client owns the browser-side [`Runtime`](#Runtime), pretty much
+//// everything that makes a Lily app tick in the page. The update loop,
+//// component subscriptions, local persistence, and (once a transport is
+//// connected) keeping your model in sync with the server all live here. It
+//// even watches online/offline status for you, tucking messages into
+//// localStorage while you're disconnected and replaying them the moment the
+//// server is back. This module is browser-only, Erlang need not apply.
 ////
-//// The typical frontend setup would look like:
-////
-//// 1. Creating a store with [`store.new`](./store.html#new)
-//// 2. Building a wiring config with [`store.wiring`](./store.html#wiring)
-//// 3. Starting the runtime with [`client.start`](#start)
-//// 4. Mounting your components using
-////    [`component.mount`](./component.html#mount)
-//// 5. Attaching event handlers
-//// 6. Connecting to a server with [`client.connect`](#connect)
+//// A frontend comes together as one pipeline, build a
+//// [`Store`](./store.html#Store) with [`store.new`](./store.html#new), start
+//// the runtime with [`start`](#start) (handing it the shared
+//// [`Wiring`](./store.html#Wiring)), [`mount`](./component.html#mount) your
+//// components, pipe on your event handlers, and [`connect`](#connect) to a
+//// server if you have one:
 ////
 //// ```gleam
 //// import lily/client
@@ -45,18 +43,61 @@
 //// }
 //// ```
 ////
-//// Each [`Runtime`](#Runtime) is completely isolated, allowing multiple
-//// independent Lily runtimes to coexist on the same page. However, we
-//// recommend using one runtime per page to avoid splitting your application
-//// state (which can become hard to manage à la badly designed React apps
-//// with states everywhere). If you need truly stateful, independent
-//// widget-style components, a different framework may be more appropriate.
+//// If you aren't syncing with a server, stop after `mount`, the runtime is
+//// perfectly happy on its own. When you are, [`subscribe`](#subscribe) to the
+//// topics this client cares about (see [topic](./topic.html)) and
+//// [`unsubscribe`](#unsubscribe) when it stops caring.
 ////
-//// The client runtime uses a message queue to batch updates and prevent race
-//// conditions, ensuring your update function is called sequentially even when
-//// messages arrive from multiple sources (user events, server messages,
-//// timers, etc.).
+//// To feed messages in from outside your components, a timer, a callback, an
+//// FFI shim, grab a dispatch function with [`dispatch`](#dispatch):
 ////
+//// ```gleam
+//// let dispatch = client.dispatch(runtime)
+//// dispatch(Increment)
+//// ```
+////
+//// Everything you dispatch, plus every frame the server sends, runs through a
+//// single message queue, so your update function is only ever called one
+//// message at a time even when several land at once. That ordering is what
+//// keeps optimistic client updates from racing the server's authoritative
+//// snapshots.
+////
+//// For client-side reactions that don't belong in `update`, focus management,
+//// analytics, kicking off a fetch, register a hook with
+//// [`on_message`](#on_message); it runs after each dispatched message with the
+//// full model. The connection lifecycle has its own hooks,
+//// [`on_connect`](#on_connect) fires once on the first acknowledged
+//// connection, [`on_disconnect`](#on_disconnect) and
+//// [`on_reconnect`](#on_reconnect) track drops and recoveries (pair them with
+//// [`connection_status`](#connection_status) for a "reconnecting…" banner),
+//// and [`on_snapshot`](#on_snapshot) lets you decide how a fresh server
+//// snapshot merges into what the client already has.
+////
+//// Lily does client-side routing too, though it is opt-in and deliberately not
+//// a router, Lily is for connection-preserving apps, not for turning every site
+//// into an SPA. Mirror the location into your model with [`url`](#url), whose
+//// `set` callback hands you the parsed `Uri` to map onto your own route type,
+//// then move around with [`navigate`](#navigate) to push a new history entry or
+//// [`replace`](#replace) to swap the current one without leaving a back-button
+//// stop. To make ordinary `<a href>` links navigate warmly (no page reload),
+//// pipe on [`intercept_links`](#intercept_links); and when a path must actually
+//// be handled by the server, use [`load`](#load) for a full page navigation.
+////
+//// Because the wire only ever carries messages, an offline client keeps
+//// working and catches up on reconnect. For state that should outlive a reload
+//// or a navigation, describe it once with
+//// [`session_persistence`](#session_persistence) plus
+//// [`session_field`](#session_field) and switch it on with
+//// [`attach_session`](#attach_session); each field is mirrored to
+//// localStorage. Model fields wrapped in [`store.Local`](./store.html#Local)
+//// stay client-only and are preserved when a reconnect snapshot lands.
+////
+//// Each [`Runtime`](#Runtime) is fully isolated, so several can coexist on one
+//// page, but we'd steer you towards one runtime per page. Splitting your state
+//// across many runtimes gets hard to reason about fast (badly designed React
+//// apps with state scattered everywhere come to mind). If you genuinely need
+//// independent, self-contained stateful widgets, a different framework might
+//// suit you better.
 
 // A good amount of the internal workings of the client lives within the .mjs
 // file, so feel free to dig around there since the Gleam code is mostly just
@@ -90,6 +131,15 @@ import lily/transport
 // =============================================================================
 // PUBLIC TYPES
 // =============================================================================
+
+@target(javascript)
+/// An option for [`intercept_links`](#intercept_links). Build with
+/// [`intercept_within`](#intercept_within) and
+/// [`intercept_opt_out_attribute`](#intercept_opt_out_attribute).
+pub opaque type InterceptOption {
+  InterceptWithin(selector: String)
+  InterceptOptOutAttribute(name: String)
+}
 
 @target(javascript)
 /// Complete session persistence configuration. It's kept opaque so that users
@@ -394,6 +444,66 @@ pub fn hydrate(
   }
   initial_notify(handle)
   Runtime(handle)
+}
+
+@target(javascript)
+/// Opt in to client-side navigation for ordinary `<a href>` links: after this,
+/// a left-click on a *same-origin* internal link is turned into a warm
+/// [`navigate`](#navigate) (history push + [`url`](#url) setter), with no full
+/// page reload. Everything that should stay a real navigation falls through
+/// untouched — external/cross-origin links, `target="_blank"`, `download`,
+/// `rel="external"`, `mailto:`/`tel:` schemes, modified/middle clicks,
+/// in-page `#fragment` anchors, and any link carrying the opt-out attribute
+/// (default `data-lily-native`). Pipe it once, after [`url`](#url).
+///
+/// This is opt-in and deliberately minimal — Lily is not a router. Reach for it
+/// only when navigation should preserve the live socket and offline state;
+/// otherwise let links do full server navigations.
+///
+/// ```gleam
+/// runtime
+/// |> client.url(set: fn(model, uri) { Model(..model, route: parse(uri)) })
+/// |> client.intercept_links(config: [])
+/// ```
+pub fn intercept_links(
+  runtime: Runtime(model, message),
+  config config: List(InterceptOption),
+) -> Runtime(model, message) {
+  let Runtime(handle) = runtime
+  let InterceptConfig(within:, opt_out:) = intercept_config(config)
+  install_link_interception(handle, within, opt_out)
+  runtime
+}
+
+@target(javascript)
+/// Override the attribute an anchor can carry to force a full page load instead
+/// of warm navigation (default `"data-lily-native"`).
+pub fn intercept_opt_out_attribute(name: String) -> InterceptOption {
+  InterceptOptOutAttribute(name)
+}
+
+@target(javascript)
+/// Only intercept anchors inside this selector's subtree (default `"document"`,
+/// the whole page). Use it to let, say, a static marketing header do real page
+/// loads while only the app shell navigates warmly.
+pub fn intercept_within(selector: String) -> InterceptOption {
+  InterceptWithin(selector)
+}
+
+@target(javascript)
+/// Perform a full page navigation (`window.location.assign`), leaving the Lily
+/// app entirely — the counterpart to [`navigate`](#navigate)'s in-app history
+/// push. Use it when a path must be handled by the *server*, not the client
+/// router: after a logout that clears a server cookie, entering a
+/// server-rendered flow, or otherwise "actually going to the server". The socket
+/// is torn down and the destination is loaded fresh.
+///
+/// ```gleam
+/// client.load(runtime, "/logout")
+/// ```
+pub fn load(runtime: Runtime(model, message), path path: String) -> Nil {
+  let Runtime(handle) = runtime
+  ffi_load(handle, path)
 }
 
 @target(javascript)
@@ -743,6 +853,13 @@ type Field(session) {
 }
 
 @target(javascript)
+/// The resolved [`intercept_links`](#intercept_links) options, seeded with
+/// defaults and folded from the `config` list.
+type InterceptConfig {
+  InterceptConfig(within: String, opt_out: String)
+}
+
+@target(javascript)
 /// JavaScript doesn't have type parameters, so we can't pass Runtime directly.
 /// The public `Runtime(model, message)` type wraps this.
 ///
@@ -832,6 +949,22 @@ fn hydrate_session(
     |> result.try(set(session, _))
     |> result.unwrap(session)
   })
+}
+
+@target(javascript)
+fn intercept_config(config: List(InterceptOption)) -> InterceptConfig {
+  list.fold(
+    config,
+    InterceptConfig(within: "document", opt_out: "data-lily-native"),
+    fn(resolved, entry) {
+      case entry {
+        InterceptWithin(selector) ->
+          InterceptConfig(..resolved, within: selector)
+        InterceptOptOutAttribute(name) ->
+          InterceptConfig(..resolved, opt_out: name)
+      }
+    },
+  )
 }
 
 @target(javascript)
@@ -927,6 +1060,18 @@ fn ffi_navigate(handle: RuntimeHandle, path: String) -> Nil
 @target(javascript)
 @external(javascript, "./client.ffi.mjs", "replace")
 fn ffi_replace(handle: RuntimeHandle, path: String) -> Nil
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "load")
+fn ffi_load(handle: RuntimeHandle, path: String) -> Nil
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "installLinkInterception")
+fn install_link_interception(
+  handle: RuntimeHandle,
+  within: String,
+  opt_out: String,
+) -> Nil
 
 @target(javascript)
 @external(javascript, "./client.ffi.mjs", "sendMessage")

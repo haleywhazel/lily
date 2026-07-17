@@ -1,16 +1,15 @@
 //// Components subscribe to the [`Store`](./store.html#Store) and re-render
-//// when their slice of the model changes. They're functions that return
-//// renderable content, composable like React or Lustre components. That said,
-//// it's closer to React than Lustre, with smaller, more modular components
-//// being preferable as components themselves don't hold states.
+//// when their slice of the model changes. They are stateless components and
+//// focus more on rendering, so are fairly light (lighter than Lustre or
+//// LiveView components, for example) and having a lot of components is not
+//// an anti-pattern in Lily.
 ////
-//// Each component consists of its type [`ComponentType`](#ComponentType) and
-//// optional [`Decoration`](#Decoration)s, which are things like attaching
-//// transitions or events to them.
+//// Each component is a [`ComponentType`](#ComponentType) plus zero or more
+//// [`Decoration`](#Decoration)s (the things you pipe on, like a transition or
+//// an event listener). You never reach for the constructors directly, you call
+//// the builder function for the type you want.
 ////
-//// Lily provides seven component types, each with different performance
-//// characteristics. We interact with functions that build the components
-//// rather than the type constructors directly.
+//// There are seven types, each with its own performance profile:
 ////
 //// 1. [`static`](#static) renders once and never updates
 //// 2. [`simple`](#simple) re-renders via innerHTML when the slice changes
@@ -18,36 +17,30 @@
 //// 4. [`each`](#each) handles keyed lists with innerHTML rendering
 //// 5. [`each_live`](#each_live) handles keyed lists with patch-based rendering
 //// 6. [`fragment`](#fragment) groups other components into one slot
-//// 7. [`switch`](#switch) renders one of several children based on a
-////    discriminator, preserving DOM identity when the discriminator is
-////    unchanged
+//// 7. [`switch`](#switch) renders one of several children by a discriminator,
+////    keeping DOM identity while the discriminator is unchanged
 ////
-//// On top of its type, a component carries zero or more
-//// [`Decoration`](#Decoration)s, each applied with a pipe:
+//// `simple` swaps the component's entire DOM on every slice change, which
+//// wipes focus, selection, and any half-typed input. `live` applies targeted
+//// patches instead and leaves existing nodes untouched, so focus and typed
+//// text survive the update. Anywhere there's an `<input>` or `<textarea>`,
+//// `live` is almost certainly what you want, and the same rule carries to
+//// lists, prefer `each_live` over `each` when items contain inputs or must not
+//// lose focus.
 ////
-//// - [`transition`](#transition) adds CSS enter/exit classes timed to a
-////   duration, with deferred DOM removal so exit animations finish before
-////   the element is gone
-//// - [`event.on`](./event.html#on) and friends attach event listeners
-//// - [`require_connection`](#require_connection) gates the subtree on
-////   connection status
+//// On top of its type, a component carries decorations, each applied with a
+//// pipe: [`transition`](#transition) adds CSS enter/exit classes timed to a
+//// duration (with deferred DOM removal so the exit animation finishes before
+//// the element leaves), [`event.on`](./event.html#on) and friends attach
+//// listeners, [`scoped`](#scoped) fixes the subtree an event confines itself
+//// to, and [`require_connection`](#require_connection) gates the subtree on
+//// connection status.
 ////
-//// `simple` replaces the component's entire DOM on every slice change, which
-//// destroys focus, selection, and any in-progress user input. `live` applies
-//// targeted patches instead, leaving existing nodes untouched, so focus and
-//// typed text are preserved across model updates. Whenever there are elements
-//// like `<input>` and `<textarea>`, `live` is probably better.
-////
-//// The same rule applies to list components, use `each_live` instead of
-//// `each` when list items contain inputs or must not lose focus on update.
-////
-//// ## Nesting components
-////
-//// `static`, `simple`, and `live` accept a `slot` function as the first
-//// parameter of their content function. Call `slot(child_component)` wherever
-//// you want a child component to appear in the parent template. The call
-//// returns a placeholder value of your `html` type that is substituted with
-//// the rendered child after the parent template is serialised.
+//// `static`, `simple`, and `live` hand their content function a `slot`
+//// function as its first argument. Call `slot(child_component)` wherever you
+//// want a child to appear in the parent template, it returns a placeholder of
+//// your `html` type that gets swapped for the rendered child once the parent
+//// serialises. Nest as deep as you like:
 ////
 //// ```gleam
 //// component.live(
@@ -67,7 +60,7 @@
 //// )
 //// ```
 ////
-//// If no children are needed, ignore the parameter:
+//// When a component has no children, just ignore the parameter:
 ////
 //// ```gleam
 //// component.simple(
@@ -78,14 +71,13 @@
 //// )
 //// ```
 ////
-//// Components work with any HTML library - Lustre or raw strings. The
-//// `to_html` function provided at [`component.mount`](#mount) converts
-//// your chosen library's types to strings. We recommend
-//// [Lustre elements](https://hexdocs.pm/lustre/lustre/element/html.html).
-////
-//// To use nesting, also supply `to_slot` at mount, a zero-argument function
-//// that returns an `html` placeholder value that serialises to
-//// `<lily-slot></lily-slot>`. For Lustre:
+//// Components work with any HTML library, Lustre or raw strings, whatever you
+//// like. The `to_html` function you pass at [`mount`](#mount) converts your
+//// chosen library's types into strings; we'd recommend
+//// [Lustre elements](https://hexdocs.pm/lustre/lustre/element/html.html). If
+//// you use nesting, also pass `to_slot`, a zero-argument function returning an
+//// `html` placeholder that serialises to `<lily-slot></lily-slot>`. For
+//// Lustre:
 ////
 //// ```gleam
 //// component.mount(
@@ -97,7 +89,7 @@
 //// )
 //// ```
 ////
-//// For raw HTML strings:
+//// Or with raw HTML strings:
 ////
 //// ```gleam
 //// component.mount(
@@ -109,10 +101,12 @@
 //// )
 //// ```
 ////
-//// Each component declares a `slice` function that extracts relevant data
-//// from the model. The runtime caches the previous slice and skips rendering
-//// when unchanged (using reference equality by default, structural equality
-//// opt-in via [`component.structural`](#structural)).
+//// Every component declares a `slice` that pulls just the data it needs out of
+//// the model. The runtime caches the last slice and skips rendering when it's
+//// unchanged, using reference equality by default, or structural equality if
+//// you pipe on [`structural`](#structural) (handy when the slice builds a new
+//// tuple or record each time). Keep slices cheap and do the heavy lifting in
+//// `render`, which the comparison gates. Here's the whole thing end to end:
 ////
 //// ```gleam
 //// import lily/client
@@ -164,18 +158,19 @@
 //// }
 //// ```
 ////
-//// Event handlers are pipelined onto the component they relate to via
-//// [`event.on()`](./event.html#on) and friends. The walk in
-//// [`mount`](#mount) registers each binding once at startup. Events
-//// declared inside [`each`](#each) and [`each_live`](#each_live) item
-//// bodies are not collected, place them on the each/each_live wrapper or
-//// any static ancestor instead.
+//// Event handlers pipe onto the component they belong to via
+//// [`event.on()`](./event.html#on), and the walk that [`mount`](#mount) does
+//// registers each binding once at startup. Events declared inside
+//// [`each`](#each) and [`each_live`](#each_live) item bodies are not
+//// collected, so put them on the each/each_live wrapper or any static
+//// ancestor instead (probably a div).
 ////
-//// Building components and rendering them to a string
-//// ([`render_to_string`](#render_to_string)) compile on both targets;
-//// [`mount`](#mount) and event handling are JavaScript-only
-//// (`@target(javascript)`), since they drive a live DOM.
+//// Building components and rendering them to a string with
+//// [`render_to_string`](#render_to_string) work on both targets so that the
+//// server can render initial components.
 ////
+//// [`mount`](#mount) and event handling are JavaScript-only, since they drive
+//// a live DOM.
 
 // =============================================================================
 // IMPORTS
