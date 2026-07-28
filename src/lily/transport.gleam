@@ -228,6 +228,13 @@ pub type Protocol(model, message) {
   /// Sent by the client to leave a topic. Fire-and-forget, the server
   /// removes the subscriber and sends no confirmation frame back.
   Unsubscribe(topic_id: String)
+
+  /// Sent by the server on connect and reconnect, carrying a build
+  /// identifier. The client remembers the first one it sees and compares
+  /// every later one against it, so a value that changes between
+  /// connections (a deploy landed) can be surfaced to the user. See
+  /// [`client.on_version_mismatch`](./client.html#on_version_mismatch).
+  Version(hash: String)
 }
 
 /// Serialises and deserialises `Protocol` values to and from bytes. The
@@ -862,6 +869,12 @@ fn encode_json(
         #("type", json.string("unsubscribe")),
         #("topic_id", json.string(topic_id)),
       ])
+
+    Version(hash:) ->
+      json.object([
+        #("type", json.string("version")),
+        #("hash", json.string(hash)),
+      ])
   }
   |> json.to_string
   |> bit_array.from_string
@@ -897,6 +910,7 @@ fn protocol_decoder(
     "topic_message" -> topic_message_decoder(decode_message)
     "topic_update" -> topic_update_decoder(decode_message)
     "unsubscribe" -> unsubscribe_decoder()
+    "version" -> version_decoder()
     _ -> decode.failure(Acknowledge(Session, 0), "Protocol")
   }
 }
@@ -985,6 +999,12 @@ fn topic_update_decoder(
 fn unsubscribe_decoder() -> decode.Decoder(Protocol(model, message)) {
   use topic_id <- decode.field("topic_id", decode.string)
   decode.success(Unsubscribe(topic_id:))
+}
+
+/// Decoder for `Version`
+fn version_decoder() -> decode.Decoder(Protocol(model, message)) {
+  use hash <- decode.field("hash", decode.string)
+  decode.success(Version(hash:))
 }
 
 // Build the auto codec, capturing `max_decode_depth` so both the envelope and
@@ -1134,6 +1154,12 @@ fn encode_message_pack_protocol(
         #(str("type"), str("unsubscribe")),
         #(str("topic_id"), str(topic_id)),
       ])
+
+    Version(hash:) ->
+      message_pack.encode_map([
+        #(str("type"), str("version")),
+        #(str("hash"), str(hash)),
+      ])
   }
 }
 
@@ -1270,6 +1296,12 @@ fn decode_message_pack_envelope(
       use topic_id_value <- result.try(envelope_get(entries, "topic_id"))
       use topic_id <- result.try(value_string(topic_id_value))
       Ok(Unsubscribe(topic_id:))
+    }
+
+    "version" -> {
+      use hash_value <- result.try(envelope_get(entries, "hash"))
+      use hash <- result.try(value_string(hash_value))
+      Ok(Version(hash:))
     }
 
     _ -> Error(Nil)

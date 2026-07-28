@@ -142,6 +142,17 @@ pub opaque type InterceptOption {
 }
 
 @target(javascript)
+/// An option for [`enable_hot_reload`](#enable_hot_reload). Build with
+/// [`hot_reload_url`](#hot_reload_url),
+/// [`hot_reload_reconnect_milliseconds`](#hot_reload_reconnect_milliseconds)
+/// and [`hot_reload_guard_milliseconds`](#hot_reload_guard_milliseconds).
+pub opaque type HotReloadOption {
+  HotReloadUrl(url: String)
+  HotReloadReconnectMilliseconds(milliseconds: Int)
+  HotReloadGuardMilliseconds(milliseconds: Int)
+}
+
+@target(javascript)
 /// Session persistence configuration, kept opaque so you don't touch the
 /// fields directly.
 ///
@@ -150,6 +161,13 @@ pub opaque type InterceptOption {
 /// - Attach to the runtime with [`client.attach_session`](#attach_session)
 pub opaque type Persistence(session) {
   Persistence(fields: List(Field(session)))
+}
+
+@target(javascript)
+/// An option for [`recover_after_reload`](#recover_after_reload). Build with
+/// [`recover_with_migrate`](#recover_with_migrate).
+pub opaque type RecoverOption(model) {
+  RecoverMigrate(migrate: fn(Dynamic, model) -> model)
 }
 
 @target(javascript)
@@ -354,6 +372,79 @@ pub fn connection_status(
 pub fn dispatch(runtime: Runtime(model, message)) -> fn(message) -> Nil {
   let Runtime(handle) = runtime
   fn(message) { ffi_send_message(handle, message) }
+}
+
+@target(javascript)
+/// Opt in to dev hot reload. Connects to the dev-reload socket and reloads the
+/// page on every rebuild. Development only, guard the call behind a dev flag.
+/// State survives the reload through the reconnect resync and session
+/// persistence. Tune the socket and reload behaviour with the options below,
+/// all of which have working defaults.
+///
+/// ```gleam
+/// runtime |> client.enable_hot_reload(config: [])
+/// ```
+pub fn enable_hot_reload(
+  runtime: Runtime(model, message),
+  config config: List(HotReloadOption),
+) -> Runtime(model, message) {
+  let Runtime(handle) = runtime
+  let resolved =
+    list.fold(
+      config,
+      HotReloadConfig(
+        url: "",
+        reconnect_milliseconds: 1000,
+        guard_milliseconds: 1500,
+      ),
+      fn(acc, option) {
+        case option {
+          HotReloadUrl(url:) -> HotReloadConfig(..acc, url:)
+          HotReloadReconnectMilliseconds(milliseconds:) ->
+            HotReloadConfig(..acc, reconnect_milliseconds: milliseconds)
+          HotReloadGuardMilliseconds(milliseconds:) ->
+            HotReloadConfig(..acc, guard_milliseconds: milliseconds)
+        }
+      },
+    )
+  install_hot_reload(
+    handle,
+    resolved.url,
+    resolved.reconnect_milliseconds,
+    resolved.guard_milliseconds,
+  )
+  runtime
+}
+
+@target(javascript)
+/// Override the dev-reload socket URL. Defaults to the page's own origin on the
+/// port one above the page's, where `lily_dev` hosts the socket by convention.
+pub fn hot_reload_url(url: String) -> HotReloadOption {
+  HotReloadUrl(url:)
+}
+
+@target(javascript)
+/// Delay before redialling the dev-reload socket after it closes. Defaults to
+/// 1000 milliseconds.
+pub fn hot_reload_reconnect_milliseconds(milliseconds: Int) -> HotReloadOption {
+  HotReloadReconnectMilliseconds(milliseconds:)
+}
+
+@target(javascript)
+/// Window within which a second reload is suppressed as a storm guard, so a
+/// misbehaving signal cannot spin the page into a reload loop. Defaults to 1500
+/// milliseconds.
+pub fn hot_reload_guard_milliseconds(milliseconds: Int) -> HotReloadOption {
+  HotReloadGuardMilliseconds(milliseconds:)
+}
+
+@target(javascript)
+type HotReloadConfig {
+  HotReloadConfig(
+    url: String,
+    reconnect_milliseconds: Int,
+    guard_milliseconds: Int,
+  )
 }
 
 @target(javascript)
@@ -621,6 +712,76 @@ pub fn on_snapshot(
   let Runtime(handle) = runtime
   set_snapshot_hook(handle, hook)
   runtime
+}
+
+@target(javascript)
+/// Register a hook that fires when a `Version` frame's hash differs from the
+/// first one this runtime saw. The server sends one on connect and on every
+/// reconnect, so a value that changes between them means a new build is live.
+/// Pair with [`reload`](#reload), resync then recovers the model.
+///
+/// ```gleam
+/// runtime |> client.on_version_mismatch(client.reload)
+/// ```
+pub fn on_version_mismatch(
+  runtime: Runtime(model, message),
+  hook: fn() -> Nil,
+) -> Runtime(model, message) {
+  let Runtime(handle) = runtime
+  set_version_mismatch_hook(handle, hook)
+  runtime
+}
+
+@target(javascript)
+/// Recover state from the model a dev-reload full reload stashed just before
+/// it fired, clearing the stash either way. With `config: []`, the default,
+/// merges top-level primitive fields (`Int`, `Float`, `String`, `Bool`) into
+/// `initial` by field name, anything else (a nested custom type, a `List`, an
+/// `Option`) falls back to `initial`'s value. Pass
+/// [`recover_with_migrate`](#recover_with_migrate) in `config` to take over
+/// entirely, for renamed fields, type changes, or reaching into a nested
+/// slice (your own model's `session`/topic sub-records) rather than only the
+/// outer model's top level.
+///
+/// ```gleam
+/// let initial = client.recover_after_reload(shared.initial_model(), config: [])
+/// ```
+pub fn recover_after_reload(
+  initial: model,
+  config config: List(RecoverOption(model)),
+) -> model {
+  case list.first(config) {
+    Ok(RecoverMigrate(migrate)) ->
+      ffi_recover_after_reload(initial, option.Some(migrate))
+    Error(Nil) -> ffi_recover_after_reload(initial, option.None)
+  }
+}
+
+@target(javascript)
+/// Take over `recover_after_reload`'s merge entirely. Receives the raw
+/// stashed value  and the freshly built `initial` model, and returns
+/// whatever model to boot with.
+///
+/// ```gleam
+/// client.recover_with_migrate(fn(stashed, initial) {
+///   let count =
+///     decode.run(stashed, decode.at(["count"], decode.int))
+///     |> result.unwrap(initial.count)
+///   Model(..initial, count:)
+/// })
+/// ```
+pub fn recover_with_migrate(
+  migrate: fn(Dynamic, model) -> model,
+) -> RecoverOption(model) {
+  RecoverMigrate(migrate)
+}
+
+@target(javascript)
+/// Reload the current page. A graceful default for
+/// [`on_version_mismatch`](#on_version_mismatch), cheap in Lily since resync
+/// and session persistence recover most state on the other side.
+pub fn reload() -> Nil {
+  ffi_reload()
 }
 
 @target(javascript)
@@ -896,6 +1057,8 @@ fn handle_incoming(
 
     Ok(transport.Rejected(topic_id: _, reason: _)) -> Nil
 
+    Ok(transport.Version(hash:)) -> handle_version(handle, hash)
+
     _ -> Nil
   }
 }
@@ -1037,6 +1200,17 @@ fn ffi_merge_locals(incoming: model, current: model) -> model
 fn ffi_navigate(handle: RuntimeHandle, path: String) -> Nil
 
 @target(javascript)
+@external(javascript, "./client.ffi.mjs", "recoverAfterReload")
+fn ffi_recover_after_reload(
+  initial: model,
+  migrate: option.Option(fn(Dynamic, model) -> model),
+) -> model
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "reload")
+fn ffi_reload() -> Nil
+
+@target(javascript)
 @external(javascript, "./client.ffi.mjs", "replace")
 fn ffi_replace(handle: RuntimeHandle, path: String) -> Nil
 
@@ -1077,6 +1251,19 @@ fn get_wiring(handle: RuntimeHandle) -> store.Wiring(model, message)
 @target(javascript)
 @external(javascript, "./client.ffi.mjs", "handleClientId")
 fn handle_client_id(handle: RuntimeHandle, client_id: String) -> Nil
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "handleVersion")
+fn handle_version(handle: RuntimeHandle, hash: String) -> Nil
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "installHotReload")
+fn install_hot_reload(
+  handle: RuntimeHandle,
+  url: String,
+  reconnect_milliseconds: Int,
+  guard_milliseconds: Int,
+) -> Nil
 
 @target(javascript)
 @external(javascript, "./client.ffi.mjs", "initialNotify")
@@ -1156,6 +1343,10 @@ fn set_snapshot_hook(
   handle: RuntimeHandle,
   hook: fn(model, model) -> model,
 ) -> Nil
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "setVersionMismatchHook")
+fn set_version_mismatch_hook(handle: RuntimeHandle, hook: fn() -> Nil) -> Nil
 
 @target(javascript)
 @external(javascript, "./client.ffi.mjs", "setUrlSetter")

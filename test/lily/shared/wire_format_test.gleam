@@ -16,7 +16,7 @@ import lily/test_fixtures.{
 import lily/transport.{
   type Protocol, Acknowledge, Connected, Push, Rejected, Resync, Session,
   SessionMessage, SessionUpdate, Snapshot, Subscribe, Topic, TopicMessage,
-  TopicUpdate, Unsubscribe,
+  TopicUpdate, Unsubscribe, Version,
 }
 
 // =============================================================================
@@ -191,6 +191,13 @@ pub fn snapshot_unsubscribe_test() {
   )
 }
 
+pub fn snapshot_version_test() {
+  assert_encoded(
+    Version(hash: "abc123"),
+    "82A474797065A776657273696F6EA468617368A6616263313233",
+  )
+}
+
 // =============================================================================
 // CROSS-TARGET ROUNDTRIPS
 // =============================================================================
@@ -219,6 +226,10 @@ pub fn roundtrip_session_message_set_name_test() {
 
 pub fn roundtrip_session_update_test() {
   assert_roundtrip(SessionUpdate(sequence: 4, payload: Increment))
+}
+
+pub fn roundtrip_version_test() {
+  assert_roundtrip(Version(hash: "abc123"))
 }
 
 // =============================================================================

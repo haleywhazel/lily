@@ -115,6 +115,10 @@ export function resetDom() {
   dom.window.sessionStorage.clear();
 }
 
+export function resetHotReloadInstalled() {
+  delete dom.window.__lilyHotReloadInstalled;
+}
+
 export function historyLength() {
   return dom.window.history.length;
 }

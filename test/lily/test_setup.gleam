@@ -18,6 +18,12 @@ pub fn reset_dom() -> Nil {
 }
 
 @target(javascript)
+@external(javascript, "./test_setup.ffi.mjs", "resetHotReloadInstalled")
+pub fn reset_hot_reload_installed() -> Nil {
+  Nil
+}
+
+@target(javascript)
 @external(javascript, "./test_setup.ffi.mjs", "getLastWebSocket")
 pub fn get_last_websocket() -> Dynamic {
   panic as "JavaScript only"

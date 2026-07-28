@@ -79,6 +79,8 @@ export function createRuntime(store, apply) {
   let connectedAtLeastOnce = false;
   let urlSetter = null;
   let popstateInstalled = false;
+  let versionMismatchHook = null;
+  let baselineVersion = null;
 
   // Per-target sequence tracking (in-memory, keyed by target key string)
   const sequences = new Map();
@@ -333,6 +335,20 @@ export function createRuntime(store, apply) {
       currentStore.model = clientIdSetter(currentStore.model, clientId);
       scheduleNotify();
     },
+    setVersionMismatchHook(hook) {
+      versionMismatchHook = hook;
+    },
+    handleVersion(hash) {
+      // Remembers the first hash it sees as the baseline, every later one
+      // (sent again on reconnect) is compared against it. A restart between
+      // connections changes the hash, which is what surfaces a new deploy.
+      if (baselineVersion === null) {
+        baselineVersion = hash;
+        return;
+      }
+      const mismatch = hash !== baselineVersion;
+      if (mismatch && versionMismatchHook) versionMismatchHook();
+    },
     fireReconnectHook() {
       // Transport on_reconnect fires on every WebSocket open, including the
       // first. Only fire the user hook on subsequent opens, not the first
@@ -515,6 +531,10 @@ export function handleClientId(runtime, clientId) {
   runtime.handleClientId(clientId);
 }
 
+export function handleVersion(runtime, hash) {
+  runtime.handleVersion(hash);
+}
+
 export function initialNotify(runtime) {
   runtime.initialNotify();
 }
@@ -581,6 +601,40 @@ export function mergeLocals(incoming, current) {
 
 export function navigate(runtime, path) {
   runtime.navigate(path);
+}
+
+export function recoverAfterReload(initial, migrate) {
+  if (typeof sessionStorage === "undefined") return initial;
+  const raw = sessionStorage.getItem(RELOAD_STASH_KEY);
+  if (!raw) return initial;
+  sessionStorage.removeItem(RELOAD_STASH_KEY);
+
+  let stashed;
+  try {
+    stashed = JSON.parse(raw);
+  } catch (_error) {
+    return initial;
+  }
+
+  // The stash is undecoded (dev-only sessionStorage JSON, shape not
+  // guaranteed), a migrate hook gets it as-is and decides for itself.
+  if (migrate instanceof Some) return migrate[0](stashed, initial);
+
+  const merged = Object.create(Object.getPrototypeOf(initial));
+  for (const key of Object.keys(initial)) {
+    const stashedValue = stashed[key];
+    const isPrimitive =
+      stashedValue === null || PRIMITIVE_TYPES.has(typeof stashedValue);
+    merged[key] =
+      key in stashed && isPrimitive && typeof stashedValue === typeof initial[key]
+        ? stashedValue
+        : initial[key];
+  }
+  return merged;
+}
+
+export function reload() {
+  if (typeof window !== "undefined") window.location.reload();
 }
 
 export function replace(runtime, path) {
@@ -669,8 +723,24 @@ export function setSnapshotHook(runtime, hook) {
   runtime.setSnapshotHook(hook);
 }
 
+export function setVersionMismatchHook(runtime, hook) {
+  runtime.setVersionMismatchHook(hook);
+}
+
 export function setStore(runtime, store) {
   runtime.setStore(store);
+}
+
+// Guarded by a window flag so a re-run of the boot pipeline doesn't stack
+// listeners.
+export function installHotReload(runtime, url, reconnectMs, guardMs) {
+  if (typeof window === "undefined") return;
+  // Dev-only by host, so a production build never dials a dev socket.
+  const host = window.location.hostname;
+  if (host !== "localhost" && host !== "127.0.0.1") return;
+  if (window.__lilyHotReloadInstalled) return;
+  window.__lilyHotReloadInstalled = true;
+  connectDevReload(runtime, url, reconnectMs, guardMs);
 }
 
 export function setTransport(runtime, transport) {
@@ -692,6 +762,77 @@ export function storeSendFrame(runtime, fn) {
 // =============================================================================
 // PRIVATE FUNCTIONS
 // =============================================================================
+
+/**
+ * Reconnects on close. Every rebuild reloads the page, stashing the live model
+ * first so recoverAfterReload can restore it on the other side. A storm guard
+ * suppresses a reload that lands within a short window of the previous one, so
+ * a misbehaving signal can never spin the page into a reload loop that would
+ * hang or crash the browser. Normal edits are seconds apart and unaffected.
+ */
+function connectDevReload(runtime, url, reconnectMs, guardMs) {
+  const target = url || devReloadUrl();
+  const open = () => {
+    const socket = new WebSocket(target);
+    socket.onmessage = (event) => {
+      let changed = [];
+      try {
+        changed = JSON.parse(event.data).changed || [];
+      } catch (_error) {
+        changed = [];
+      }
+      if (changed.length > 0) console.log("lily_dev: rebuilt", changed.join(", "));
+      if (reloadedTooRecently(guardMs)) {
+        console.warn("lily_dev: reload suppressed (storm guard)");
+        return;
+      }
+      stashModelForReload(runtime.getModel());
+      window.location.reload();
+    };
+    socket.onclose = () => setTimeout(open, reconnectMs);
+  };
+  open();
+}
+
+/**
+ * True if a dev reload happened within the guard window. The timestamp lives in
+ * sessionStorage so it survives the reload it is guarding against.
+ */
+function reloadedTooRecently(guardMs) {
+  try {
+    const now = new Date().getTime();
+    const last = Number(sessionStorage.getItem(RELOAD_GUARD_KEY) || 0);
+    if (now - last < guardMs) return true;
+    sessionStorage.setItem(RELOAD_GUARD_KEY, String(now));
+    return false;
+  } catch (_error) {
+    return false;
+  }
+}
+
+/** Same-origin ws(s) URL for the dev-reload endpoint. */
+// lily_dev hosts this socket itself rather than the app's own backend, on
+// the page's port plus one by convention (lily_dev's own LILY_DEV_PORT
+// defaults to match), so an app never has to add a dev-reload route.
+function devReloadUrl() {
+  const isSecure = window.location.protocol === "https:";
+  const protocol = isSecure ? "wss:" : "ws:";
+  const defaultPort = isSecure ? 443 : 80;
+  const port = Number(window.location.port || defaultPort) + 1;
+  return `${protocol}//${window.location.hostname}:${port}/dev-reload`;
+}
+
+/**
+ * Best-effort, a stash that fails to write just means recoverAfterReload
+ * finds nothing and returns the fresh initial model untouched.
+ */
+function stashModelForReload(model) {
+  try {
+    sessionStorage.setItem(RELOAD_STASH_KEY, JSON.stringify(model));
+  } catch (_error) {
+    // Ignore, nothing to recover on the other side.
+  }
+}
 
 /**
  * Guardrail for live-patch attributes. Patch values commonly derive from the
@@ -742,3 +883,15 @@ const URL_ATTRIBUTES = new Set([
 // Schemes that execute script when placed in a URL attribute. Matched against
 // the leading, control-and-whitespace-stripped scheme.
 const UNSAFE_URL_SCHEME = /^(?:javascript|vbscript):/;
+
+// JS types safe to copy straight across a reload, anything else (an object,
+// an array, a class instance) needs a typed codec to migrate correctly.
+const PRIMITIVE_TYPES = new Set(["string", "number", "boolean"]);
+
+// sessionStorage key stashModelForReload writes and recoverAfterReload reads.
+const RELOAD_STASH_KEY = "lily_dev_reload_state";
+
+// Storm guard: reloads landing within the caller's guard window of the last
+// one are suppressed, breaking any accidental reload loop before it can hang
+// the page. The window itself comes from enable_hot_reload's config.
+const RELOAD_GUARD_KEY = "lily_dev_last_reload";

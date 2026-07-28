@@ -9,6 +9,7 @@ import lily/test_fixtures.{
 import lily/test_ref
 import lily/transport.{
   Acknowledge, Connected, Resync, Session, SessionMessage, Snapshot, TopicUpdate,
+  Version,
 }
 
 // =============================================================================
@@ -27,6 +28,13 @@ pub fn encode_connected_test() {
   transport.encode(Connected(client_id: "abc123"), serialiser: ser())
   |> should.equal(bit_array.from_string(
     "{\"type\":\"connected\",\"client_id\":\"abc123\"}",
+  ))
+}
+
+pub fn encode_version_test() {
+  transport.encode(Version(hash: "abc123"), serialiser: ser())
+  |> should.equal(bit_array.from_string(
+    "{\"type\":\"version\",\"hash\":\"abc123\"}",
   ))
 }
 
@@ -100,6 +108,14 @@ pub fn decode_connected_test() {
     serialiser: ser(),
   )
   |> should.equal(Ok(Connected(client_id: "abc123")))
+}
+
+pub fn decode_version_test() {
+  transport.decode(
+    bit_array.from_string("{\"type\":\"version\",\"hash\":\"abc123\"}"),
+    serialiser: ser(),
+  )
+  |> should.equal(Ok(Version(hash: "abc123")))
 }
 
 pub fn decode_acknowledge_test() {

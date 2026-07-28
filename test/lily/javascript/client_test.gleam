@@ -4,7 +4,11 @@
 @target(javascript)
 import gleam/bit_array
 @target(javascript)
+import gleam/dynamic/decode
+@target(javascript)
 import gleam/list
+@target(javascript)
+import gleam/result
 @target(javascript)
 import gleam/string
 @target(javascript)
@@ -16,7 +20,9 @@ import lily/client
 @target(javascript)
 import lily/store
 @target(javascript)
-import lily/test_fixtures.{type Message, type Model, Increment, Noop, SetName}
+import lily/test_fixtures.{
+  type Message, type Model, Increment, Model, Noop, SetName,
+}
 @target(javascript)
 import lily/test_ref
 @target(javascript)
@@ -843,4 +849,207 @@ pub fn client_connect_sends_resync_on_reconnect_test() {
       }
     [] -> should.fail()
   }
+}
+
+// =============================================================================
+// ON VERSION MISMATCH
+// =============================================================================
+
+@target(javascript)
+fn connect_with_fake_transport(
+  runtime: client.Runtime(Model, Message),
+) -> transport.Handler {
+  let handler_ref: test_ref.Ref(transport.Handler) =
+    test_ref.new(
+      transport.Handler(
+        on_receive: fn(_) { Nil },
+        on_reconnect: fn() { Nil },
+        on_disconnect: fn() { Nil },
+      ),
+    )
+  let connector =
+    transport.make_connector(fn(handler: transport.Handler) {
+      test_ref.set(handler_ref, handler)
+      transport.new(send: fn(_) { Nil }, close: fn() { Nil })
+    })
+  let _r =
+    client.connect(
+      runtime,
+      with: connector,
+      serialiser: test_fixtures.custom_serialiser(),
+    )
+  test_ref.get(handler_ref)
+}
+
+@target(javascript)
+fn send_version(handler: transport.Handler, hash: String) -> Nil {
+  handler.on_receive(transport.encode(
+    transport.Version(hash:),
+    serialiser: test_fixtures.custom_serialiser(),
+  ))
+}
+
+@target(javascript)
+pub fn client_on_version_mismatch_ignores_first_frame_test() {
+  test_setup.reset_dom()
+  test_setup.reset_mocks()
+  let runtime = new_runtime()
+
+  let fired: test_ref.Ref(Int) = test_ref.new(0)
+  let _r =
+    client.on_version_mismatch(runtime, fn() {
+      test_ref.set(fired, test_ref.get(fired) + 1)
+    })
+
+  let handler = connect_with_fake_transport(runtime)
+  send_version(handler, "v1")
+
+  test_ref.get(fired) |> should.equal(0)
+}
+
+@target(javascript)
+pub fn client_on_version_mismatch_fires_when_hash_changes_test() {
+  test_setup.reset_dom()
+  test_setup.reset_mocks()
+  let runtime = new_runtime()
+
+  let fired: test_ref.Ref(Int) = test_ref.new(0)
+  let _r =
+    client.on_version_mismatch(runtime, fn() {
+      test_ref.set(fired, test_ref.get(fired) + 1)
+    })
+
+  let handler = connect_with_fake_transport(runtime)
+  send_version(handler, "v1")
+  send_version(handler, "v2")
+
+  test_ref.get(fired) |> should.equal(1)
+}
+
+@target(javascript)
+pub fn client_on_version_mismatch_does_not_fire_when_hash_unchanged_test() {
+  test_setup.reset_dom()
+  test_setup.reset_mocks()
+  let runtime = new_runtime()
+
+  let fired: test_ref.Ref(Int) = test_ref.new(0)
+  let _r =
+    client.on_version_mismatch(runtime, fn() {
+      test_ref.set(fired, test_ref.get(fired) + 1)
+    })
+
+  let handler = connect_with_fake_transport(runtime)
+  send_version(handler, "v1")
+  send_version(handler, "v1")
+
+  test_ref.get(fired) |> should.equal(0)
+}
+
+// =============================================================================
+// ENABLE HOT RELOAD
+// =============================================================================
+
+@target(javascript)
+fn dev_reload_message(changed: List(String)) -> String {
+  let paths = list.map(changed, fn(path) { "\"" <> path <> "\"" })
+  "{\"changed\":[" <> string.join(paths, ",") <> "]}"
+}
+
+@target(javascript)
+pub fn client_enable_hot_reload_stashes_and_reloads_test() {
+  test_setup.reset_dom()
+  test_setup.reset_mocks()
+  test_setup.reset_hot_reload_installed()
+  let runtime = new_runtime()
+
+  let _r = client.enable_hot_reload(runtime, config: [])
+  let ws = test_setup.get_last_websocket()
+  test_setup.trigger_websocket_message(ws, dev_reload_message(["shared"]))
+
+  // Every rebuild stashes the live model then reloads, the stash is the only
+  // observable trace since jsdom's location.reload() is a silent no-op.
+  read_session_storage("lily_dev_reload_state")
+  |> string.contains("\"count\":0")
+  |> should.be_true
+}
+
+// =============================================================================
+// RECOVER AFTER RELOAD
+// =============================================================================
+
+@target(javascript)
+pub fn client_recover_after_reload_merges_matching_primitives_test() {
+  test_setup.reset_dom()
+  write_session_storage(
+    "lily_dev_reload_state",
+    "{\"count\":99,\"name\":\"Stashed\",\"connected\":true,\"secondary_count\":7,\"active_tab\":{\"unexpected\":\"shape\"}}",
+  )
+
+  let recovered =
+    client.recover_after_reload(test_fixtures.initial_model(), config: [])
+
+  recovered.count |> should.equal(99)
+  recovered.name |> should.equal("Stashed")
+  recovered.connected |> should.equal(True)
+  recovered.secondary_count |> should.equal(7)
+  // Not a primitive in the stash, so it falls back to the fresh model's value
+  // rather than adopting an untyped plain object.
+  recovered.active_tab |> should.equal(test_fixtures.TabA)
+}
+
+@target(javascript)
+pub fn client_recover_after_reload_clears_the_stash_test() {
+  test_setup.reset_dom()
+  write_session_storage("lily_dev_reload_state", "{\"count\":1}")
+
+  let _r =
+    client.recover_after_reload(test_fixtures.initial_model(), config: [])
+
+  read_session_storage("lily_dev_reload_state") |> should.equal("")
+}
+
+@target(javascript)
+pub fn client_recover_after_reload_is_noop_without_a_stash_test() {
+  test_setup.reset_dom()
+
+  client.recover_after_reload(test_fixtures.initial_model(), config: [])
+  |> should.equal(test_fixtures.initial_model())
+}
+
+@target(javascript)
+pub fn client_recover_after_reload_migrate_hook_takes_over_test() {
+  test_setup.reset_dom()
+  write_session_storage(
+    "lily_dev_reload_state",
+    "{\"renamed_count\":42,\"name\":\"Ignored\"}",
+  )
+
+  let migrate = fn(stashed, initial: Model) {
+    let count =
+      decode.run(stashed, decode.at(["renamed_count"], decode.int))
+      |> result.unwrap(initial.count)
+    Model(..initial, count:)
+  }
+
+  let recovered =
+    client.recover_after_reload(test_fixtures.initial_model(), config: [
+      client.recover_with_migrate(migrate),
+    ])
+
+  // The hook decided everything, a renamed field it knows to look for
+  // survives, and it never touched name, so that stays at the fresh value.
+  recovered.count |> should.equal(42)
+  recovered.name |> should.equal("")
+}
+
+@target(javascript)
+@external(javascript, "./session_test.ffi.mjs", "writeSessionStorage")
+fn write_session_storage(_key: String, _value: String) -> Nil {
+  Nil
+}
+
+@target(javascript)
+@external(javascript, "./session_test.ffi.mjs", "readSessionStorage")
+fn read_session_storage(_key: String) -> String {
+  ""
 }

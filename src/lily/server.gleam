@@ -649,7 +649,8 @@ fn handle_incoming_logic(
     | Ok(transport.Rejected(_, _))
     | Ok(transport.SessionUpdate(_, _))
     | Ok(transport.Snapshot(_, _, _))
-    | Ok(transport.TopicUpdate(_, _, _)) -> state
+    | Ok(transport.TopicUpdate(_, _, _))
+    | Ok(transport.Version(_)) -> state
 
     Error(_) -> state
   }
