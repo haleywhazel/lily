@@ -253,6 +253,28 @@ pub fn decode_message(encoded: String) -> Result(message, Nil) {
   }
 }
 
+@target(javascript)
+/// Install page-wide click dispatcher, any element carrying a `data-message`
+/// attribute dispatches its message when clicked.
+///
+/// ```gleam
+/// runtime
+/// |> component.mount(selector: "#app", ..., view: view)
+/// |> event.dispatch_messages()
+/// ```
+pub fn dispatch_messages(
+  runtime: Runtime(model, message),
+) -> Runtime(model, message) {
+  let dispatch = fn(encoded: String) {
+    case decode_message(encoded) {
+      Ok(message) -> client.send_message(runtime, message)
+      Error(Nil) -> Nil
+    }
+  }
+  register_event(click, "document", options(), dispatch)
+  runtime
+}
+
 /// Serialise `message` into an attribute-safe string for a `data-message`
 /// attribute, so a stateless element can carry a typed message that
 /// [`decode_message()`](#decode_message) recovers at the root. It round-trips

@@ -758,6 +758,51 @@ pub fn event_inside_each_live_initial_ignored_test() {
   |> should.equal(0)
 }
 
+@target(javascript)
+pub fn live_root_keeps_nested_children_reactive_test() {
+  // The generated app's nesting: a live root (tone) -> static body ->
+  // structural simple (navbar, constant slice) -> static (nav actions) ->
+  // simple reading a changing field (connection). The innermost simple must
+  // update when its field changes even though no ancestor re-renders.
+  test_setup.reset_dom()
+  let runtime = new_runtime()
+  let inner = fn() {
+    component.simple(slice: fn(m: Model) { m.count }, render: fn(count, _) {
+      "count:" <> int.to_string(count)
+    })
+  }
+  let nav_actions = fn() {
+    component.static(fn(slot) {
+      "<div class=\"actions\">" <> slot(inner()) <> "</div>"
+    })
+  }
+  let navbar = fn() {
+    component.simple(slice: fn(_m: Model) { "const" }, render: fn(_, slot) {
+      "<nav>" <> slot(nav_actions()) <> "</nav>"
+    })
+    |> component.structural()
+  }
+  let body = fn() {
+    component.static(fn(slot) { "<main>" <> slot(navbar()) <> "</main>" })
+  }
+  let _r =
+    mount(runtime, fn(_model) {
+      component.live(
+        slice: fn(_m: Model) { "system" },
+        initial: fn(slot) { "<div class=\"root\">" <> slot(body()) <> "</div>" },
+        patch: fn(_) { [] },
+      )
+      |> component.structural()
+    })
+  test_dom.inner_html("#app")
+  |> string.contains("count:0")
+  |> should.be_true
+  client.dispatch(runtime)(Increment)
+  test_dom.inner_html("#app")
+  |> string.contains("count:1")
+  |> should.be_true
+}
+
 // =============================================================================
 // MULTI-MOUNT
 // =============================================================================

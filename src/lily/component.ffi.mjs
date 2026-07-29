@@ -679,9 +679,8 @@ function renderLive(handle, component, model, toHtml, toSlot) {
   // Register handler to be called on model updates
   handle.registerComponent(componentId, handler);
 
-  // Run child handlers after registering this component's own handler so
-  // the registry order is parent-first.
-  if (childIds.length > 0) {
+  // Fire child handlers only if this element is already live in the DOM).
+  if (childIds.length > 0 && document.querySelector(selector)) {
     runChildHandlers(handle, childIds, model);
   }
 

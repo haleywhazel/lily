@@ -2,7 +2,7 @@ name = "lily"
 version = "0.6.1"
 target = "javascript"
 
-description = "Lily is designed to be a web framework for Gleam that allows for real-time updates while preserving offline functionality."
+description = "Lily is designed to be a web framework for Gleam that allows for real-time updates while preserving offline functionality!"
 licences = ["Apache-2.0"]
 repository = { type = "github", user = "haleywhazel", repo = "lily" }
 
