@@ -12,7 +12,7 @@ import lily/server
 @target(erlang)
 import lily/store
 @target(erlang)
-import lily/test_fixtures.{type Message, type Model, Decrement, Increment}
+import lily/test_support.{type Message, type Model, Decrement, Increment}
 @target(erlang)
 import lily/topic
 @target(erlang)
@@ -24,43 +24,25 @@ import lily/transport
 
 @target(erlang)
 fn ser() {
-  test_fixtures.custom_serialiser()
+  test_support.custom_serialiser()
 }
 
 @target(erlang)
-fn new_server() -> server.Server(Model, Message) {
-  let assert Ok(srv) =
-    server.new(
-      initial: test_fixtures.initial_model(),
-      serialiser: ser(),
-      wiring: store.wiring()
-        |> store.topic(
-          id: "chat",
-          extract: fn(message) { Ok(message) },
-          update: test_fixtures.update,
-          field_get: fn(model) { model },
-          field_set: fn(_, inner) { inner },
-        ),
-    )
-    |> server.start
-  srv
+fn recv(subj: process.Subject(BitArray)) -> Result(BitArray, Nil) {
+  process.receive(subj, within: 200)
 }
 
 @target(erlang)
-/// Connect a mock client, draining the Connected frame. Returns the Subject.
+/// Connect a mock client backed by a Subject, draining the Connected frame
+/// sent immediately on connect so tests can assert on subsequent frames.
 fn connect_client(
   srv: server.Server(Model, Message),
   client_id: String,
 ) -> process.Subject(BitArray) {
   let subj = process.new_subject()
   server.connect(srv, client_id: client_id, send: process.send(subj, _))
-  let _ = process.receive(subj, within: 200)
+  let _ = recv(subj)
   subj
-}
-
-@target(erlang)
-fn recv(subj: process.Subject(BitArray)) -> Result(BitArray, Nil) {
-  process.receive(subj, within: 200)
 }
 
 @target(erlang)
@@ -109,14 +91,14 @@ fn new_stateful_topic(
 
 @target(erlang)
 pub fn topic_new_returns_ok_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   topic.new(srv, id: "chat")
   |> should.be_ok
 }
 
 @target(erlang)
 pub fn topic_new_duplicate_id_returns_error_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let assert Ok(_) = topic.new(srv, id: "chat")
   topic.new(srv, id: "chat")
   |> should.be_error
@@ -128,7 +110,7 @@ pub fn topic_new_duplicate_id_returns_error_test() {
 
 @target(erlang)
 pub fn topic_broadcast_reaches_all_subscribers_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let t = new_ephemeral_topic(srv)
   let s1 = connect_client(srv, "c1")
   let s2 = connect_client(srv, "c2")
@@ -152,7 +134,7 @@ pub fn topic_broadcast_reaches_all_subscribers_test() {
 
 @target(erlang)
 pub fn topic_broadcast_to_zero_subscribers_does_not_crash_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let t = new_ephemeral_topic(srv)
   topic.broadcast(t, Increment)
   True
@@ -161,7 +143,7 @@ pub fn topic_broadcast_to_zero_subscribers_does_not_crash_test() {
 
 @target(erlang)
 pub fn topic_broadcast_from_skips_originator_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let t = new_ephemeral_topic(srv)
   let s1 = connect_client(srv, "c1")
   let s2 = connect_client(srv, "c2")
@@ -183,7 +165,7 @@ pub fn topic_broadcast_from_skips_originator_test() {
 
 @target(erlang)
 pub fn topic_client_message_on_ephemeral_relays_to_others_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let _t = new_ephemeral_topic(srv)
   let s1 = connect_client(srv, "c1")
   let s2 = connect_client(srv, "c2")
@@ -215,7 +197,7 @@ pub fn topic_client_message_on_ephemeral_relays_to_others_test() {
 
 @target(erlang)
 pub fn topic_with_store_dispatch_emits_topic_update_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let t = new_stateful_topic(srv)
   let s1 = connect_client(srv, "c1")
   server.incoming(srv, client_id: "c1", bytes: encode_subscribe("chat"))
@@ -236,7 +218,7 @@ pub fn topic_with_store_dispatch_emits_topic_update_test() {
 
 @target(erlang)
 pub fn topic_with_store_dispatch_increments_sequence_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let t = new_stateful_topic(srv)
   let s1 = connect_client(srv, "c1")
   server.incoming(srv, client_id: "c1", bytes: encode_subscribe("chat"))
@@ -258,7 +240,7 @@ pub fn topic_with_store_dispatch_increments_sequence_test() {
 
 @target(erlang)
 pub fn topic_dispatch_from_client_sends_acknowledge_and_updates_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let _t = new_stateful_topic(srv)
   let s1 = connect_client(srv, "c1")
   let s2 = connect_client(srv, "c2")
@@ -301,7 +283,7 @@ pub fn topic_dispatch_from_client_sends_acknowledge_and_updates_test() {
 
 @target(erlang)
 pub fn topic_subscribe_sends_snapshot_to_new_subscriber_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let _t = new_stateful_topic(srv)
   let s1 = connect_client(srv, "c1")
   server.incoming(srv, client_id: "c1", bytes: encode_subscribe("chat"))
@@ -311,7 +293,7 @@ pub fn topic_subscribe_sends_snapshot_to_new_subscriber_test() {
       |> should.equal(transport.Snapshot(
         target: transport.Topic("chat"),
         sequence: 0,
-        state: test_fixtures.initial_model(),
+        state: test_support.initial_model(),
       ))
     Error(_) -> should.fail()
   }
@@ -319,7 +301,7 @@ pub fn topic_subscribe_sends_snapshot_to_new_subscriber_test() {
 
 @target(erlang)
 pub fn topic_subscribe_to_unknown_topic_sends_rejected_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let s1 = connect_client(srv, "c1")
   server.incoming(srv, client_id: "c1", bytes: encode_subscribe("missing"))
   case recv(s1) {
@@ -339,7 +321,7 @@ pub fn topic_subscribe_to_unknown_topic_sends_rejected_test() {
 
 @target(erlang)
 pub fn topic_with_can_subscribe_false_sends_rejected_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let assert Ok(t) = topic.new(srv, id: "private")
   let _ =
     t
@@ -357,7 +339,7 @@ pub fn topic_with_can_subscribe_false_sends_rejected_test() {
 
 @target(erlang)
 pub fn topic_message_from_non_subscriber_is_dropped_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let _t = new_stateful_topic(srv)
   let s1 = connect_client(srv, "c1")
   let _s2 = connect_client(srv, "c2")
@@ -384,7 +366,7 @@ pub fn topic_message_from_non_subscriber_is_dropped_test() {
 
 @target(erlang)
 pub fn topic_with_on_subscribe_broadcasts_hook_messages_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let assert Ok(t) = topic.new(srv, id: "announce")
   let _ =
     t
@@ -403,7 +385,7 @@ pub fn topic_with_on_subscribe_broadcasts_hook_messages_test() {
 
 @target(erlang)
 pub fn topic_with_on_unsubscribe_broadcasts_hook_messages_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let assert Ok(t) = topic.new(srv, id: "announce")
   let _ =
     t
@@ -431,7 +413,7 @@ pub fn topic_with_on_unsubscribe_broadcasts_hook_messages_test() {
 
 @target(erlang)
 pub fn topic_kind_creates_topic_on_subscribe_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let assert Ok(_) =
     topic.kind(
       srv,
@@ -449,7 +431,7 @@ pub fn topic_kind_creates_topic_on_subscribe_test() {
 
 @target(erlang)
 pub fn topic_kind_parse_failure_sends_rejected_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let assert Ok(_) =
     topic.kind(
       srv,
@@ -477,7 +459,7 @@ pub fn topic_kind_parse_failure_sends_rejected_test() {
 
 @target(erlang)
 pub fn topic_stop_rejects_subsequent_subscribe_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let assert Ok(t) = topic.new(srv, id: "chat")
   topic.stop(t)
   process.sleep(20)

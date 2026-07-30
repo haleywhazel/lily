@@ -6,7 +6,7 @@ import gleam/bit_array
 @target(javascript)
 import gleeunit/should
 @target(javascript)
-import lily/test_fixtures.{
+import lily/test_support.{
   type Message, type Model, Decrement, Increment, Noop, Reset, SetName,
 }
 @target(javascript)
@@ -96,8 +96,8 @@ pub fn auto_js_roundtrip_empty_string_test() {
 @target(javascript)
 pub fn auto_js_roundtrip_multi_field_test() {
   let model =
-    test_fixtures.Model(
-      ..test_fixtures.initial_model(),
+    test_support.Model(
+      ..test_support.initial_model(),
       count: 5,
       name: "Bob",
       connected: False,
@@ -109,8 +109,8 @@ pub fn auto_js_roundtrip_multi_field_test() {
 @target(javascript)
 pub fn auto_js_roundtrip_boolean_test() {
   let model =
-    test_fixtures.Model(
-      ..test_fixtures.initial_model(),
+    test_support.Model(
+      ..test_support.initial_model(),
       count: 0,
       name: "",
       connected: True,
@@ -201,14 +201,14 @@ pub fn auto_js_json_roundtrip_test() {
 @target(javascript)
 pub fn auto_js_roundtrip_nested_test() {
   let inner =
-    test_fixtures.Model(
-      ..test_fixtures.initial_model(),
+    test_support.Model(
+      ..test_support.initial_model(),
       count: 3,
       name: "Eve",
       connected: False,
     )
-  let nested = test_fixtures.Nested(inner:)
-  let nested_ser: transport.Serialiser(test_fixtures.Nested, Message) =
+  let nested = test_support.Nested(inner:)
+  let nested_ser: transport.Serialiser(test_support.Nested, Message) =
     transport.automatic()
   let encoded =
     transport.encode(
@@ -221,8 +221,8 @@ pub fn auto_js_roundtrip_nested_test() {
 
 @target(javascript)
 pub fn auto_js_roundtrip_list_field_test() {
-  let with_list = test_fixtures.WithList(items: [1, 2, 3])
-  let list_ser: transport.Serialiser(test_fixtures.WithList, Message) =
+  let with_list = test_support.WithList(items: [1, 2, 3])
+  let list_ser: transport.Serialiser(test_support.WithList, Message) =
     transport.automatic()
   let encoded =
     transport.encode(

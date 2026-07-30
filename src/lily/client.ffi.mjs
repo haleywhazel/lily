@@ -72,6 +72,7 @@ export function createRuntime(store, apply) {
   let setConnectionStatusModel = null;
   let snapshotHook = null;
   let wiring = null;
+  let serialiser = null;
   let sendFrameFn = null;
   let onConnectHook = null;
   let onDisconnectHook = null;
@@ -178,9 +179,6 @@ export function createRuntime(store, apply) {
     callStoredSendFrame(frame) {
       if (sendFrameFn) sendFrameFn(frame);
     },
-    clearRegistry() {
-      componentRegistry.clear();
-    },
     dispatchModel(model) {
       currentStore.model = model;
       scheduleNotify();
@@ -197,6 +195,9 @@ export function createRuntime(store, apply) {
     },
     getWiring() {
       return wiring;
+    },
+    getSerialiser() {
+      return serialiser;
     },
     getSnapshotHook() {
       return snapshotHook ? new Some(snapshotHook) : new None();
@@ -230,9 +231,6 @@ export function createRuntime(store, apply) {
       // Cheap, segments are small. Avoids leaking removed IDs into a
       // segment's teardown set.
       for (const segment of mountSegments.values()) segment.delete(id);
-    },
-    resetComponentCounter() {
-      componentCounter = 0;
     },
     startMountSegment(selector) {
       // Tear down the prior segment for this selector if any, so a
@@ -412,6 +410,9 @@ export function createRuntime(store, apply) {
     setWiring(r) {
       wiring = r;
     },
+    setSerialiser(s) {
+      serialiser = s;
+    },
     setSessionConfig(config) {
       sessionConfig = config;
       if (!sessionConfig) return;
@@ -525,6 +526,10 @@ export function getSnapshotHook(runtime) {
 
 export function getWiring(runtime) {
   return runtime.getWiring();
+}
+
+export function getSerialiser(runtime) {
+  return runtime.getSerialiser();
 }
 
 export function handleClientId(runtime, clientId) {
@@ -753,6 +758,10 @@ export function setUserMessageHook(runtime, hook) {
 
 export function setWiring(runtime, wiring) {
   runtime.setWiring(wiring);
+}
+
+export function setSerialiser(runtime, serialiser) {
+  runtime.setSerialiser(serialiser);
 }
 
 export function storeSendFrame(runtime, fn) {

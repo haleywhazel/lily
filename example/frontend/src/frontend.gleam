@@ -25,7 +25,7 @@ import lustre/element/html
 pub fn main() {
   let runtime =
     store.new(shared.initial_model(), with: shared.update)
-    |> client.start(shared.wiring())
+    |> client.start(shared.wiring(), serialiser: shared.serialiser())
 
   let dispatch = client.dispatch(runtime)
 
@@ -96,10 +96,9 @@ pub fn main() {
     with: transport.websocket(url: transport.url_from_current_location(
       path: "/ws",
     ))
-      |> transport.reconnect_base_milliseconds(250)
-      |> transport.reconnect_max_milliseconds(5000)
-      |> transport.websocket_connect,
-    serialiser: shared.serialiser(),
+    |> transport.reconnect_base_milliseconds(250)
+    |> transport.reconnect_max_milliseconds(5000)
+    |> transport.websocket_connect,
   )
 
   Nil
@@ -303,6 +302,7 @@ fn app(
     event: event.click,
     selector: "#app",
     decoder: parse_click,
+    options: event.options(),
   )
 }
 
@@ -660,21 +660,25 @@ fn room_composer() -> component.Component(
     event: event.input,
     selector: "#room-input",
     handler: fn(text) { shared.Session(shared.UpdateDraft(text)) },
+    options: event.options(),
   )
   |> event.on_global_decoded(
     event: event.form_submit,
     selector: "#username-form",
     decoder: parse_username_submit,
+    options: event.options(),
   )
   |> event.on_global_decoded(
     event: event.form_submit,
     selector: "#join-room-form",
     decoder: parse_join_room,
+    options: event.options(),
   )
   |> event.on_global_decoded(
     event: event.form_submit,
     selector: "#room-form",
     decoder: parse_room_submit,
+    options: event.options(),
   )
 }
 

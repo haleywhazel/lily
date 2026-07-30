@@ -53,7 +53,10 @@ pub fn main() {
     |> mist.port(8080)
     |> mist.start
 
-  logging.info("Lily example backend listening on http://localhost:8080")
+  logging.log(
+    logging.Info,
+    "Lily example backend listening on http://localhost:8080",
+  )
 
   process.sleep_forever()
 }

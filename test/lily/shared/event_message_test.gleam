@@ -5,7 +5,7 @@
 
 import gleeunit/should
 import lily/event
-import lily/test_fixtures.{type Message, Increment, SetName}
+import lily/test_support.{type Message, Increment, SetName}
 
 pub fn zero_field_message_round_trips_test() {
   event.decode_message(event.encode_message(Increment))

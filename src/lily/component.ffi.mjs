@@ -25,11 +25,6 @@ import { isEqual } from "../gleam.mjs";
 // EXPORT FUNCTIONS
 // =============================================================================
 
-/** Get the model from the runtime */
-export function getModel(runtime) {
-  return runtime.handle.getModel();
-}
-
 /**
  * Identity function, used as `to_dynamic` and `list_dynamic` in the Gleam
  * file. Workaround so the public API can keep slice values opaque while the
@@ -103,7 +98,8 @@ export function renderTree(runtime, rootSelector, component, model, toHtml, toSl
  */
 function applyDecorations(handle, decorations, html, model) {
   const runtime = handle.getRuntime();
-  for (const decoration of decorations.toArray()) {
+  // Reverse to apply in attach order (add_decoration prepends)
+  for (const decoration of decorations.toArray().reverse()) {
     switch (decoration.constructor.name) {
       case "Listener":
         handle.queueBinding(() => decoration.handler(runtime));
@@ -331,12 +327,10 @@ function createKeyedListHandler({ handle, selector, slice, getKey, onDrop, onIte
     const container = cachedContainer;
     if (!container) return;
 
-    // Build items array and key set in a single pass.
+    // Compute each key once and reuse it in the main loop below.
     const items = list.toArray();
-    const currentKeySet = new Set();
-    for (let i = 0; i < items.length; i++) {
-      currentKeySet.add(getKey(items[i]));
-    }
+    const keys = items.map(getKey);
+    const currentKeySet = new Set(keys);
 
     // Drop children whose keys are no longer in the list. If a child
     // carries transition data attributes, removeWithTransition defers
@@ -363,7 +357,7 @@ function createKeyedListHandler({ handle, selector, slice, getKey, onDrop, onIte
 
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
-      const keyStr = getKey(item);
+      const keyStr = keys[i];
 
       let element = children.get(keyStr);
       const isNew = !element;

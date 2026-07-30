@@ -1,10 +1,9 @@
 /**
- * REFERENCE FFI
+ * ACTOR CELL FFI
  *
- * Minimal mutable cell for hosting Gleam state across asynchronous
- * boundaries on JavaScript. Mirrors the test-only test_ref helper but
- * lives in the library proper so server.gleam and topic.gleam can host
- * their per-instance state without each one rolling its own closure.
+ * The JavaScript-only mutable box an actor_cell keeps its state in. On Erlang
+ * the cell is an OTP process; on JavaScript there is no actor, so the Cell
+ * hosts its state here, reachable again from any async callback.
  */
 
 // =============================================================================

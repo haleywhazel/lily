@@ -39,7 +39,6 @@
 //// where (through `extract`), how the slice should update (`update`), and how
 //// to read and write the slice on the outer model (`field_get`/`field_set`).
 //// It also merges server snapshots back into the right slice.
-//// server snapshots back into the right slice.
 ////
 //// Build one `Wiring` in your `shared` package and hand the same value to
 //// both the client (passed to [`client.start`](./client.html#start)) and the
@@ -93,7 +92,6 @@
 // IMPORTS
 // =============================================================================
 
-import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option}
 import gleam/result
@@ -134,7 +132,7 @@ pub opaque type Store(model, message) {
 pub opaque type Wiring(model, message) {
   Wiring(
     session: Option(TargetConfig(model, message)),
-    topics: Dict(String, TargetConfig(model, message)),
+    topics: List(#(String, TargetConfig(model, message))),
     kinds: List(KindConfig(model, message)),
   )
 }
@@ -217,7 +215,7 @@ pub fn topic(
   field_set field_set: fn(model, topic_model) -> model,
 ) -> Wiring(model, message) {
   let config = make_target_config(extract, update, field_get, field_set)
-  Wiring(..wiring, topics: dict.insert(wiring.topics, id, config))
+  Wiring(..wiring, topics: list.key_set(wiring.topics, id, config))
 }
 
 /// Register a parametric topic family in the wiring. Where [`topic`](#topic)
@@ -279,7 +277,7 @@ pub fn unwrap_local(local: Local(a)) -> a {
 /// |> store.topic(id: "chat", extract:, update:, field_get:, field_set:)
 /// ```
 pub fn wiring() -> Wiring(model, message) {
-  Wiring(session: option.None, topics: dict.new(), kinds: [])
+  Wiring(session: option.None, topics: [], kinds: [])
 }
 
 // =============================================================================
@@ -297,13 +295,6 @@ pub fn apply(
 ) -> Store(model, message) {
   let new_model = store.update(store.model, message)
   Store(..store, model: new_model)
-}
-
-/// Read the current model out of a [`Store`](#Store). Used by sibling Lily
-/// modules and by tests that need to inspect the store's contents.
-@internal
-pub fn get_model(store: Store(model, message)) -> model {
-  store.model
 }
 
 /// Apply a message to the outer model using the appropriate wiring entry.
@@ -324,6 +315,13 @@ pub fn apply_message(
   }
 }
 
+/// Read the current model out of a [`Store`](#Store). Used by sibling Lily
+/// modules and by tests that need to inspect the store's contents.
+@internal
+pub fn get_model(store: Store(model, message)) -> model {
+  store.model
+}
+
 /// Merge a snapshot into the current outer model by replacing only the slice
 /// belonging to `target` and leaving all other slices intact.
 @internal
@@ -340,7 +338,7 @@ pub fn merge_snapshot(
         option.None -> current
       }
     transport.Topic(id) ->
-      case dict.get(wiring.topics, id) {
+      case list.key_find(wiring.topics, id) {
         Ok(c) -> c.merge_snapshot(current, snapshot_state)
         Error(_) ->
           case matching_kind(wiring, id) {
@@ -387,7 +385,7 @@ pub fn topic_apply(
   wiring: Wiring(model, message),
   id: String,
 ) -> Option(fn(model, message) -> model) {
-  case dict.get(wiring.topics, id) {
+  case list.key_find(wiring.topics, id) {
     Ok(config) -> option.Some(config.apply)
     Error(_) -> matching_kind(wiring, id) |> option.map(fn(kind) { kind.apply })
   }
@@ -396,14 +394,6 @@ pub fn topic_apply(
 // =============================================================================
 // PRIVATE TYPES
 // =============================================================================
-
-type TargetConfig(model, message) {
-  TargetConfig(
-    is_for_target: fn(message) -> Bool,
-    apply: fn(model, message) -> model,
-    merge_snapshot: fn(model, model) -> model,
-  )
-}
 
 /// Config for a parametric topic family (see [`topic_kind`](#topic_kind)).
 /// Unlike `TargetConfig`, the apply and merge are keyed by an instance id
@@ -419,6 +409,14 @@ type KindConfig(model, message) {
   )
 }
 
+type TargetConfig(model, message) {
+  TargetConfig(
+    is_for_target: fn(message) -> Bool,
+    apply: fn(model, message) -> model,
+    merge_snapshot: fn(model, model) -> model,
+  )
+}
+
 // =============================================================================
 // PRIVATE FUNCTIONS
 // =============================================================================
@@ -428,12 +426,7 @@ fn apply_to_topics(
   model: model,
   message: message,
 ) -> model {
-  // Topic extracts are mutually exclusive (per route_message contract), so
-  // the first match wins. No need to fold the entire dict.
-  case
-    dict.to_list(wiring.topics)
-    |> list.find(fn(pair) { { pair.1 }.is_for_target(message) })
-  {
+  case find_topic_entry(wiring, message) {
     Ok(#(_id, config)) -> config.apply(model, message)
     Error(_) ->
       case list.find(wiring.kinds, fn(kind) { kind.is_for_target(message) }) {
@@ -441,6 +434,16 @@ fn apply_to_topics(
         Error(_) -> model
       }
   }
+}
+
+/// Find the exact topic entry whose extract accepts this message. Topic
+/// extracts are mutually exclusive (per the `route_message` contract), so the
+/// first match wins and there is no need to scan past it.
+fn find_topic_entry(
+  wiring: Wiring(model, message),
+  message: message,
+) -> Result(#(String, TargetConfig(model, message)), Nil) {
+  list.find(wiring.topics, fn(pair) { { pair.1 }.is_for_target(message) })
 }
 
 fn make_kind_config(
@@ -514,10 +517,7 @@ fn matching_kind(
 /// Falls back to `Session` when nothing matches, the safe default for
 /// unrecognised messages.
 fn topic_target(wiring: Wiring(model, message), message: message) -> Target {
-  case
-    dict.to_list(wiring.topics)
-    |> list.find(fn(pair) { { pair.1 }.is_for_target(message) })
-  {
+  case find_topic_entry(wiring, message) {
     Ok(#(id, _)) -> transport.Topic(id)
     Error(_) ->
       case list.find(wiring.kinds, fn(kind) { kind.is_for_target(message) }) {

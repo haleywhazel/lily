@@ -39,24 +39,30 @@
 ////       render: fn(value, _) { html.input([attribute.value(value)]) },
 ////     )
 ////     |> component.scoped("#search")
-////     |> event.on(event: event.input, handler: Search),
+////     |> event.on(
+////       event: event.input,
+////       handler: Search,
+////       options: event.options(),
+////     ),
 ////   ])
 ////   |> event.on_global_decoded(
 ////     event: event.click,
 ////     selector: "#app",
 ////     decoder: parse_click,
+////     options: event.options(),
 ////   )
 ////   |> event.on_global(
 ////     event: event.key_down,
 ////     selector: "document",
 ////     handler: fn(ke) { KeyPressed(ke.key) },
+////     options: event.options(),
 ////   )
 //// }
 ////
 //// pub fn main() {
 ////   let runtime =
 ////     store.new(Model(count: 0), with: update)
-////     |> client.start(store.wiring())
+////     |> client.start(store.wiring(), serialiser: serialiser())
 ////
 ////   runtime
 ////   |> component.mount(
@@ -76,18 +82,17 @@
 //// }
 //// ```
 ////
-//// When an event needs debouncing, throttling, or `preventDefault`, build an
-//// [`EventOptions`](#EventOptions) with [`options()`](#options) and the
-//// builder functions, then bind with [`on_with_options()`](#on_with_options)
-//// or [`on_decoded_with_options()`](#on_decoded_with_options):
+//// The `options` argument carries debouncing, throttling, or `preventDefault`.
+//// Pass [`options()`](#options) for the defaults, or build modifiers onto it
+//// with the builder functions:
 ////
 //// ```gleam
 //// component.simple(slice: ..., render: ...)
 //// |> component.scoped("#search")
-//// |> event.on_with_options(
+//// |> event.on(
 ////   event: event.input,
-////   options: event.options() |> event.debounce_milliseconds(200),
 ////   handler: Search,
+////   options: event.options() |> event.debounce_milliseconds(200),
 //// )
 //// ```
 ////
@@ -135,7 +140,11 @@
 ////
 //// component.simple(slice: ..., render: ...)
 //// |> component.scoped("#login-form")
-//// |> event.on_decoded(event: event.form_submit, decoder: login_decoder)
+//// |> event.on_decoded(
+////   event: event.form_submit,
+////   decoder: login_decoder,
+////   options: event.options(),
+//// )
 //// ```
 ////
 //// Store the returned `Form(model)` in your model on the error branch, the
@@ -148,7 +157,6 @@
 // =============================================================================
 
 import gleam/bit_array
-import gleam/dynamic.{type Dynamic}
 @target(javascript)
 import gleam/option.{type Option}
 import gleam/result
@@ -157,6 +165,7 @@ import gleam/result
 import lily/client.{type Runtime}
 import lily/component.{type Component}
 import lily/internal/auto_codec
+import lily/internal/reflection
 
 // =============================================================================
 // PUBLIC TYPES
@@ -220,96 +229,6 @@ pub type Orientation {
 // =============================================================================
 // PUBLIC FUNCTIONS
 // =============================================================================
-
-@target(javascript)
-/// Set the debounce delay in milliseconds. Multiple events within the
-/// window collapse to a single dispatch fired after the gap.
-pub fn debounce_milliseconds(options: EventOptions, value: Int) -> EventOptions {
-  EventOptions(..options, debounce_milliseconds: option.Some(value))
-}
-
-/// Recover a message encoded by [`encode_message`](#encode_message). Returns
-/// `Error(Nil)` for any string this module did not produce, so it drops
-/// straight into [`on_decoded()`](#on_decoded) as the `decoder` and coexists
-/// with handlers that read readable `data-message` tags (those decline here
-/// and are handled by their own listeners).
-///
-/// ```gleam
-/// root
-/// |> event.on_decoded(
-///   event: event.click,
-///   selector: ".lily-ui-root",
-///   decoder: event.decode_message,
-/// )
-/// ```
-pub fn decode_message(encoded: String) -> Result(message, Nil) {
-  case encoded {
-    "lily-message:" <> payload -> {
-      use bytes <- result.try(bit_array.base64_decode(payload))
-      use value <- result.try(auto_codec.decode_message_pack(bytes))
-      Ok(unsafe_coerce_dynamic(value))
-    }
-    _ -> Error(Nil)
-  }
-}
-
-@target(javascript)
-/// Install page-wide click dispatcher, any element carrying a `data-message`
-/// attribute dispatches its message when clicked.
-///
-/// ```gleam
-/// runtime
-/// |> component.mount(selector: "#app", ..., view: view)
-/// |> event.dispatch_messages()
-/// ```
-pub fn dispatch_messages(
-  runtime: Runtime(model, message),
-) -> Runtime(model, message) {
-  let dispatch = fn(encoded: String) {
-    case decode_message(encoded) {
-      Ok(message) -> client.send_message(runtime, message)
-      Error(Nil) -> Nil
-    }
-  }
-  register_event(click, "document", options(), dispatch)
-  runtime
-}
-
-/// Serialise `message` into an attribute-safe string for a `data-message`
-/// attribute, so a stateless element can carry a typed message that
-/// [`decode_message()`](#decode_message) recovers at the root. It round-trips
-/// through Lily's reflection codec, the same one
-/// [`transport`](./transport.html) uses, so no separate encoder is needed.
-///
-/// ```gleam
-/// html.button(
-///   [attribute.data("message", event.encode_message(SaveDraft))],
-///   [html.text("Save")],
-/// )
-/// ```
-pub fn encode_message(message: a) -> String {
-  "lily-message:"
-  <> bit_array.base64_encode(auto_codec.encode_message_pack(message), False)
-}
-
-@target(javascript)
-/// Programmatically move focus to the first element matching `selector`.
-/// Runs after the next paint so the call is safe from a `client.on_message`
-/// hook whose dispatch may have just rendered the target element. No-op if
-/// the selector matches nothing.
-///
-/// ```gleam
-/// client.on_message(runtime, fn(message, _model) {
-///   case message {
-///     OpenDialog -> event.focus(runtime, "#dialog-cancel")
-///     CloseDialog -> event.focus(runtime, "#dialog-trigger")
-///     _ -> Nil
-///   }
-/// })
-/// ```
-pub fn focus(_runtime: Runtime(model, message), selector: String) -> Nil {
-  setup_focus(selector)
-}
 
 @target(erlang)
 /// Erlang no-op twin of [`arrow_grid`](#arrow_grid): returns the component
@@ -397,6 +316,96 @@ pub fn arrow_group(
 }
 
 @target(javascript)
+/// Set the debounce delay in milliseconds. Multiple events within the
+/// window collapse to a single dispatch fired after the gap.
+pub fn debounce_milliseconds(options: EventOptions, value: Int) -> EventOptions {
+  EventOptions(..options, debounce_milliseconds: option.Some(value))
+}
+
+/// Recover a message encoded by [`encode_message`](#encode_message). Returns
+/// `Error(Nil)` for any string this module did not produce, so it drops
+/// straight into [`on_decoded()`](#on_decoded) as the `decoder` and coexists
+/// with handlers that read readable `data-message` tags (those decline here
+/// and are handled by their own listeners).
+///
+/// ```gleam
+/// root
+/// |> event.on_decoded(
+///   event: event.click,
+///   selector: ".lily-ui-root",
+///   decoder: event.decode_message,
+/// )
+/// ```
+pub fn decode_message(encoded: String) -> Result(message, Nil) {
+  case encoded {
+    "lily-message:" <> payload -> {
+      use bytes <- result.try(bit_array.base64_decode(payload))
+      use value <- result.try(auto_codec.decode_message_pack(bytes))
+      Ok(reflection.passthrough(value))
+    }
+    _ -> Error(Nil)
+  }
+}
+
+@target(javascript)
+/// Install page-wide click dispatcher, any element carrying a `data-message`
+/// attribute dispatches its message when clicked.
+///
+/// ```gleam
+/// runtime
+/// |> component.mount(selector: "#app", ..., view: view)
+/// |> event.dispatch_messages()
+/// ```
+pub fn dispatch_messages(
+  runtime: Runtime(model, message),
+) -> Runtime(model, message) {
+  let dispatch = fn(encoded: String) {
+    case decode_message(encoded) {
+      Ok(message) -> client.send_message(runtime, message)
+      Error(Nil) -> Nil
+    }
+  }
+  register_event(click, "document", options(), dispatch)
+  runtime
+}
+
+/// Serialise `message` into an attribute-safe string for a `data-message`
+/// attribute, so a stateless element can carry a typed message that
+/// [`decode_message()`](#decode_message) recovers at the root. It round-trips
+/// through Lily's reflection codec, the same one
+/// [`transport`](./transport.html) uses, so no separate encoder is needed.
+///
+/// ```gleam
+/// html.button(
+///   [attribute.data("message", event.encode_message(SaveDraft))],
+///   [html.text("Save")],
+/// )
+/// ```
+pub fn encode_message(message: a) -> String {
+  "lily-message:"
+  <> bit_array.base64_encode(auto_codec.encode_message_pack(message), False)
+}
+
+@target(javascript)
+/// Programmatically move focus to the first element matching `selector`.
+/// Runs after the next paint so the call is safe from a `client.on_message`
+/// hook whose dispatch may have just rendered the target element. No-op if
+/// the selector matches nothing.
+///
+/// ```gleam
+/// client.on_message(runtime, fn(message, _model) {
+///   case message {
+///     OpenDialog -> event.focus(runtime, "#dialog-cancel")
+///     CloseDialog -> event.focus(runtime, "#dialog-trigger")
+///     _ -> Nil
+///   }
+/// })
+/// ```
+pub fn focus(_runtime: Runtime(model, message), selector: String) -> Nil {
+  setup_focus(selector)
+}
+
+@target(javascript)
 /// Confine Tab and Shift+Tab cycling to focusable descendants of the element
 /// matching `within`. Pushes onto a stack so nested overlays (a Combobox in a
 /// Dialog in a Drawer) each keep their own scope. Focusables are re-enumerated
@@ -438,17 +447,32 @@ pub fn focus_trap(
 /// [`each_live`](./component.html#each_live) item bodies are ignored, so attach
 /// them to the wrapper or a static ancestor.
 ///
+/// Pass `options: event.options()` for the defaults, or build modifiers onto
+/// it with [`debounce_milliseconds`](#debounce_milliseconds) and friends.
+///
 /// ```gleam
 /// component.simple(slice: ..., render: ...)
 /// |> component.scoped("#search")
-/// |> event.on(event: event.input, handler: Search)
+/// |> event.on(
+///   event: event.input,
+///   handler: Search,
+///   options: event.options() |> event.debounce_milliseconds(200),
+/// )
 /// ```
 pub fn on(
   component: Component(model, message, html),
   event event: Event(payload),
   handler handler: fn(payload) -> message,
+  options options: EventOptions,
 ) -> Component(model, message, html) {
-  on_with_options(component, event, options(), handler)
+  let selector = resolve_scope(component)
+  let binding = fn(runtime: Runtime(model, message)) {
+    let dispatch = fn(payload: payload) {
+      client.send_message(runtime, handler(payload))
+    }
+    register_event(event, selector, options, dispatch)
+  }
+  component.attach_event(component, binding)
 }
 
 @target(javascript)
@@ -460,24 +484,17 @@ pub fn on(
 /// ```gleam
 /// component.fragment([...])
 /// |> component.scoped("#todo-form")
-/// |> event.on_decoded(event: event.form_submit, decoder: submit_todo)
+/// |> event.on_decoded(
+///   event: event.form_submit,
+///   decoder: submit_todo,
+///   options: event.options(),
+/// )
 /// ```
 pub fn on_decoded(
   component: Component(model, message, html),
   event event: Event(payload),
   decoder decoder: fn(payload) -> Result(message, Nil),
-) -> Component(model, message, html) {
-  on_decoded_with_options(component, event, options(), decoder)
-}
-
-@target(javascript)
-/// Like [`on_decoded`](#on_decoded) with an extra
-/// [`EventOptions`](#EventOptions) parameter. See [`options()`](#options).
-pub fn on_decoded_with_options(
-  component: Component(model, message, html),
-  event event: Event(payload),
   options options: EventOptions,
-  decoder decoder: fn(payload) -> Result(message, Nil),
 ) -> Component(model, message, html) {
   let selector = resolve_scope(component)
   let binding = fn(runtime: Runtime(model, message)) {
@@ -510,6 +527,7 @@ pub fn on_decoded_with_options(
 ///   event: event.key_down,
 ///   selector: "document",
 ///   handler: fn(ke) { KeyPressed(ke.key) },
+///   options: event.options(),
 /// )
 /// ```
 pub fn on_global(
@@ -517,8 +535,15 @@ pub fn on_global(
   event event: Event(payload),
   selector selector: String,
   handler handler: fn(payload) -> message,
+  options options: EventOptions,
 ) -> Component(model, message, html) {
-  on_global_with_options(component, event, selector, options(), handler)
+  let binding = fn(runtime: Runtime(model, message)) {
+    let dispatch = fn(payload: payload) {
+      client.send_message(runtime, handler(payload))
+    }
+    register_event(event, selector, options, dispatch)
+  }
+  component.attach_event(component, binding)
 }
 
 @target(javascript)
@@ -533,6 +558,7 @@ pub fn on_global(
 ///   event: event.click,
 ///   selector: ".lily-ui-root",
 ///   decoder: event.decode_message,
+///   options: event.options(),
 /// )
 /// ```
 pub fn on_global_decoded(
@@ -540,19 +566,7 @@ pub fn on_global_decoded(
   event event: Event(payload),
   selector selector: String,
   decoder decoder: fn(payload) -> Result(message, Nil),
-) -> Component(model, message, html) {
-  on_global_decoded_with_options(component, event, selector, options(), decoder)
-}
-
-@target(javascript)
-/// Like [`on_global_decoded`](#on_global_decoded) with an extra
-/// [`EventOptions`](#EventOptions) parameter. See [`options()`](#options).
-pub fn on_global_decoded_with_options(
-  component: Component(model, message, html),
-  event event: Event(payload),
-  selector selector: String,
   options options: EventOptions,
-  decoder decoder: fn(payload) -> Result(message, Nil),
 ) -> Component(model, message, html) {
   let binding = fn(runtime: Runtime(model, message)) {
     let dispatch = fn(payload: payload) {
@@ -560,54 +574,6 @@ pub fn on_global_decoded_with_options(
         Ok(message) -> client.send_message(runtime, message)
         Error(Nil) -> Nil
       }
-    }
-    register_event(event, selector, options, dispatch)
-  }
-  component.attach_event(component, binding)
-}
-
-@target(javascript)
-/// Like [`on_global`](#on_global) with an extra
-/// [`EventOptions`](#EventOptions) parameter. See [`options()`](#options).
-pub fn on_global_with_options(
-  component: Component(model, message, html),
-  event event: Event(payload),
-  selector selector: String,
-  options options: EventOptions,
-  handler handler: fn(payload) -> message,
-) -> Component(model, message, html) {
-  let binding = fn(runtime: Runtime(model, message)) {
-    let dispatch = fn(payload: payload) {
-      client.send_message(runtime, handler(payload))
-    }
-    register_event(event, selector, options, dispatch)
-  }
-  component.attach_event(component, binding)
-}
-
-@target(javascript)
-/// Like [`on`](#on) with an extra [`EventOptions`](#EventOptions)
-/// parameter. See [`options()`](#options).
-///
-/// ```gleam
-/// component.simple(slice: ..., render: ...)
-/// |> component.scoped("#search")
-/// |> event.on_with_options(
-///   event: event.input,
-///   options: event.options() |> event.debounce_milliseconds(200),
-///   handler: Search,
-/// )
-/// ```
-pub fn on_with_options(
-  component: Component(model, message, html),
-  event event: Event(payload),
-  options options: EventOptions,
-  handler handler: fn(payload) -> message,
-) -> Component(model, message, html) {
-  let selector = resolve_scope(component)
-  let binding = fn(runtime: Runtime(model, message)) {
-    let dispatch = fn(payload: payload) {
-      client.send_message(runtime, handler(payload))
     }
     register_event(event, selector, options, dispatch)
   }
@@ -728,10 +694,6 @@ pub fn watch_file_drops() -> Nil {
 pub fn watch_focus_traps() -> Nil {
   watch_focus_traps_ffi()
 }
-
-// =============================================================================
-// PUBLIC EVENTS
-// =============================================================================
 
 @target(javascript)
 /// `blur` event, fires when an element loses focus.
@@ -1118,13 +1080,6 @@ fn unpack_options(options: EventOptions) -> #(Int, Int, Bool, Bool, Bool) {
 // =============================================================================
 
 // See event.ffi.mjs for explanations for each function.
-
-// Reinterpret the reflection-reconstructed Dynamic as the caller's message
-// type, the same identity cast transport uses after decoding. Reflection has
-// already built the correct runtime value, so only the static type is recast.
-@external(erlang, "lily_reflection_ffi", "passthrough")
-@external(javascript, "./internal/reflection.ffi.mjs", "passthrough")
-fn unsafe_coerce_dynamic(value: Dynamic) -> a
 
 @target(javascript)
 @external(javascript, "./event.ffi.mjs", "identity")

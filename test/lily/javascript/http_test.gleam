@@ -12,23 +12,13 @@ import lily/client
 @target(javascript)
 import lily/store
 @target(javascript)
-import lily/test_fixtures.{type Message, type Model}
-@target(javascript)
-import lily/test_ref
-@target(javascript)
-import lily/test_setup
+import lily/test_support.{type Message, type Model}
 @target(javascript)
 import lily/transport
 
 // =============================================================================
 // HELPERS
 // =============================================================================
-
-@target(javascript)
-fn new_runtime() -> client.Runtime(Model, Message) {
-  store.new(test_fixtures.initial_model(), with: test_fixtures.update)
-  |> client.start(store.wiring())
-}
 
 // =============================================================================
 // CONFIGURATION
@@ -61,91 +51,71 @@ pub fn http_flush_batch_size_sets_value_test() {
 
 @target(javascript)
 pub fn http_connect_creates_event_source_test() {
-  test_setup.reset_dom()
-  test_setup.reset_mocks()
-  let runtime = new_runtime()
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let runtime = test_support.new_runtime()
   let connector =
     transport.http(
       post_url: "http://localhost/api/messages",
       events_url: "http://localhost/events",
     )
     |> transport.http_connect
-  let _r =
-    client.connect(
-      runtime,
-      with: connector,
-      serialiser: test_fixtures.custom_serialiser(),
-    )
-  is_null(test_setup.get_last_event_source())
+  let _r = client.connect(runtime, with: connector)
+  is_null(test_support.get_last_event_source())
   |> should.be_false
 }
 
 @target(javascript)
 pub fn http_connect_calls_on_reconnect_test() {
-  test_setup.reset_dom()
-  test_setup.reset_mocks()
-  let runtime = new_runtime()
-  let reconnect_ref = test_ref.new(False)
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let runtime = test_support.new_runtime()
+  let reconnect_ref = test_support.new(False)
   let connector =
     transport.make_connector(fn(handler: transport.Handler) {
       handler.on_reconnect()
-      test_ref.set(reconnect_ref, True)
+      test_support.set(reconnect_ref, True)
       transport.new(send: fn(_) { Nil }, close: fn() { Nil })
     })
-  let _r =
-    client.connect(
-      runtime,
-      with: connector,
-      serialiser: test_fixtures.custom_serialiser(),
-    )
-  test_ref.get(reconnect_ref)
+  let _r = client.connect(runtime, with: connector)
+  test_support.get(reconnect_ref)
   |> should.be_true
 }
 
 @target(javascript)
 pub fn http_connect_calls_on_disconnect_test() {
-  test_setup.reset_dom()
-  test_setup.reset_mocks()
-  let runtime = new_runtime()
-  let disconnect_ref = test_ref.new(False)
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let runtime = test_support.new_runtime()
+  let disconnect_ref = test_support.new(False)
   let connector =
     transport.make_connector(fn(handler: transport.Handler) {
       handler.on_disconnect()
-      test_ref.set(disconnect_ref, True)
+      test_support.set(disconnect_ref, True)
       transport.new(send: fn(_) { Nil }, close: fn() { Nil })
     })
-  let _r =
-    client.connect(
-      runtime,
-      with: connector,
-      serialiser: test_fixtures.custom_serialiser(),
-    )
-  test_ref.get(disconnect_ref)
+  let _r = client.connect(runtime, with: connector)
+  test_support.get(disconnect_ref)
   |> should.be_true
 }
 
 @target(javascript)
 pub fn http_connect_receives_messages_test() {
-  test_setup.reset_dom()
-  test_setup.reset_mocks()
-  let runtime = new_runtime()
-  let received_ref = test_ref.new("")
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let runtime = test_support.new_runtime()
+  let received_ref = test_support.new("")
   let connector =
     transport.make_connector(fn(handler: transport.Handler) {
       transport.new(send: fn(_) { Nil }, close: fn() { Nil })
       |> fn(t) {
         handler.on_receive(bit_array.from_string("test-message"))
-        test_ref.set(received_ref, "received")
+        test_support.set(received_ref, "received")
         t
       }
     })
-  let _r =
-    client.connect(
-      runtime,
-      with: connector,
-      serialiser: test_fixtures.custom_serialiser(),
-    )
-  test_ref.get(received_ref)
+  let _r = client.connect(runtime, with: connector)
+  test_support.get(received_ref)
   |> should.equal("received")
 }
 
@@ -155,23 +125,18 @@ pub fn http_connect_receives_messages_test() {
 
 @target(javascript)
 pub fn http_send_when_disconnected_queues_test() {
-  test_setup.reset_dom()
-  test_setup.reset_mocks()
-  let runtime = new_runtime()
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let runtime = test_support.new_runtime()
   let connector =
     transport.http(
       post_url: "http://localhost/api/messages",
       events_url: "http://localhost/events",
     )
     |> transport.http_connect
-  let _r =
-    client.connect(
-      runtime,
-      with: connector,
-      serialiser: test_fixtures.custom_serialiser(),
-    )
-  client.dispatch(runtime)(test_fixtures.Increment)
-  let queued = read_session_storage("lily_http_pending")
+  let _r = client.connect(runtime, with: connector)
+  client.dispatch(runtime)(test_support.Increment)
+  let queued = test_support.read_session_storage("lily_http_pending")
   queued
   |> should.not_equal("")
 }
@@ -182,11 +147,11 @@ pub fn http_send_when_disconnected_queues_test() {
 
 @target(javascript)
 pub fn http_close_shuts_down_event_source_test() {
-  test_setup.reset_dom()
-  test_setup.reset_mocks()
-  let runtime = new_runtime()
-  let transport_ref: test_ref.Ref(transport.Transport) =
-    test_ref.new(transport.new(send: fn(_) { Nil }, close: fn() { Nil }))
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let runtime = test_support.new_runtime()
+  let transport_ref: test_support.Ref(transport.Transport) =
+    test_support.new(transport.new(send: fn(_) { Nil }, close: fn() { Nil }))
   let connector =
     transport.make_connector(fn(handler: transport.Handler) {
       let t =
@@ -196,18 +161,13 @@ pub fn http_close_shuts_down_event_source_test() {
         )
         |> transport.http_connect
         |> transport.run_connector(handler)
-      test_ref.set(transport_ref, t)
+      test_support.set(transport_ref, t)
       t
     })
-  let _r =
-    client.connect(
-      runtime,
-      with: connector,
-      serialiser: test_fixtures.custom_serialiser(),
-    )
-  let es = test_setup.get_last_event_source()
+  let _r = client.connect(runtime, with: connector)
+  let es = test_support.get_last_event_source()
   // Get the transport and close it
-  let t = test_ref.get(transport_ref)
+  let t = test_support.get(transport_ref)
   transport.close(t)
   // EventSource readyState should be 2 (CLOSED)
   event_source_ready_state(es)
@@ -217,12 +177,6 @@ pub fn http_close_shuts_down_event_source_test() {
 // =============================================================================
 // PRIVATE FFI HELPERS
 // =============================================================================
-
-@target(javascript)
-@external(javascript, "./session_test.ffi.mjs", "readSessionStorage")
-fn read_session_storage(_key: String) -> String {
-  ""
-}
 
 @target(javascript)
 @external(javascript, "./websocket_test.ffi.mjs", "isNull")

@@ -2,21 +2,21 @@
 
 import gleeunit/should
 import lily/store
-import lily/test_fixtures.{Decrement, Increment, SetName}
+import lily/test_support.{Decrement, Increment, SetName}
 
 // =============================================================================
 // CONSTRUCTION
 // =============================================================================
 
 pub fn store_new_has_initial_model_test() {
-  let s = store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+  let s = store.new(test_support.initial_model(), with: test_support.update)
   store.get_model(s)
-  |> should.equal(test_fixtures.initial_model())
+  |> should.equal(test_support.initial_model())
 }
 
 pub fn store_new_retains_update_function_test() {
   let s =
-    store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+    store.new(test_support.initial_model(), with: test_support.update)
     |> store.apply(message: Increment)
   store.get_model(s).count
   |> should.equal(1)
@@ -27,7 +27,7 @@ pub fn store_new_retains_update_function_test() {
 // =============================================================================
 
 pub fn store_apply_multiple_messages_test() {
-  store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+  store.new(test_support.initial_model(), with: test_support.update)
   |> store.apply(message: Increment)
   |> store.apply(message: Increment)
   |> store.apply(message: Increment)
@@ -37,7 +37,7 @@ pub fn store_apply_multiple_messages_test() {
 }
 
 pub fn store_apply_updates_model_test() {
-  store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+  store.new(test_support.initial_model(), with: test_support.update)
   |> store.apply(message: Increment)
   |> store.get_model
   |> fn(model) { model.count }
@@ -46,7 +46,7 @@ pub fn store_apply_updates_model_test() {
 
 pub fn store_apply_with_different_messages_test() {
   let model =
-    store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+    store.new(test_support.initial_model(), with: test_support.update)
     |> store.apply(message: Increment)
     |> store.apply(message: SetName("Alice"))
     |> store.apply(message: Decrement)

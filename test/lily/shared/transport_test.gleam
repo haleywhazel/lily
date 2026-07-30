@@ -3,13 +3,12 @@
 
 import gleam/bit_array
 import gleeunit/should
-import lily/test_fixtures.{
+import lily/test_support.{
   type Message, type Model, Decrement, Increment, SetName,
 }
-import lily/test_ref
 import lily/transport.{
-  Acknowledge, Connected, Resync, Session, SessionMessage, Snapshot, TopicUpdate,
-  Version,
+  Acknowledge, Connected, Resync, Session, SessionMessage, Snapshot, Topic,
+  TopicUpdate, Version,
 }
 
 // =============================================================================
@@ -17,7 +16,7 @@ import lily/transport.{
 // =============================================================================
 
 fn ser() {
-  test_fixtures.custom_serialiser()
+  test_support.custom_serialiser()
 }
 
 // =============================================================================
@@ -81,8 +80,8 @@ pub fn encode_topic_update_test() {
 
 pub fn encode_snapshot_test() {
   let model =
-    test_fixtures.Model(
-      ..test_fixtures.initial_model(),
+    test_support.Model(
+      ..test_support.initial_model(),
       count: 5,
       name: "Bob",
       connected: True,
@@ -181,15 +180,15 @@ pub fn decode_snapshot_test() {
     Ok(Snapshot(
       target: Session,
       sequence: 2,
-      state: test_fixtures.initial_model(),
+      state: test_support.initial_model(),
     )),
   )
 }
 
 pub fn decode_snapshot_with_complex_model_test() {
   let model =
-    test_fixtures.Model(
-      ..test_fixtures.initial_model(),
+    test_support.Model(
+      ..test_support.initial_model(),
       count: 42,
       name: "Eve",
       connected: True,
@@ -333,11 +332,13 @@ pub fn use_message_pack_restores_message_pack_path_test() {
 // =============================================================================
 
 pub fn transport_close_calls_close_function_test() {
-  let ref = test_ref.new(False)
+  let ref = test_support.new(False)
   let t =
-    transport.new(send: fn(_) { Nil }, close: fn() { test_ref.set(ref, True) })
+    transport.new(send: fn(_) { Nil }, close: fn() {
+      test_support.set(ref, True)
+    })
   transport.close(t)
-  test_ref.get(ref)
+  test_support.get(ref)
   |> should.be_true
 }
 
@@ -350,13 +351,13 @@ pub fn transport_new_creates_transport_test() {
 }
 
 pub fn transport_send_calls_send_function_test() {
-  let ref = test_ref.new(<<>>)
+  let ref = test_support.new(<<>>)
   let t =
-    transport.new(send: fn(bytes) { test_ref.set(ref, bytes) }, close: fn() {
+    transport.new(send: fn(bytes) { test_support.set(ref, bytes) }, close: fn() {
       Nil
     })
   transport.send(t, bit_array.from_string("hello"))
-  test_ref.get(ref)
+  test_support.get(ref)
   |> should.equal(bit_array.from_string("hello"))
 }
 
@@ -368,27 +369,27 @@ fn binary_serialiser() -> transport.Serialiser(Model, Message) {
   transport.custom_binary(
     encode_message: fn(message: Message) {
       case message {
-        test_fixtures.Increment -> <<1>>
-        test_fixtures.Decrement -> <<2>>
-        test_fixtures.Reset -> <<3>>
-        test_fixtures.Noop -> <<4>>
-        test_fixtures.SetName(n) ->
+        test_support.Increment -> <<1>>
+        test_support.Decrement -> <<2>>
+        test_support.Reset -> <<3>>
+        test_support.Noop -> <<4>>
+        test_support.SetName(n) ->
           bit_array.concat([<<5>>, bit_array.from_string(n)])
-        test_fixtures.SetTab(_)
-        | test_fixtures.IncrementSecondary
-        | test_fixtures.AddTransitionItem(_)
-        | test_fixtures.RemoveTransitionItem(_) -> <<6>>
+        test_support.SetTab(_)
+        | test_support.IncrementSecondary
+        | test_support.AddTransitionItem(_)
+        | test_support.RemoveTransitionItem(_) -> <<6>>
       }
     },
     decode_message: fn(bytes) {
       case bytes {
-        <<1>> -> Ok(test_fixtures.Increment)
-        <<2>> -> Ok(test_fixtures.Decrement)
-        <<3>> -> Ok(test_fixtures.Reset)
-        <<4>> -> Ok(test_fixtures.Noop)
+        <<1>> -> Ok(test_support.Increment)
+        <<2>> -> Ok(test_support.Decrement)
+        <<3>> -> Ok(test_support.Reset)
+        <<4>> -> Ok(test_support.Noop)
         <<5, rest:bytes>> ->
           case bit_array.to_string(rest) {
-            Ok(name) -> Ok(test_fixtures.SetName(name))
+            Ok(name) -> Ok(test_support.SetName(name))
             Error(Nil) -> Error(Nil)
           }
         _ -> Error(Nil)
@@ -399,8 +400,8 @@ fn binary_serialiser() -> transport.Serialiser(Model, Message) {
       case bytes {
         <<n>> ->
           Ok(
-            test_fixtures.Model(
-              ..test_fixtures.initial_model(),
+            test_support.Model(
+              ..test_support.initial_model(),
               count: n,
               name: "",
               connected: False,
@@ -436,8 +437,8 @@ pub fn custom_binary_roundtrip_set_name_test() {
 pub fn custom_binary_roundtrip_snapshot_test() {
   let ser = binary_serialiser()
   let model =
-    test_fixtures.Model(
-      ..test_fixtures.initial_model(),
+    test_support.Model(
+      ..test_support.initial_model(),
       count: 7,
       name: "",
       connected: False,
@@ -508,7 +509,7 @@ pub fn make_connector_wraps_function_test() {
 }
 
 pub fn run_connector_passes_handler_through_test() {
-  let received_ref = test_ref.new(<<>>)
+  let received_ref = test_support.new(<<>>)
   let connector =
     transport.make_connector(fn(handler: transport.Handler) {
       // Invoke the handler's on_receive to prove it was passed through.
@@ -517,20 +518,20 @@ pub fn run_connector_passes_handler_through_test() {
     })
   let handler =
     transport.Handler(
-      on_receive: fn(bytes) { test_ref.set(received_ref, bytes) },
+      on_receive: fn(bytes) { test_support.set(received_ref, bytes) },
       on_reconnect: fn() { Nil },
       on_disconnect: fn() { Nil },
     )
   let _t = transport.run_connector(connector, handler)
-  test_ref.get(received_ref)
+  test_support.get(received_ref)
   |> should.equal(bit_array.from_string("relayed"))
 }
 
 pub fn run_connector_returns_built_transport_test() {
-  let send_ref = test_ref.new(<<>>)
+  let send_ref = test_support.new(<<>>)
   let connector =
     transport.make_connector(fn(_handler) {
-      transport.new(send: fn(b) { test_ref.set(send_ref, b) }, close: fn() {
+      transport.new(send: fn(b) { test_support.set(send_ref, b) }, close: fn() {
         Nil
       })
     })
@@ -542,6 +543,108 @@ pub fn run_connector_returns_built_transport_test() {
     )
   let t = transport.run_connector(connector, handler)
   transport.send(t, bit_array.from_string("payload"))
-  test_ref.get(send_ref)
+  test_support.get(send_ref)
   |> should.equal(bit_array.from_string("payload"))
+}
+
+// =============================================================================
+// TARGET KEY (target_key / target_from_key)
+// =============================================================================
+
+pub fn target_key_session_formats_test() {
+  transport.target_key(Session)
+  |> should.equal("session")
+}
+
+pub fn target_key_topic_formats_test() {
+  transport.target_key(Topic("chat"))
+  |> should.equal("topic:chat")
+}
+
+pub fn target_from_key_session_parses_test() {
+  transport.target_from_key("session")
+  |> should.equal(Ok(Session))
+}
+
+pub fn target_from_key_topic_parses_test() {
+  transport.target_from_key("topic:chat")
+  |> should.equal(Ok(Topic("chat")))
+}
+
+pub fn target_from_key_malformed_returns_error_test() {
+  transport.target_from_key("not-a-target")
+  |> should.be_error
+}
+
+pub fn target_key_session_roundtrips_test() {
+  transport.target_key(Session)
+  |> transport.target_from_key
+  |> should.equal(Ok(Session))
+}
+
+pub fn target_key_topic_roundtrips_test() {
+  let target = Topic("room:42")
+  transport.target_key(target)
+  |> transport.target_from_key
+  |> should.equal(Ok(target))
+}
+
+pub fn target_from_key_topic_empty_id_roundtrips_test() {
+  transport.target_from_key("topic:")
+  |> should.equal(Ok(Topic("")))
+}
+
+// =============================================================================
+// MAX DECODE DEPTH
+// =============================================================================
+
+fn mp() -> transport.Serialiser(Model, Message) {
+  transport.automatic() |> transport.use_message_pack()
+}
+
+pub fn max_decode_depth_session_message_within_cap_decodes_test() {
+  let bytes =
+    transport.encode(SessionMessage(payload: Increment), serialiser: mp())
+  transport.decode(bytes, serialiser: mp())
+  |> should.equal(Ok(SessionMessage(payload: Increment)))
+}
+
+pub fn max_decode_depth_zero_rejects_session_message_test() {
+  let bytes =
+    transport.encode(SessionMessage(payload: Increment), serialiser: mp())
+  let capped = mp() |> transport.max_decode_depth(0)
+  transport.decode(bytes, serialiser: capped)
+  |> should.be_error
+}
+
+pub fn max_decode_depth_one_allows_session_message_test() {
+  let bytes =
+    transport.encode(SessionMessage(payload: Increment), serialiser: mp())
+  let capped = mp() |> transport.max_decode_depth(1)
+  transport.decode(bytes, serialiser: capped)
+  |> should.equal(Ok(SessionMessage(payload: Increment)))
+}
+
+pub fn max_decode_depth_one_rejects_deeper_snapshot_test() {
+  let model = test_support.initial_model()
+  let bytes =
+    transport.encode(
+      Snapshot(target: Session, sequence: 1, state: model),
+      serialiser: mp(),
+    )
+  let capped = mp() |> transport.max_decode_depth(1)
+  transport.decode(bytes, serialiser: capped)
+  |> should.be_error
+}
+
+pub fn max_decode_depth_high_allows_snapshot_test() {
+  let model = test_support.initial_model()
+  let bytes =
+    transport.encode(
+      Snapshot(target: Session, sequence: 1, state: model),
+      serialiser: mp(),
+    )
+  let uncapped = mp() |> transport.max_decode_depth(128)
+  transport.decode(bytes, serialiser: uncapped)
+  |> should.equal(Ok(Snapshot(target: Session, sequence: 1, state: model)))
 }

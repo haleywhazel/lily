@@ -2,8 +2,8 @@
 //// everything that makes a Lily app tick in the page. The update loop,
 //// component subscriptions, local persistence, and (once a transport is
 //// connected) keeping your model in sync with the server all live here. It
-//// even watches online/offline status for you, tucking messages into
-//// localStorage while you're disconnected and replaying them the moment the
+//// even watches online/offline status for you, saving messages into
+//// sessionStorage while you're disconnected and replaying them the moment the
 //// server is back. This module is browser-only, Erlang need not apply.
 ////
 //// A frontend comes together as one pipeline, build a
@@ -22,7 +22,7 @@
 ////
 //// pub fn main() {
 ////   store.new(shared.initial_model(), with: shared.update)
-////   |> client.start(shared.wiring())
+////   |> client.start(shared.wiring(), shared.serialiser())
 ////   |> component.mount(
 ////     selector: "#app",
 ////     to_html: element.to_string,
@@ -37,7 +37,6 @@
 ////   |> client.connect(
 ////     with: transport.websocket(url: "ws://localhost:8080/ws")
 ////       |> transport.websocket_connect,
-////     serialiser: shared.serialiser(),
 ////   )
 ////   |> client.subscribe("chat")
 //// }
@@ -120,8 +119,6 @@ import gleam/option
 @target(javascript)
 import gleam/result
 @target(javascript)
-import gleam/string
-@target(javascript)
 import gleam/uri.{type Uri}
 @target(javascript)
 import lily/store.{type Store}
@@ -133,26 +130,6 @@ import lily/transport
 // =============================================================================
 
 @target(javascript)
-/// An option for [`intercept_links`](#intercept_links). Build with
-/// [`intercept_within`](#intercept_within) and
-/// [`intercept_opt_out_attribute`](#intercept_opt_out_attribute).
-pub opaque type InterceptOption {
-  InterceptWithin(selector: String)
-  InterceptOptOutAttribute(name: String)
-}
-
-@target(javascript)
-/// An option for [`enable_hot_reload`](#enable_hot_reload). Build with
-/// [`hot_reload_url`](#hot_reload_url),
-/// [`hot_reload_reconnect_milliseconds`](#hot_reload_reconnect_milliseconds)
-/// and [`hot_reload_guard_milliseconds`](#hot_reload_guard_milliseconds).
-pub opaque type HotReloadOption {
-  HotReloadUrl(url: String)
-  HotReloadReconnectMilliseconds(milliseconds: Int)
-  HotReloadGuardMilliseconds(milliseconds: Int)
-}
-
-@target(javascript)
 /// Session persistence configuration, kept opaque so you don't touch the
 /// fields directly.
 ///
@@ -161,13 +138,6 @@ pub opaque type HotReloadOption {
 /// - Attach to the runtime with [`client.attach_session`](#attach_session)
 pub opaque type Persistence(session) {
   Persistence(fields: List(Field(session)))
-}
-
-@target(javascript)
-/// An option for [`recover_after_reload`](#recover_after_reload). Build with
-/// [`recover_with_migrate`](#recover_with_migrate).
-pub opaque type RecoverOption(model) {
-  RecoverMigrate(migrate: fn(Dynamic, model) -> model)
 }
 
 @target(javascript)
@@ -278,16 +248,15 @@ pub fn client_id(
 ///   with: transport.websocket(url: "ws://localhost:8080/ws")
 ///     |> transport.reconnect_base_milliseconds(2000)
 ///     |> transport.websocket_connect,
-///   serialiser: shared.serialiser(),
 /// )
 /// ```
 pub fn connect(
   runtime: Runtime(model, message),
   with connector: transport.Connector,
-  serialiser serialiser: transport.Serialiser(model, message),
 ) -> Runtime(model, message) {
   let Runtime(handle) = runtime
   let wiring = get_wiring(handle)
+  let serialiser = get_serialiser(handle)
 
   let send_any_frame = fn(frame: transport.Protocol(model, message)) {
     let bytes = transport.encode(frame, serialiser:)
@@ -343,7 +312,6 @@ pub fn connect(
 /// |> client.connect(
 ///   with: transport.websocket(url: "ws://localhost:8080/ws")
 ///     |> transport.websocket_connect,
-///   serialiser: shared.serialiser(),
 /// )
 /// ```
 pub fn connection_status(
@@ -362,7 +330,7 @@ pub fn connection_status(
 /// store whenever the side-effect fires.
 ///
 /// ```gleam
-/// let runtime = client.start(store, shared.wiring())
+/// let runtime = client.start(store, shared.wiring(), shared.serialiser())
 /// let dispatch = client.dispatch(runtime)
 ///
 /// fetch("/api/data", fn(response) {
@@ -375,76 +343,22 @@ pub fn dispatch(runtime: Runtime(model, message)) -> fn(message) -> Nil {
 }
 
 @target(javascript)
-/// Opt in to dev hot reload. Connects to the dev-reload socket and reloads the
-/// page on every rebuild. Development only, guard the call behind a dev flag.
-/// State survives the reload through the reconnect resync and session
-/// persistence. Tune the socket and reload behaviour with the options below,
-/// all of which have working defaults.
+/// Opt in to dev hot reload. Connects to the dev-reload socket (the page's
+/// origin on the port one above the page's, where `lily_dev` hosts it) and
+/// reloads the page on every rebuild, with a storm guard so a misbehaving
+/// signal cannot spin into a reload loop. Development only, guard the call
+/// behind a dev flag. State survives the reload through the reconnect resync
+/// and session persistence.
 ///
 /// ```gleam
-/// runtime |> client.enable_hot_reload(config: [])
+/// runtime |> client.enable_hot_reload
 /// ```
 pub fn enable_hot_reload(
   runtime: Runtime(model, message),
-  config config: List(HotReloadOption),
 ) -> Runtime(model, message) {
   let Runtime(handle) = runtime
-  let resolved =
-    list.fold(
-      config,
-      HotReloadConfig(
-        url: "",
-        reconnect_milliseconds: 1000,
-        guard_milliseconds: 1500,
-      ),
-      fn(acc, option) {
-        case option {
-          HotReloadUrl(url:) -> HotReloadConfig(..acc, url:)
-          HotReloadReconnectMilliseconds(milliseconds:) ->
-            HotReloadConfig(..acc, reconnect_milliseconds: milliseconds)
-          HotReloadGuardMilliseconds(milliseconds:) ->
-            HotReloadConfig(..acc, guard_milliseconds: milliseconds)
-        }
-      },
-    )
-  install_hot_reload(
-    handle,
-    resolved.url,
-    resolved.reconnect_milliseconds,
-    resolved.guard_milliseconds,
-  )
+  install_hot_reload(handle, "", 1000, 1500)
   runtime
-}
-
-@target(javascript)
-/// Override the dev-reload socket URL. Defaults to the page's own origin on the
-/// port one above the page's, where `lily_dev` hosts the socket by convention.
-pub fn hot_reload_url(url: String) -> HotReloadOption {
-  HotReloadUrl(url:)
-}
-
-@target(javascript)
-/// Delay before redialling the dev-reload socket after it closes. Defaults to
-/// 1000 milliseconds.
-pub fn hot_reload_reconnect_milliseconds(milliseconds: Int) -> HotReloadOption {
-  HotReloadReconnectMilliseconds(milliseconds:)
-}
-
-@target(javascript)
-/// Window within which a second reload is suppressed as a storm guard, so a
-/// misbehaving signal cannot spin the page into a reload loop. Defaults to 1500
-/// milliseconds.
-pub fn hot_reload_guard_milliseconds(milliseconds: Int) -> HotReloadOption {
-  HotReloadGuardMilliseconds(milliseconds:)
-}
-
-@target(javascript)
-type HotReloadConfig {
-  HotReloadConfig(
-    url: String,
-    reconnect_milliseconds: Int,
-    guard_milliseconds: Int,
-  )
 }
 
 @target(javascript)
@@ -464,60 +378,6 @@ pub fn generate_session_id() -> String {
 }
 
 @target(javascript)
-/// Variant of [`start`](#start) that adopts a pre-rendered DOM and reads the
-/// embedded snapshot from `<script id="lily-snapshot">`. Pair with
-/// [`transport.encode_initial_snapshot`](./transport.html#encode_initial_snapshot)
-/// for the embedded state and
-/// [`component.render_to_string`](./component.html#render_to_string) for the
-/// surrounding HTML. This hydrates from a fixed initial snapshot (markup
-/// rendered ahead of time), not per-request server-side rendering.
-///
-/// A missing or undecodable snapshot falls back to the store's model silently,
-/// since the script tag can legitimately be absent in production (a CDN
-/// stripping inline scripts, a CSP blocking them) and the store's model is a
-/// valid initial state. Check the embed yourself if you want to catch that in
-/// dev.
-///
-/// Hydration is lenient, components don't assert byte-equality, and the first
-/// event triggers a full render that replaces any mismatch.
-///
-/// ```gleam
-/// pub fn main() {
-///   store.new(shared.initial_model(), with: shared.update)
-///   |> client.hydrate(shared.wiring(), shared.serialiser())
-///   |> component.mount(
-///     selector: "#app",
-///     to_html: element.to_string,
-///     to_slot: fn() { element.element("lily-slot", [], []) },
-///     view: shared.view,
-///   )
-/// }
-/// ```
-pub fn hydrate(
-  store: Store(model, message),
-  wiring wiring: store.Wiring(model, message),
-  serialiser serialiser: transport.Serialiser(model, message),
-) -> Runtime(model, message) {
-  let handle = create_runtime(store, store.apply)
-  set_store(handle, store)
-  set_wiring(handle, wiring)
-  // Try to read and decode the embedded snapshot. If anything fails
-  // (missing tag, malformed JSON, schema mismatch), fall back to the
-  // store's current model silently.
-  case read_embedded_snapshot() {
-    Ok(bytes) ->
-      case transport.decode(bytes, serialiser:) {
-        Ok(transport.Snapshot(target: transport.Session, sequence: _, state:)) ->
-          set_model(handle, state)
-        _ -> Nil
-      }
-    Error(_) -> Nil
-  }
-  initial_notify(handle)
-  Runtime(handle)
-}
-
-@target(javascript)
 /// Opt in to client-side navigation for ordinary `<a href>` links: after this,
 /// a left-click on a *same-origin* internal link is turned into a warm
 /// [`navigate`](#navigate) (history push + [`url`](#url) setter), with no full
@@ -534,31 +394,17 @@ pub fn hydrate(
 /// ```gleam
 /// runtime
 /// |> client.url(set: fn(model, uri) { Model(..model, route: parse(uri)) })
-/// |> client.intercept_links(config: [])
+/// |> client.intercept_links
 /// ```
+///
+/// Anchors inside the whole page are intercepted, and any anchor carrying the
+/// `data-lily-native` attribute opts out into a full page load.
 pub fn intercept_links(
   runtime: Runtime(model, message),
-  config config: List(InterceptOption),
 ) -> Runtime(model, message) {
   let Runtime(handle) = runtime
-  let InterceptConfig(within:, opt_out:) = intercept_config(config)
-  install_link_interception(handle, within, opt_out)
+  install_link_interception(handle, "document", "data-lily-native")
   runtime
-}
-
-@target(javascript)
-/// Override the attribute an anchor can carry to force a full page load instead
-/// of warm navigation (default `"data-lily-native"`).
-pub fn intercept_opt_out_attribute(name: String) -> InterceptOption {
-  InterceptOptOutAttribute(name)
-}
-
-@target(javascript)
-/// Only intercept anchors inside this selector's subtree (default `"document"`,
-/// the whole page). Use it to let, say, a static marketing header do real page
-/// loads while only the app shell navigates warmly.
-pub fn intercept_within(selector: String) -> InterceptOption {
-  InterceptWithin(selector)
 }
 
 @target(javascript)
@@ -616,7 +462,7 @@ pub fn navigate(runtime: Runtime(model, message), path path: String) -> Nil {
 /// ```gleam
 /// runtime
 /// |> client.on_connect(fn(client_id) {
-///   logging.info("connected as " <> client_id)
+///   logging.log(logging.Info, "connected as " <> client_id)
 /// })
 /// ```
 pub fn on_connect(
@@ -734,46 +580,39 @@ pub fn on_version_mismatch(
 
 @target(javascript)
 /// Recover state from the model a dev-reload full reload stashed just before
-/// it fired, clearing the stash either way. With `config: []`, the default,
-/// merges top-level primitive fields (`Int`, `Float`, `String`, `Bool`) into
-/// `initial` by field name, anything else (a nested custom type, a `List`, an
-/// `Option`) falls back to `initial`'s value. Pass
-/// [`recover_with_migrate`](#recover_with_migrate) in `config` to take over
-/// entirely, for renamed fields, type changes, or reaching into a nested
-/// slice (your own model's `session`/topic sub-records) rather than only the
-/// outer model's top level.
+/// it fired, clearing the stash either way. Merges top-level primitive fields
+/// (`Int`, `Float`, `String`, `Bool`) into `initial` by field name, anything
+/// else (a nested custom type, a `List`, an `Option`) falls back to
+/// `initial`'s value. Use [`recover_after_reload_migrate`](#recover_after_reload_migrate)
+/// to take over the merge entirely.
 ///
 /// ```gleam
-/// let initial = client.recover_after_reload(shared.initial_model(), config: [])
+/// let initial = client.recover_after_reload(shared.initial_model())
 /// ```
-pub fn recover_after_reload(
-  initial: model,
-  config config: List(RecoverOption(model)),
-) -> model {
-  case list.first(config) {
-    Ok(RecoverMigrate(migrate)) ->
-      ffi_recover_after_reload(initial, option.Some(migrate))
-    Error(Nil) -> ffi_recover_after_reload(initial, option.None)
-  }
+pub fn recover_after_reload(initial: model) -> model {
+  ffi_recover_after_reload(initial, option.None)
 }
 
 @target(javascript)
-/// Take over `recover_after_reload`'s merge entirely. Receives the raw
-/// stashed value  and the freshly built `initial` model, and returns
-/// whatever model to boot with.
+/// Like [`recover_after_reload`](#recover_after_reload) but takes over the
+/// merge entirely. `migrate` receives the raw stashed value and the freshly
+/// built `initial` model, and returns whatever model to boot with, for renamed
+/// fields, type changes, or reaching into a nested slice.
 ///
 /// ```gleam
-/// client.recover_with_migrate(fn(stashed, initial) {
-///   let count =
-///     decode.run(stashed, decode.at(["count"], decode.int))
-///     |> result.unwrap(initial.count)
-///   Model(..initial, count:)
-/// })
+/// let initial =
+///   client.recover_after_reload_migrate(shared.initial_model(), fn(stashed, initial) {
+///     let count =
+///       decode.run(stashed, decode.at(["count"], decode.int))
+///       |> result.unwrap(initial.count)
+///     Model(..initial, count:)
+///   })
 /// ```
-pub fn recover_with_migrate(
+pub fn recover_after_reload_migrate(
+  initial: model,
   migrate: fn(Dynamic, model) -> model,
-) -> RecoverOption(model) {
-  RecoverMigrate(migrate)
+) -> model {
+  ffi_recover_after_reload(initial, option.Some(migrate))
 }
 
 @target(javascript)
@@ -855,7 +694,7 @@ pub fn session_persistence() -> Persistence(session) {
 /// ```gleam
 /// let runtime =
 ///   store.new(shared.initial_model(), with: shared.update)
-///   |> client.start(shared.wiring())
+///   |> client.start(shared.wiring(), shared.serialiser())
 ///
 /// runtime
 /// |> component.mount(
@@ -873,10 +712,24 @@ pub fn session_persistence() -> Persistence(session) {
 pub fn start(
   store: Store(model, message),
   wiring wiring: store.Wiring(model, message),
+  serialiser serialiser: transport.Serialiser(model, message),
 ) -> Runtime(model, message) {
   let handle = create_runtime(store, store.apply)
   set_store(handle, store)
   set_wiring(handle, wiring)
+  set_serialiser(handle, serialiser)
+  // Hydrate from a server-rendered snapshot if one is embedded, otherwise fall
+  // back to the store's model. Hydration is lenient, a missing or malformed
+  // embed is silently ignored and the first render replaces any mismatch.
+  case read_embedded_snapshot() {
+    Ok(bytes) ->
+      case transport.decode(bytes, serialiser:) {
+        Ok(transport.Snapshot(target: transport.Session, sequence: _, state:)) ->
+          set_model(handle, state)
+        _ -> Nil
+      }
+    Error(_) -> Nil
+  }
   initial_notify(handle)
   Runtime(handle)
 }
@@ -889,7 +742,7 @@ pub fn start(
 ///
 /// ```gleam
 /// runtime
-/// |> client.connect(with: connector, serialiser: shared.serialiser())
+/// |> client.connect(with: connector)
 /// |> client.subscribe("chat")
 /// ```
 pub fn subscribe(
@@ -993,13 +846,6 @@ type Field(session) {
 }
 
 @target(javascript)
-/// The resolved [`intercept_links`](#intercept_links) options, seeded with
-/// defaults and folded from the `config` list.
-type InterceptConfig {
-  InterceptConfig(within: String, opt_out: String)
-}
-
-@target(javascript)
 /// JavaScript doesn't have type parameters, so we can't pass Runtime directly.
 /// The public `Runtime(model, message)` type wraps this.
 ///
@@ -1025,7 +871,11 @@ fn handle_incoming(
 ) -> Nil {
   case transport.decode(bytes, serialiser:) {
     Ok(transport.Acknowledge(target:, sequence:)) ->
-      set_last_sequence_for_target(handle, target_to_key(target), sequence)
+      set_last_sequence_for_target(
+        handle,
+        transport.target_key(target),
+        sequence,
+      )
 
     Ok(transport.Connected(client_id:)) -> handle_client_id(handle, client_id)
 
@@ -1035,7 +885,7 @@ fn handle_incoming(
     Ok(transport.TopicUpdate(topic_id:, sequence:, payload:)) -> {
       set_last_sequence_for_target(
         handle,
-        target_to_key(transport.Topic(topic_id)),
+        transport.target_key(transport.Topic(topic_id)),
         sequence,
       )
       apply_remote_message(handle, payload)
@@ -1044,14 +894,18 @@ fn handle_incoming(
     Ok(transport.SessionUpdate(sequence:, payload:)) -> {
       set_last_sequence_for_target(
         handle,
-        target_to_key(transport.Session),
+        transport.target_key(transport.Session),
         sequence,
       )
       apply_remote_message(handle, payload)
     }
 
     Ok(transport.Snapshot(target:, sequence:, state:)) -> {
-      set_last_sequence_for_target(handle, target_to_key(target), sequence)
+      set_last_sequence_for_target(
+        handle,
+        transport.target_key(target),
+        sequence,
+      )
       handle_snapshot(handle, wiring, target, state)
     }
 
@@ -1094,34 +948,6 @@ fn hydrate_session(
 }
 
 @target(javascript)
-fn intercept_config(config: List(InterceptOption)) -> InterceptConfig {
-  list.fold(
-    config,
-    InterceptConfig(within: "document", opt_out: "data-lily-native"),
-    fn(resolved, entry) {
-      case entry {
-        InterceptWithin(selector) ->
-          InterceptConfig(..resolved, within: selector)
-        InterceptOptOutAttribute(name) ->
-          InterceptConfig(..resolved, opt_out: name)
-      }
-    },
-  )
-}
-
-@target(javascript)
-fn key_to_target(key: String) -> Result(transport.Target, Nil) {
-  case key {
-    "session" -> Ok(transport.Session)
-    _ ->
-      case string.starts_with(key, "topic:") {
-        True -> Ok(transport.Topic(string.drop_start(key, 6)))
-        False -> Error(Nil)
-      }
-  }
-}
-
-@target(javascript)
 fn send_resync(
   handle: RuntimeHandle,
   serialiser: transport.Serialiser(model, message),
@@ -1130,7 +956,7 @@ fn send_resync(
   let cursors =
     list.filter_map(raw_seqs, fn(pair) {
       let #(key, _seq) = pair
-      key_to_target(key)
+      transport.target_from_key(key)
     })
   let bytes = transport.encode(transport.Resync(cursors:), serialiser:)
   send_via_transport(handle, bytes)
@@ -1139,14 +965,6 @@ fn send_resync(
 @target(javascript)
 fn session_storage_prefix() -> String {
   "lily_session_"
-}
-
-@target(javascript)
-fn target_to_key(target: transport.Target) -> String {
-  case target {
-    transport.Session -> "session"
-    transport.Topic(id) -> "topic:" <> id
-  }
 }
 
 // =============================================================================
@@ -1247,6 +1065,10 @@ fn get_snapshot_hook(
 @target(javascript)
 @external(javascript, "./client.ffi.mjs", "getWiring")
 fn get_wiring(handle: RuntimeHandle) -> store.Wiring(model, message)
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "getSerialiser")
+fn get_serialiser(handle: RuntimeHandle) -> transport.Serialiser(model, message)
 
 @target(javascript)
 @external(javascript, "./client.ffi.mjs", "handleClientId")
@@ -1372,6 +1194,13 @@ fn set_user_message_hook(
 fn set_wiring(
   handle: RuntimeHandle,
   wiring: store.Wiring(model, message),
+) -> Nil
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "setSerialiser")
+fn set_serialiser(
+  handle: RuntimeHandle,
+  serialiser: transport.Serialiser(model, message),
 ) -> Nil
 
 @target(javascript)

@@ -19,4 +19,4 @@ For most use cases, Lily is probably overkill, as there is additional boilerplat
 
 See the `/example` folder within the repo for an example Lily application.
 
-Note: while I did decide to add a JS implementation to everything on the server-side for completeness's sake, I would recommend using the Erlang target instead to take advantage of the BEAM VM, otherwise it's probably a better idea to just use a more mature and battle-tested JS platform.
+Note: while I did decide to add a JS implementation to everything on the server-side to get docs to compile for the server modules and functions, I would recommend using the Erlang target instead to take advantage of the BEAM VM, otherwise it's probably a better idea to just use a more mature JS platform.

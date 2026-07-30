@@ -358,11 +358,14 @@ function createOfflineQueue(storageKey) {
 
 /** Encode a Uint8Array to a base64 string for sessionStorage persistence. */
 function frameToBase64(frame) {
-  let binary = "";
-  for (let i = 0; i < frame.byteLength; i++) {
-    binary += String.fromCharCode(frame[i]);
+  // Chunked to avoid the arg-count limit on a whole-frame apply and the O(n2)
+  // cost of per-byte concat
+  const CHUNK = 0x8000;
+  const parts = [];
+  for (let i = 0; i < frame.byteLength; i += CHUNK) {
+    parts.push(String.fromCharCode.apply(null, frame.subarray(i, i + CHUNK)));
   }
-  return globalThis.btoa(binary);
+  return globalThis.btoa(parts.join(""));
 }
 
 // =============================================================================

@@ -10,7 +10,7 @@ import gleam/dict
 import gleam/set
 import gleam/string
 import gleeunit/should
-import lily/test_fixtures.{
+import lily/test_support.{
   type Message, type Model, Increment, SetName, WithDict, WithSet, WithTuple,
 }
 import lily/transport.{
@@ -152,8 +152,8 @@ pub fn snapshot_snapshot_session_test() {
     Snapshot(
       target: Session,
       sequence: 7,
-      state: test_fixtures.Model(
-        ..test_fixtures.initial_model(),
+      state: test_support.Model(
+        ..test_support.initial_model(),
         count: 5,
         name: "Bob",
         connected: True,
@@ -240,7 +240,7 @@ pub fn encode_initial_snapshot_wraps_in_script_tag_test() {
   let snapshot =
     transport.encode_initial_snapshot(
       serialiser: transport.automatic(),
-      model: test_fixtures.initial_model(),
+      model: test_support.initial_model(),
     )
   let expected_prefix =
     "<script type=\"application/json\" id=\"lily-snapshot\">"
@@ -253,7 +253,7 @@ pub fn encode_initial_snapshot_wraps_in_script_tag_test() {
 }
 
 pub fn encode_initial_snapshot_round_trips_via_decode_test() {
-  let model = test_fixtures.initial_model()
+  let model = test_support.initial_model()
   let embed =
     transport.encode_initial_snapshot(
       serialiser: transport.automatic(),
@@ -277,8 +277,8 @@ pub fn roundtrip_snapshot_test() {
   assert_roundtrip(Snapshot(
     target: Session,
     sequence: 7,
-    state: test_fixtures.Model(
-      ..test_fixtures.initial_model(),
+    state: test_support.Model(
+      ..test_support.initial_model(),
       count: 5,
       name: "Bob",
       connected: True,

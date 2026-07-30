@@ -156,7 +156,7 @@
 //// pub fn main() {
 ////   let runtime =
 ////     store.new(Model(count: 0), with: update)
-////     |> client.start(shared.wiring())
+////     |> client.start(shared.wiring(), shared.serialiser())
 ////
 ////   runtime
 ////   |> component.mount(
@@ -436,7 +436,7 @@ pub fn mount(
   to_slot to_slot: fn() -> html,
   view view: fn(model) -> Component(model, message, html),
 ) -> Runtime(model, message) {
-  let model = get_model(runtime)
+  let model = client.get_current_model(runtime)
   let tree = view(model)
   // Render handles binding registration too. renderComponent on the JS
   // side queues every component's `Listener` decorations (including those
@@ -777,11 +777,12 @@ pub fn attach_event(
   let opaque_binding = fn(runtime_dynamic: Dynamic) {
     binding(from_dynamic(runtime_dynamic))
   }
-  // Append so listeners register in the order they were attached, the
+  // Listeners must register in the order they were attached, the
   // first-attached handler fires first at dispatch. That ordering is what
   // lets a more specific handler with `stop_propagation` (attached before a
   // broader ancestor-selector handler) block the broader one, since all
   // delegated listeners share one node and run in registration order.
+  // `add_decoration` prepends, so `register_bindings` reverses at read time.
   add_decoration(component, Listener(opaque_binding))
 }
 
@@ -801,7 +802,8 @@ pub fn register_bindings(
   component: Component(model, message, html),
 ) -> Nil {
   let runtime_dynamic = to_dynamic(runtime)
-  list.each(component.decorations, fn(decoration) {
+  // Reverse to fire handlers in attach order (add_decoration prepends)
+  list.each(list.reverse(component.decorations), fn(decoration) {
     case decoration {
       Listener(handler:) -> handler(runtime_dynamic)
       Transition(..) | Connection(..) -> Nil
@@ -824,10 +826,18 @@ pub fn scope(component: Component(model, message, html)) -> Option(String) {
 }
 
 /// Record a component's own CSS selector (usually `#<id>`) as its scope, so
-/// the `event.on*` binders match only within its subtree. Intended to be
-/// called from component-library builders that already render `id=<id>` on
-/// their root, not by application code directly.
-@internal
+/// the scoped `event.on*` binders match only within its subtree. Pipe it on
+/// after giving the component an `id`, then pipe on `event.on` without a
+/// selector. Component-library builders scope their widget from the `id` they
+/// already render.
+///
+/// ## Example
+///
+/// ```gleam
+/// component.simple(slice: ..., render: ...)
+/// |> component.scoped("#search")
+/// |> event.on(event: event.input, handler: Search)
+/// ```
 pub fn scoped(
   component component: Component(model, message, html),
   selector selector: String,
@@ -893,14 +903,16 @@ pub fn walk_to_string(
   }
 }
 
+// =============================================================================
+// PRIVATE FUNCTIONS
+// =============================================================================
+
 fn add_decoration(
   component: Component(model, message, html),
   decoration: Decoration(model),
 ) -> Component(model, message, html) {
-  Component(
-    ..component,
-    decorations: list.append(component.decorations, [decoration]),
-  )
+  // O(1) prepend, consumers reverse to restore attach order
+  Component(..component, decorations: [decoration, ..component.decorations])
 }
 
 fn make_slotter(
@@ -945,14 +957,6 @@ type EventBinding(model, message) =
 @external(erlang, "lily_reflection_ffi", "passthrough")
 @external(javascript, "./component.ffi.mjs", "identity")
 fn from_dynamic(value: Dynamic) -> a
-
-@target(javascript)
-/// Get the model from the runtime
-@external(javascript, "./component.ffi.mjs", "getModel")
-fn get_model(_runtime: Runtime(model, message)) -> model {
-  // This will never run
-  panic as "getModel is only available in JavaScript"
-}
 
 /// Type-erases a `List(item)` to `List(Dynamic)` without allocating. On
 /// both targets this is an identity function, the same list reference is

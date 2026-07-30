@@ -74,7 +74,7 @@
 ////
 //// ```gleam
 //// server.on_connect(server, fn(client_id) {
-////   logging.info("client connected: " <> client_id)
+////   logging.log(logging.Info, "client connected: " <> client_id)
 //// })
 ////
 //// server.on_message(server, fn(message, _model, _client_id) {
@@ -117,17 +117,10 @@ import gleam/list
 import gleam/option.{type Option}
 import gleam/result
 import gleam/string
+import lily/internal/actor_cell.{type Cell, Continue, Halt, Reply}
 import lily/logging
 import lily/store
 import lily/transport.{type Serialiser}
-
-@target(erlang)
-import gleam/erlang/process.{type Subject}
-@target(erlang)
-import gleam/otp/actor
-
-@target(javascript)
-import lily/internal/reference.{type Reference}
 
 // =============================================================================
 // PUBLIC TYPES
@@ -145,10 +138,10 @@ pub opaque type Builder(model, message) {
   )
 }
 
-/// Handle to a running Lily server. Wraps platform-specific internals
-/// (OTP actor on Erlang, [`Reference`](./internal/reference.html#Reference)
-/// cell on JavaScript). Also carries `serialiser` and `initial_model` for
-/// zero-copy access by `topic.new`.
+/// Handle to a running Lily server, backed by an
+/// [`actor_cell`](./internal/actor_cell.html) (an OTP actor on Erlang, a
+/// `Reference` cell on JavaScript). Also carries `serialiser` and
+/// `initial_model` for zero-copy access by `topic.new`.
 pub opaque type Server(model, message) {
   Server(
     handle: ServerHandle(model, message),
@@ -190,7 +183,7 @@ pub fn connect(
   client_id client_id: String,
   send send: fn(BitArray) -> Nil,
 ) -> Nil {
-  platform_connect(server.handle, client_id, send)
+  actor_cell.send(server.handle, ClientConnected(client_id:, send:))
 }
 
 /// Unregister a client connection from the server and all subscribed topics.
@@ -198,7 +191,7 @@ pub fn disconnect(
   server: Server(model, message),
   client_id client_id: String,
 ) -> Nil {
-  platform_disconnect(server.handle, client_id)
+  actor_cell.send(server.handle, ClientDisconnected(client_id:))
 }
 
 /// Apply `message` to the session store of one connected client and send a
@@ -220,7 +213,7 @@ pub fn dispatch_to(
   client_id client_id: String,
   message message: message,
 ) -> Nil {
-  platform_dispatch_to(server.handle, client_id, message)
+  actor_cell.send(server.handle, DispatchToClient(client_id:, message:))
 }
 
 /// Apply `message` to every connected client's session store and send each
@@ -236,7 +229,7 @@ pub fn dispatch_to_all(
   server: Server(model, message),
   message message: message,
 ) -> Nil {
-  platform_dispatch_to_all(server.handle, message)
+  actor_cell.send(server.handle, DispatchToAllClients(message:))
 }
 
 /// Generate a cryptographically random 32-character hex client identifier.
@@ -260,7 +253,7 @@ pub fn incoming(
   client_id client_id: String,
   bytes bytes: BitArray,
 ) -> Nil {
-  platform_incoming(server.handle, client_id, bytes)
+  actor_cell.send(server.handle, Incoming(client_id:, bytes:))
 }
 
 /// Set the maximum number of live topic actors the server keeps at once. This
@@ -310,14 +303,14 @@ pub fn new(
 ///
 /// ```gleam
 /// server.on_connect(server, fn(client_id) {
-///   logging.info("client connected: " <> client_id)
+///   logging.log(logging.Info, "client connected: " <> client_id)
 /// })
 /// ```
 pub fn on_connect(
   server: Server(model, message),
   hook: fn(String) -> Nil,
 ) -> Nil {
-  platform_set_connect_hook(server.handle, hook)
+  actor_cell.send(server.handle, SetConnectHook(hook:))
 }
 
 /// Register a hook that runs after a client disconnects, receiving the client
@@ -325,14 +318,14 @@ pub fn on_connect(
 ///
 /// ```gleam
 /// server.on_disconnect(server, fn(client_id) {
-///   logging.info("client disconnected: " <> client_id)
+///   logging.log(logging.Info, "client disconnected: " <> client_id)
 /// })
 /// ```
 pub fn on_disconnect(
   server: Server(model, message),
   hook: fn(String) -> Nil,
 ) -> Nil {
-  platform_set_disconnect_hook(server.handle, hook)
+  actor_cell.send(server.handle, SetDisconnectHook(hook:))
 }
 
 /// Register a hook that runs after each session message is applied. Receives
@@ -351,7 +344,7 @@ pub fn on_message(
   server: Server(model, message),
   hook: fn(message, model, String) -> Nil,
 ) -> Nil {
-  platform_set_hook(server.handle, hook)
+  actor_cell.send(server.handle, SetHook(hook:))
 }
 
 /// Register a hook that runs for each client-incoming topic message. Receives
@@ -369,7 +362,7 @@ pub fn on_topic_message(
   server: Server(model, message),
   hook: fn(message, String, String) -> Nil,
 ) -> Nil {
-  platform_set_topic_message_hook(server.handle, hook)
+  actor_cell.send(server.handle, SetTopicMessageHook(hook:))
 }
 
 /// Start the configured server.
@@ -404,7 +397,7 @@ pub fn start(
       max_topics: builder.max_topics,
     )
 
-  platform_start(initial_state)
+  actor_cell.start(initial_state, reduce:)
   |> result.map(fn(handle) {
     Server(
       handle:,
@@ -421,7 +414,7 @@ pub fn start(
 /// terminates (Erlang) or its `Reference` state cell is cleared
 /// (JavaScript). Connected session clients receive no extra frame.
 pub fn stop(server: Server(model, message)) -> Nil {
-  platform_stop(server.handle)
+  actor_cell.send(server.handle, Stop)
 }
 
 // =============================================================================
@@ -436,7 +429,7 @@ pub fn do_subscribe(
   client_id: String,
   topic_id: String,
 ) -> Nil {
-  platform_do_subscribe(server.handle, client_id, topic_id)
+  actor_cell.send(server.handle, DoSubscribe(client_id:, topic_id:))
 }
 
 /// Return the configuration values `topic.gleam` needs to build a topic actor:
@@ -458,7 +451,11 @@ pub fn register_topic(
   id: String,
   entry: ServerTopicEntry(model, message),
 ) -> Result(Nil, Nil) {
-  platform_register_topic(server.handle, id, entry)
+  actor_cell.call(
+    server.handle,
+    RegisterTopic(id:, entry:),
+    default: Error(Nil),
+  )
 }
 
 /// Register a parametric topic kind. When a client subscribes to a topic
@@ -473,28 +470,27 @@ pub fn register_topic_kind(
   prefix: String,
   create: fn(String) -> Option(ServerTopicEntry(model, message)),
 ) -> Result(Nil, Nil) {
-  platform_register_topic_kind(server.handle, prefix, create)
+  actor_cell.call(
+    server.handle,
+    RegisterTopicKind(prefix:, create:),
+    default: Error(Nil),
+  )
 }
 
 /// Remove a topic entry from the server registry.
 @internal
 pub fn unregister_topic(server: Server(model, message), id: String) -> Nil {
-  platform_unregister_topic(server.handle, id)
+  actor_cell.send(server.handle, UnregisterTopic(id:))
 }
 
 // =============================================================================
 // PRIVATE TYPES
 // =============================================================================
 
-@target(erlang)
-type ServerHandle(model, message) =
-  Subject(InternalEvent(model, message))
+type ConnectionState(model, message) {
+  ConnectionState(model: model, sequence: Int)
+}
 
-@target(javascript)
-type ServerHandle(model, message) =
-  Reference(Option(ServerState(model, message)))
-
-@target(erlang)
 type InternalEvent(model, message) {
   ClientConnected(client_id: String, send: fn(BitArray) -> Nil)
   ClientDisconnected(client_id: String)
@@ -505,31 +501,22 @@ type InternalEvent(model, message) {
   SetDisconnectHook(hook: fn(String) -> Nil)
   SetHook(hook: fn(message, model, String) -> Nil)
   SetTopicMessageHook(hook: fn(message, String, String) -> Nil)
-  RegisterTopic(
-    id: String,
-    entry: ServerTopicEntry(model, message),
-    reply: Subject(Result(Nil, Nil)),
-  )
+  RegisterTopic(id: String, entry: ServerTopicEntry(model, message))
   RegisterTopicKind(
     prefix: String,
     create: fn(String) -> Option(ServerTopicEntry(model, message)),
-    reply: Subject(Result(Nil, Nil)),
   )
   UnregisterTopic(id: String)
   DoSubscribe(client_id: String, topic_id: String)
   Stop
 }
 
-type ConnectionState(model, message) {
-  ConnectionState(model: model, sequence: Int)
-}
-
-type TopicKindEntry(model, message) {
-  TopicKindEntry(
-    prefix: String,
-    create: fn(String) -> Option(ServerTopicEntry(model, message)),
+type ServerHandle(model, message) =
+  Cell(
+    ServerState(model, message),
+    InternalEvent(model, message),
+    Result(Nil, Nil),
   )
-}
 
 type ServerState(model, message) {
   ServerState(
@@ -548,12 +535,51 @@ type ServerState(model, message) {
   )
 }
 
+type TopicKindEntry(model, message) {
+  TopicKindEntry(
+    prefix: String,
+    create: fn(String) -> Option(ServerTopicEntry(model, message)),
+  )
+}
+
 // =============================================================================
 // PRIVATE FUNCTIONS
 // =============================================================================
 
 // Default cap on live topic actors, overridable with `server.max_topics`.
 const default_max_topics = 100_000
+
+fn find_or_create_topic(
+  state: ServerState(model, message),
+  topic_id: String,
+) -> #(ServerState(model, message), Option(ServerTopicEntry(model, message))) {
+  case dict.get(state.topics, topic_id) {
+    Ok(entry) -> #(state, option.Some(entry))
+    // Parametric topic ids come from the client, so refuse creation past the
+    // cap to stop one client spawning topics without bound.
+    Error(_) ->
+      case dict.size(state.topics) >= state.max_topics {
+        True -> #(state, option.None)
+        False -> {
+          let kind =
+            list.find(state.topic_kinds, fn(k) {
+              string.starts_with(topic_id, k.prefix)
+            })
+          case kind {
+            Error(_) -> #(state, option.None)
+            Ok(k) ->
+              case k.create(topic_id) {
+                option.None -> #(state, option.None)
+                option.Some(entry) -> {
+                  let topics = dict.insert(state.topics, topic_id, entry)
+                  #(ServerState(..state, topics:), option.Some(entry))
+                }
+              }
+          }
+        }
+      }
+  }
+}
 
 fn handle_connect_logic(
   state: ServerState(model, message),
@@ -580,6 +606,15 @@ fn handle_disconnect_logic(
   let sessions = dict.delete(state.sessions, client_id)
   state.on_disconnect_hook(client_id)
   ServerState(..state, clients:, sessions:)
+}
+
+fn handle_dispatch_to_all_logic(
+  state: ServerState(model, message),
+  message: message,
+) -> ServerState(model, message) {
+  dict.fold(state.clients, state, fn(acc, client_id, _send) {
+    handle_dispatch_to_logic(acc, client_id, message)
+  })
 }
 
 fn handle_dispatch_to_logic(
@@ -612,13 +647,18 @@ fn handle_dispatch_to_logic(
   }
 }
 
-fn handle_dispatch_to_all_logic(
+fn handle_do_subscribe_logic(
   state: ServerState(model, message),
-  message: message,
+  client_id: String,
+  topic_id: String,
 ) -> ServerState(model, message) {
-  dict.fold(state.clients, state, fn(acc, client_id, _send) {
-    handle_dispatch_to_logic(acc, client_id, message)
-  })
+  case dict.get(state.clients, client_id), dict.get(state.topics, topic_id) {
+    Ok(send), Ok(entry) -> {
+      entry.subscribe(client_id, send)
+      state
+    }
+    _, _ -> state
+  }
 }
 
 fn handle_incoming_logic(
@@ -656,112 +696,47 @@ fn handle_incoming_logic(
   }
 }
 
-fn handle_session_message_logic(
+fn handle_register_kind_logic(
   state: ServerState(model, message),
-  client_id: String,
-  message: message,
-) -> ServerState(model, message) {
-  case dict.get(state.sessions, client_id) {
-    Error(_) -> state
-    Ok(connection) -> {
-      let applied = case state.session_apply {
-        option.None -> Ok(connection.model)
-        option.Some(apply) -> rescue(fn() { apply(connection.model, message) })
-      }
-      case applied {
-        // A crash means the frame decoded to a value the update function
-        // cannot match. Drop it without acking, keeping the actor alive.
-        Error(reason) -> {
-          logging.warning(
-            "lily: dropped malformed session message from "
-            <> client_id
-            <> ": "
-            <> reason,
-          )
-          state
-        }
-        Ok(new_model) -> {
-          let new_seq = connection.sequence + 1
-          case dict.get(state.clients, client_id) {
-            Ok(send) -> {
-              let ack_frame =
-                transport.encode(
-                  transport.Acknowledge(
-                    target: transport.Session,
-                    sequence: new_seq,
-                  ),
-                  serialiser: state.serialiser,
-                )
-              send(ack_frame)
-            }
-            Error(_) -> Nil
-          }
-          state.on_message_hook(message, new_model, client_id)
-          let sessions =
-            dict.insert(
-              state.sessions,
-              client_id,
-              ConnectionState(model: new_model, sequence: new_seq),
-            )
-          ServerState(..state, sessions:)
-        }
-      }
+  prefix: String,
+  create: fn(String) -> Option(ServerTopicEntry(model, message)),
+) -> #(ServerState(model, message), Result(Nil, Nil)) {
+  let topic_collision =
+    list.any(dict.keys(state.topics), string.starts_with(_, prefix))
+  let kind_collision = list.any(state.topic_kinds, fn(k) { k.prefix == prefix })
+  case topic_collision || kind_collision {
+    True -> #(state, Error(Nil))
+    False -> {
+      let kind = TopicKindEntry(prefix:, create:)
+      let topic_kinds = [kind, ..state.topic_kinds]
+      #(ServerState(..state, topic_kinds:), Ok(Nil))
     }
   }
 }
 
-fn handle_topic_message_logic(
+fn handle_register_topic_logic(
   state: ServerState(model, message),
-  client_id: String,
-  topic_id: String,
-  message: message,
-) -> ServerState(model, message) {
-  state.on_topic_message_hook(message, topic_id, client_id)
-  case find_or_create_topic(state, topic_id) {
-    #(state, option.Some(entry)) -> {
-      entry.handle_incoming(client_id, message)
-      state
+  id: String,
+  entry: ServerTopicEntry(model, message),
+) -> #(ServerState(model, message), Result(Nil, Nil)) {
+  let already_exists = case dict.get(state.topics, id) {
+    Ok(_) -> True
+    Error(_) -> False
+  }
+  // Both directions matter, `id="room:1"` collides with kind prefix
+  // `"room:"`, and a fixed `id="room"` would shadow that prefix's first
+  // character.
+  let kind_collision =
+    list.any(state.topic_kinds, fn(kind) {
+      string.starts_with(id, kind.prefix) || string.starts_with(kind.prefix, id)
+    })
+  case already_exists || kind_collision {
+    True -> #(state, Error(Nil))
+    False -> {
+      let topics = dict.insert(state.topics, id, entry)
+      #(ServerState(..state, topics:), Ok(Nil))
     }
-    #(state, option.None) -> state
   }
-}
-
-fn handle_subscribe_logic(
-  state: ServerState(model, message),
-  client_id: String,
-  topic_id: String,
-) -> ServerState(model, message) {
-  case dict.get(state.clients, client_id) {
-    Error(_) -> state
-    Ok(send) ->
-      case find_or_create_topic(state, topic_id) {
-        #(state, option.Some(entry)) -> {
-          entry.subscribe(client_id, send)
-          state
-        }
-        #(state, option.None) -> {
-          let rejected_frame =
-            transport.encode(
-              transport.Rejected(topic_id:, reason: "not found"),
-              serialiser: state.serialiser,
-            )
-          send(rejected_frame)
-          state
-        }
-      }
-  }
-}
-
-fn handle_unsubscribe_logic(
-  state: ServerState(model, message),
-  client_id: String,
-  topic_id: String,
-) -> ServerState(model, message) {
-  case dict.get(state.topics, topic_id) {
-    Ok(entry) -> entry.unsubscribe(client_id)
-    Error(_) -> Nil
-  }
-  state
 }
 
 fn handle_resync_logic(
@@ -803,69 +778,59 @@ fn handle_resync_logic(
   }
 }
 
-fn handle_do_subscribe_logic(
+fn handle_session_message_logic(
   state: ServerState(model, message),
   client_id: String,
-  topic_id: String,
+  message: message,
 ) -> ServerState(model, message) {
-  case dict.get(state.clients, client_id), dict.get(state.topics, topic_id) {
-    Ok(send), Ok(entry) -> {
-      entry.subscribe(client_id, send)
-      state
-    }
-    _, _ -> state
-  }
-}
-
-fn handle_register_topic_logic(
-  state: ServerState(model, message),
-  id: String,
-  entry: ServerTopicEntry(model, message),
-) -> #(ServerState(model, message), Result(Nil, Nil)) {
-  let already_exists = case dict.get(state.topics, id) {
-    Ok(_) -> True
-    Error(_) -> False
-  }
-  // Both directions matter, `id="room:1"` collides with kind prefix
-  // `"room:"`, and a fixed `id="room"` would shadow that prefix's first
-  // character.
-  let kind_collision =
-    list.any(state.topic_kinds, fn(kind) {
-      string.starts_with(id, kind.prefix) || string.starts_with(kind.prefix, id)
-    })
-  case already_exists || kind_collision {
-    True -> #(state, Error(Nil))
-    False -> {
-      let topics = dict.insert(state.topics, id, entry)
-      #(ServerState(..state, topics:), Ok(Nil))
-    }
-  }
-}
-
-fn handle_register_kind_logic(
-  state: ServerState(model, message),
-  prefix: String,
-  create: fn(String) -> Option(ServerTopicEntry(model, message)),
-) -> #(ServerState(model, message), Result(Nil, Nil)) {
-  let topic_collision =
-    list.any(dict.keys(state.topics), string.starts_with(_, prefix))
-  let kind_collision = list.any(state.topic_kinds, fn(k) { k.prefix == prefix })
-  case topic_collision || kind_collision {
-    True -> #(state, Error(Nil))
-    False -> {
-      let kind = TopicKindEntry(prefix:, create:)
-      let topic_kinds = [kind, ..state.topic_kinds]
-      #(ServerState(..state, topic_kinds:), Ok(Nil))
+  case dict.get(state.sessions, client_id) {
+    Error(_) -> state
+    Ok(connection) -> {
+      let applied = case state.session_apply {
+        option.None -> Ok(connection.model)
+        option.Some(apply) -> rescue(fn() { apply(connection.model, message) })
+      }
+      case applied {
+        // A crash means the frame decoded to a value the update function
+        // cannot match. Drop it without acking, keeping the actor alive.
+        Error(reason) -> {
+          logging.log(
+            logging.Warning,
+            "lily: dropped malformed session message from "
+              <> client_id
+              <> ": "
+              <> reason,
+          )
+          state
+        }
+        Ok(new_model) -> {
+          let new_seq = connection.sequence + 1
+          case dict.get(state.clients, client_id) {
+            Ok(send) -> {
+              let ack_frame =
+                transport.encode(
+                  transport.Acknowledge(
+                    target: transport.Session,
+                    sequence: new_seq,
+                  ),
+                  serialiser: state.serialiser,
+                )
+              send(ack_frame)
+            }
+            Error(_) -> Nil
+          }
+          state.on_message_hook(message, new_model, client_id)
+          let sessions =
+            dict.insert(
+              state.sessions,
+              client_id,
+              ConnectionState(model: new_model, sequence: new_seq),
+            )
+          ServerState(..state, sessions:)
+        }
+      }
     }
   }
-}
-
-fn handle_unregister_topic_logic(
-  state: ServerState(model, message),
-  id: String,
-) -> ServerState(model, message) {
-  let topics = dict.delete(state.topics, id)
-  ServerState(..state, topics:)
 }
 
 fn handle_set_connect_hook_logic(
@@ -904,386 +869,120 @@ fn handle_stop_logic(state: ServerState(model, message)) -> Nil {
   dict.each(state.topics, fn(_id, entry) { entry.stop() })
 }
 
-fn find_or_create_topic(
+fn handle_subscribe_logic(
   state: ServerState(model, message),
+  client_id: String,
   topic_id: String,
-) -> #(ServerState(model, message), Option(ServerTopicEntry(model, message))) {
-  case dict.get(state.topics, topic_id) {
-    Ok(entry) -> #(state, option.Some(entry))
-    // Parametric topic ids come from the client, so refuse creation past the
-    // cap to stop one client spawning topics without bound.
-    Error(_) ->
-      case dict.size(state.topics) >= state.max_topics {
-        True -> #(state, option.None)
-        False -> {
-          let kind =
-            list.find(state.topic_kinds, fn(k) {
-              string.starts_with(topic_id, k.prefix)
-            })
-          case kind {
-            Error(_) -> #(state, option.None)
-            Ok(k) ->
-              case k.create(topic_id) {
-                option.None -> #(state, option.None)
-                option.Some(entry) -> {
-                  let topics = dict.insert(state.topics, topic_id, entry)
-                  #(ServerState(..state, topics:), option.Some(entry))
-                }
-              }
-          }
+) -> ServerState(model, message) {
+  case dict.get(state.clients, client_id) {
+    Error(_) -> state
+    Ok(send) ->
+      case find_or_create_topic(state, topic_id) {
+        #(state, option.Some(entry)) -> {
+          entry.subscribe(client_id, send)
+          state
+        }
+        #(state, option.None) -> {
+          let rejected_frame =
+            transport.encode(
+              transport.Rejected(topic_id:, reason: "not found"),
+              serialiser: state.serialiser,
+            )
+          send(rejected_frame)
+          state
         }
       }
   }
 }
 
-@target(erlang)
-fn handle_message(
+fn handle_topic_message_logic(
   state: ServerState(model, message),
+  client_id: String,
+  topic_id: String,
+  message: message,
+) -> ServerState(model, message) {
+  state.on_topic_message_hook(message, topic_id, client_id)
+  case find_or_create_topic(state, topic_id) {
+    #(state, option.Some(entry)) -> {
+      entry.handle_incoming(client_id, message)
+      state
+    }
+    #(state, option.None) -> state
+  }
+}
+
+fn handle_unregister_topic_logic(
+  state: ServerState(model, message),
+  id: String,
+) -> ServerState(model, message) {
+  let topics = dict.delete(state.topics, id)
+  ServerState(..state, topics:)
+}
+
+fn handle_unsubscribe_logic(
+  state: ServerState(model, message),
+  client_id: String,
+  topic_id: String,
+) -> ServerState(model, message) {
+  case dict.get(state.topics, topic_id) {
+    Ok(entry) -> entry.unsubscribe(client_id)
+    Error(_) -> Nil
+  }
+  state
+}
+
+fn reduce(
   event: InternalEvent(model, message),
-) -> actor.Next(ServerState(model, message), InternalEvent(model, message)) {
+  state: ServerState(model, message),
+) -> actor_cell.Reduction(ServerState(model, message), Result(Nil, Nil)) {
   case event {
     ClientConnected(client_id:, send:) ->
-      handle_connect_logic(state, client_id, send) |> actor.continue
+      Continue(handle_connect_logic(state, client_id, send))
 
     ClientDisconnected(client_id:) ->
-      handle_disconnect_logic(state, client_id) |> actor.continue
+      Continue(handle_disconnect_logic(state, client_id))
 
     DispatchToClient(client_id:, message:) ->
-      handle_dispatch_to_logic(state, client_id, message) |> actor.continue
+      Continue(handle_dispatch_to_logic(state, client_id, message))
 
     DispatchToAllClients(message:) ->
-      handle_dispatch_to_all_logic(state, message) |> actor.continue
+      Continue(handle_dispatch_to_all_logic(state, message))
 
     Incoming(client_id:, bytes:) ->
-      handle_incoming_logic(state, client_id, bytes) |> actor.continue
+      Continue(handle_incoming_logic(state, client_id, bytes))
 
     SetConnectHook(hook:) ->
-      handle_set_connect_hook_logic(state, hook) |> actor.continue
+      Continue(handle_set_connect_hook_logic(state, hook))
 
     SetDisconnectHook(hook:) ->
-      handle_set_disconnect_hook_logic(state, hook) |> actor.continue
+      Continue(handle_set_disconnect_hook_logic(state, hook))
 
-    SetHook(hook:) -> handle_set_hook_logic(state, hook) |> actor.continue
+    SetHook(hook:) -> Continue(handle_set_hook_logic(state, hook))
 
     SetTopicMessageHook(hook:) ->
-      handle_set_topic_message_hook_logic(state, hook) |> actor.continue
+      Continue(handle_set_topic_message_hook_logic(state, hook))
 
-    RegisterTopic(id:, entry:, reply:) -> {
+    RegisterTopic(id:, entry:) -> {
       let #(new_state, result) = handle_register_topic_logic(state, id, entry)
-      process.send(reply, result)
-      actor.continue(new_state)
+      Reply(new_state, result)
     }
 
-    RegisterTopicKind(prefix:, create:, reply:) -> {
+    RegisterTopicKind(prefix:, create:) -> {
       let #(new_state, result) =
         handle_register_kind_logic(state, prefix, create)
-      process.send(reply, result)
-      actor.continue(new_state)
+      Reply(new_state, result)
     }
 
-    UnregisterTopic(id:) ->
-      handle_unregister_topic_logic(state, id) |> actor.continue
+    UnregisterTopic(id:) -> Continue(handle_unregister_topic_logic(state, id))
 
     DoSubscribe(client_id:, topic_id:) ->
-      handle_do_subscribe_logic(state, client_id, topic_id) |> actor.continue
+      Continue(handle_do_subscribe_logic(state, client_id, topic_id))
 
     Stop -> {
       handle_stop_logic(state)
-      actor.stop()
+      Halt(state)
     }
   }
-}
-
-@target(erlang)
-fn platform_connect(
-  handle: ServerHandle(model, message),
-  client_id: String,
-  send: fn(BitArray) -> Nil,
-) -> Nil {
-  actor.send(handle, ClientConnected(client_id:, send:))
-}
-
-@target(erlang)
-fn platform_disconnect(
-  handle: ServerHandle(model, message),
-  client_id: String,
-) -> Nil {
-  actor.send(handle, ClientDisconnected(client_id:))
-}
-
-@target(erlang)
-fn platform_dispatch_to(
-  handle: ServerHandle(model, message),
-  client_id: String,
-  message: message,
-) -> Nil {
-  actor.send(handle, DispatchToClient(client_id:, message:))
-}
-
-@target(erlang)
-fn platform_dispatch_to_all(
-  handle: ServerHandle(model, message),
-  message: message,
-) -> Nil {
-  actor.send(handle, DispatchToAllClients(message:))
-}
-
-@target(erlang)
-fn platform_do_subscribe(
-  handle: ServerHandle(model, message),
-  client_id: String,
-  topic_id: String,
-) -> Nil {
-  actor.send(handle, DoSubscribe(client_id:, topic_id:))
-}
-
-@target(erlang)
-fn platform_incoming(
-  handle: ServerHandle(model, message),
-  client_id: String,
-  bytes: BitArray,
-) -> Nil {
-  actor.send(handle, Incoming(client_id:, bytes:))
-}
-
-@target(erlang)
-fn platform_register_topic(
-  handle: ServerHandle(model, message),
-  id: String,
-  entry: ServerTopicEntry(model, message),
-) -> Result(Nil, Nil) {
-  process.call(handle, 5000, fn(reply) { RegisterTopic(id:, entry:, reply:) })
-}
-
-@target(erlang)
-fn platform_register_topic_kind(
-  handle: ServerHandle(model, message),
-  prefix: String,
-  create: fn(String) -> Option(ServerTopicEntry(model, message)),
-) -> Result(Nil, Nil) {
-  process.call(handle, 5000, fn(reply) {
-    RegisterTopicKind(prefix:, create:, reply:)
-  })
-}
-
-@target(erlang)
-fn platform_set_connect_hook(
-  handle: ServerHandle(model, message),
-  hook: fn(String) -> Nil,
-) -> Nil {
-  actor.send(handle, SetConnectHook(hook:))
-}
-
-@target(erlang)
-fn platform_set_disconnect_hook(
-  handle: ServerHandle(model, message),
-  hook: fn(String) -> Nil,
-) -> Nil {
-  actor.send(handle, SetDisconnectHook(hook:))
-}
-
-@target(erlang)
-fn platform_set_hook(
-  handle: ServerHandle(model, message),
-  hook: fn(message, model, String) -> Nil,
-) -> Nil {
-  actor.send(handle, SetHook(hook:))
-}
-
-@target(erlang)
-fn platform_set_topic_message_hook(
-  handle: ServerHandle(model, message),
-  hook: fn(message, String, String) -> Nil,
-) -> Nil {
-  actor.send(handle, SetTopicMessageHook(hook:))
-}
-
-@target(erlang)
-fn platform_start(
-  initial_state: ServerState(model, message),
-) -> Result(ServerHandle(model, message), Nil) {
-  actor.new(initial_state)
-  |> actor.on_message(handle_message)
-  |> actor.start
-  |> result.map(fn(started) { started.data })
-  |> result.replace_error(Nil)
-}
-
-@target(erlang)
-fn platform_stop(handle: ServerHandle(model, message)) -> Nil {
-  actor.send(handle, Stop)
-}
-
-@target(erlang)
-fn platform_unregister_topic(
-  handle: ServerHandle(model, message),
-  id: String,
-) -> Nil {
-  actor.send(handle, UnregisterTopic(id:))
-}
-
-@target(javascript)
-fn modify(
-  handle: ServerHandle(model, message),
-  update: fn(ServerState(model, message)) -> ServerState(model, message),
-) -> Nil {
-  case reference.get(handle) {
-    option.Some(state) -> reference.set(handle, option.Some(update(state)))
-    option.None -> Nil
-  }
-}
-
-@target(javascript)
-fn modify_returning(
-  handle: ServerHandle(model, message),
-  update: fn(ServerState(model, message)) ->
-    #(ServerState(model, message), result),
-  default: result,
-) -> result {
-  case reference.get(handle) {
-    option.Some(state) -> {
-      let #(new_state, result) = update(state)
-      reference.set(handle, option.Some(new_state))
-      result
-    }
-    option.None -> default
-  }
-}
-
-@target(javascript)
-fn platform_connect(
-  handle: ServerHandle(model, message),
-  client_id: String,
-  send: fn(BitArray) -> Nil,
-) -> Nil {
-  modify(handle, handle_connect_logic(_, client_id, send))
-}
-
-@target(javascript)
-fn platform_disconnect(
-  handle: ServerHandle(model, message),
-  client_id: String,
-) -> Nil {
-  modify(handle, handle_disconnect_logic(_, client_id))
-}
-
-@target(javascript)
-fn platform_dispatch_to(
-  handle: ServerHandle(model, message),
-  client_id: String,
-  message: message,
-) -> Nil {
-  modify(handle, handle_dispatch_to_logic(_, client_id, message))
-}
-
-@target(javascript)
-fn platform_dispatch_to_all(
-  handle: ServerHandle(model, message),
-  message: message,
-) -> Nil {
-  modify(handle, handle_dispatch_to_all_logic(_, message))
-}
-
-@target(javascript)
-fn platform_do_subscribe(
-  handle: ServerHandle(model, message),
-  client_id: String,
-  topic_id: String,
-) -> Nil {
-  modify(handle, handle_do_subscribe_logic(_, client_id, topic_id))
-}
-
-@target(javascript)
-fn platform_incoming(
-  handle: ServerHandle(model, message),
-  client_id: String,
-  bytes: BitArray,
-) -> Nil {
-  modify(handle, handle_incoming_logic(_, client_id, bytes))
-}
-
-@target(javascript)
-fn platform_register_topic(
-  handle: ServerHandle(model, message),
-  id: String,
-  entry: ServerTopicEntry(model, message),
-) -> Result(Nil, Nil) {
-  modify_returning(
-    handle,
-    handle_register_topic_logic(_, id, entry),
-    Error(Nil),
-  )
-}
-
-@target(javascript)
-fn platform_register_topic_kind(
-  handle: ServerHandle(model, message),
-  prefix: String,
-  create: fn(String) -> Option(ServerTopicEntry(model, message)),
-) -> Result(Nil, Nil) {
-  modify_returning(
-    handle,
-    handle_register_kind_logic(_, prefix, create),
-    Error(Nil),
-  )
-}
-
-@target(javascript)
-fn platform_set_connect_hook(
-  handle: ServerHandle(model, message),
-  hook: fn(String) -> Nil,
-) -> Nil {
-  modify(handle, handle_set_connect_hook_logic(_, hook))
-}
-
-@target(javascript)
-fn platform_set_disconnect_hook(
-  handle: ServerHandle(model, message),
-  hook: fn(String) -> Nil,
-) -> Nil {
-  modify(handle, handle_set_disconnect_hook_logic(_, hook))
-}
-
-@target(javascript)
-fn platform_set_hook(
-  handle: ServerHandle(model, message),
-  hook: fn(message, model, String) -> Nil,
-) -> Nil {
-  modify(handle, handle_set_hook_logic(_, hook))
-}
-
-@target(javascript)
-fn platform_set_topic_message_hook(
-  handle: ServerHandle(model, message),
-  hook: fn(message, String, String) -> Nil,
-) -> Nil {
-  modify(handle, handle_set_topic_message_hook_logic(_, hook))
-}
-
-@target(javascript)
-fn platform_start(
-  initial_state: ServerState(model, message),
-) -> Result(ServerHandle(model, message), Nil) {
-  Ok(reference.make(option.Some(initial_state)))
-}
-
-@target(javascript)
-fn platform_stop(handle: ServerHandle(model, message)) -> Nil {
-  case reference.get(handle) {
-    option.Some(state) -> {
-      handle_stop_logic(state)
-      reference.set(handle, option.None)
-    }
-    option.None -> Nil
-  }
-}
-
-@target(javascript)
-fn platform_unregister_topic(
-  handle: ServerHandle(model, message),
-  id: String,
-) -> Nil {
-  modify(handle, handle_unregister_topic_logic(_, id))
 }
 
 // =============================================================================

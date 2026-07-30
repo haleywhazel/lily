@@ -4,7 +4,7 @@
 @target(erlang)
 import gleeunit/should
 @target(erlang)
-import lily/test_fixtures.{Decrement, Increment, Noop, Reset, SetName}
+import lily/test_support.{Decrement, Increment, Noop, Reset, SetName}
 @target(erlang)
 import lily/transport.{
   Acknowledge, Resync, Session, SessionMessage, Snapshot, TopicUpdate,
@@ -21,8 +21,8 @@ fn ser() {
 
 @target(erlang)
 fn roundtrip_message(
-  message: test_fixtures.Message,
-) -> Result(transport.Protocol(test_fixtures.Model, test_fixtures.Message), Nil) {
+  message: test_support.Message,
+) -> Result(transport.Protocol(test_support.Model, test_support.Message), Nil) {
   let encoded =
     transport.encode(SessionMessage(payload: message), serialiser: ser())
   transport.decode(encoded, serialiser: ser())
@@ -30,9 +30,9 @@ fn roundtrip_message(
 
 @target(erlang)
 fn roundtrip_snapshot(
-  model: test_fixtures.Model,
+  model: test_support.Model,
   seq: Int,
-) -> Result(transport.Protocol(test_fixtures.Model, test_fixtures.Message), Nil) {
+) -> Result(transport.Protocol(test_support.Model, test_support.Message), Nil) {
   let encoded =
     transport.encode(
       Snapshot(target: Session, sequence: seq, state: model),
@@ -92,8 +92,8 @@ pub fn auto_erl_roundtrip_empty_string_test() {
 @target(erlang)
 pub fn auto_erl_roundtrip_multi_field_test() {
   let model =
-    test_fixtures.Model(
-      ..test_fixtures.initial_model(),
+    test_support.Model(
+      ..test_support.initial_model(),
       count: 5,
       name: "Bob",
       connected: False,
@@ -105,8 +105,8 @@ pub fn auto_erl_roundtrip_multi_field_test() {
 @target(erlang)
 pub fn auto_erl_roundtrip_boolean_field_test() {
   let model =
-    test_fixtures.Model(
-      ..test_fixtures.initial_model(),
+    test_support.Model(
+      ..test_support.initial_model(),
       count: 0,
       name: "",
       connected: True,
@@ -157,16 +157,16 @@ pub fn auto_erl_roundtrip_acknowledge_test() {
 @target(erlang)
 pub fn auto_erl_roundtrip_nested_test() {
   let inner =
-    test_fixtures.Model(
-      ..test_fixtures.initial_model(),
+    test_support.Model(
+      ..test_support.initial_model(),
       count: 3,
       name: "Eve",
       connected: False,
     )
-  let nested = test_fixtures.Nested(inner:)
+  let nested = test_support.Nested(inner:)
   let nested_ser: transport.Serialiser(
-    test_fixtures.Nested,
-    test_fixtures.Message,
+    test_support.Nested,
+    test_support.Message,
   ) = transport.automatic()
   let encoded =
     transport.encode(
@@ -179,10 +179,10 @@ pub fn auto_erl_roundtrip_nested_test() {
 
 @target(erlang)
 pub fn auto_erl_roundtrip_list_field_test() {
-  let with_list = test_fixtures.WithList(items: [1, 2, 3])
+  let with_list = test_support.WithList(items: [1, 2, 3])
   let list_ser: transport.Serialiser(
-    test_fixtures.WithList,
-    test_fixtures.Message,
+    test_support.WithList,
+    test_support.Message,
   ) = transport.automatic()
   let encoded =
     transport.encode(

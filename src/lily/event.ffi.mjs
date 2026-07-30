@@ -70,6 +70,7 @@ export function setupClickEventWithOptions(selector, options, handler) {
     throttleMs,
     once,
     stopPropagation,
+    selector,
   );
   if (preventDefault) listener = preventDefaultFirst(listener);
   registerDelegatedListener(
@@ -115,6 +116,7 @@ export function setupCoordinateElementEventWithOptions(
     throttleMs,
     once,
     stopPropagation,
+    selector,
   );
   if (preventDefault) listener = preventDefaultFirst(listener);
   registerDelegatedListener(
@@ -149,6 +151,7 @@ export function setupCoordinateEventWithOptions(
     throttleMs,
     once,
     stopPropagation,
+    selector,
   );
   if (preventDefault) listener = preventDefaultFirst(listener);
   registerDelegatedListener(
@@ -190,6 +193,7 @@ export function setupElementEventWithOptions(
     throttleMs,
     once,
     stopPropagation,
+    selector,
   );
   if (preventDefault) listener = preventDefaultFirst(listener);
   registerDelegatedListener(
@@ -272,6 +276,7 @@ export function setupFormChangeEventWithOptions(selector, options, handler) {
     throttleMs,
     once,
     stopPropagation,
+    selector,
   );
   if (preventDefault) listener = preventDefaultFirst(listener);
   registerDelegatedListener(
@@ -315,6 +320,7 @@ export function setupKeyFullEventWithOptions(
     throttleMs,
     once,
     stopPropagation,
+    selector,
   );
   if (preventDefault) listener = preventDefaultFirst(listener);
   registerDelegatedListener(
@@ -351,6 +357,7 @@ export function setupScrollPositionEventWithOptions(
     throttleMs,
     once,
     stopPropagation,
+    selector,
   );
   if (preventDefault) listener = preventDefaultFirst(listener);
   registerDelegatedListener(
@@ -382,6 +389,7 @@ export function setupSimpleEventWithOptions(
     throttleMs,
     once,
     stopPropagation,
+    selector,
   );
   if (preventDefault) listener = preventDefaultFirst(listener);
   registerDelegatedListener(
@@ -416,6 +424,7 @@ export function setupSubmitFormEventWithOptions(selector, options, handler) {
     throttleMs,
     once,
     stopPropagation,
+    selector,
   );
   // preventDefault is unconditional for submit, the browser would
   // otherwise navigate before the handler can run. Wrap before applyOptions
@@ -455,6 +464,7 @@ export function setupValueEventWithOptions(
     throttleMs,
     once,
     stopPropagation,
+    selector,
   );
   if (preventDefault) listener = preventDefaultFirst(listener);
   registerDelegatedListener(
@@ -481,6 +491,7 @@ export function setupWheelEventWithOptions(selector, options, handler) {
     throttleMs,
     once,
     stopPropagation,
+    selector,
   );
   if (preventDefault) listener = preventDefaultFirst(listener);
   registerDelegatedListener(
@@ -653,7 +664,14 @@ function activateDeclaredTrap(element) {
  * preventDefault is handled separately in preventDefaultFirst so it
  * fires unconditionally even when the inner handler is throttled/debounced.
  */
-function applyOptions(listener, debounceMs, throttleMs, once, stopPropagation) {
+function applyOptions(
+  listener,
+  debounceMs,
+  throttleMs,
+  once,
+  stopPropagation,
+  selector,
+) {
   if (stopPropagation) {
     const inner = listener;
     listener = (event) => {
@@ -663,7 +681,12 @@ function applyOptions(listener, debounceMs, throttleMs, once, stopPropagation) {
       // ancestors. stopImmediatePropagation also skips the same-node
       // listeners registered after this one, which is what lets a specific
       // handler block a broader ancestor-selector handler registered later.
-      event.stopImmediatePropagation();
+      // Scope the suppression to events matching this binding's selector so a
+      // listener still attached from an earlier mount cannot swallow unrelated
+      // events on the shared node.
+      if (selector === undefined || matchesSelectorScope(event, selector)) {
+        event.stopImmediatePropagation();
+      }
       inner(event);
     };
   }

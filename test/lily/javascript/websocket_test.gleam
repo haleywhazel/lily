@@ -14,11 +14,7 @@ import lily/client
 @target(javascript)
 import lily/store
 @target(javascript)
-import lily/test_fixtures.{type Message, type Model}
-@target(javascript)
-import lily/test_ref
-@target(javascript)
-import lily/test_setup
+import lily/test_support.{type Message, type Model}
 @target(javascript)
 import lily/transport
 
@@ -28,15 +24,16 @@ import lily/transport
 
 @target(javascript)
 fn new_runtime() -> client.Runtime(Model, Message) {
-  store.new(test_fixtures.initial_model(), with: test_fixtures.update)
+  store.new(test_support.initial_model(), with: test_support.update)
   |> client.start(
     store.wiring()
-    |> store.session(
-      extract: fn(m) { Ok(m) },
-      update: test_fixtures.update,
-      field_get: fn(model) { model },
-      field_set: fn(_, model) { model },
-    ),
+      |> store.session(
+        extract: fn(m) { Ok(m) },
+        update: test_support.update,
+        field_get: fn(model) { model },
+        field_set: fn(_, model) { model },
+      ),
+    serialiser: test_support.custom_serialiser(),
   )
 }
 
@@ -78,84 +75,64 @@ pub fn websocket_reconnect_multiplier_sets_value_test() {
 
 @target(javascript)
 pub fn websocket_connect_creates_websocket_test() {
-  test_setup.reset_dom()
-  test_setup.reset_mocks()
+  test_support.reset_dom()
+  test_support.reset_mocks()
   let runtime = new_runtime()
   let connector =
     transport.websocket(url: "ws://localhost/ws") |> transport.websocket_connect
-  let _r =
-    client.connect(
-      runtime,
-      with: connector,
-      serialiser: test_fixtures.custom_serialiser(),
-    )
-  is_null(test_setup.get_last_websocket())
+  let _r = client.connect(runtime, with: connector)
+  is_null(test_support.get_last_websocket())
   |> should.be_false
 }
 
 @target(javascript)
 pub fn websocket_connect_calls_on_reconnect_test() {
-  test_setup.reset_dom()
-  test_setup.reset_mocks()
+  test_support.reset_dom()
+  test_support.reset_mocks()
   let runtime = new_runtime()
-  let reconnect_ref = test_ref.new(False)
+  let reconnect_ref = test_support.new(False)
   let connector =
     transport.make_connector(fn(handler: transport.Handler) {
       handler.on_reconnect()
-      test_ref.set(reconnect_ref, True)
+      test_support.set(reconnect_ref, True)
       transport.new(send: fn(_) { Nil }, close: fn() { Nil })
     })
-  let _r =
-    client.connect(
-      runtime,
-      with: connector,
-      serialiser: test_fixtures.custom_serialiser(),
-    )
-  test_ref.get(reconnect_ref)
+  let _r = client.connect(runtime, with: connector)
+  test_support.get(reconnect_ref)
   |> should.be_true
 }
 
 @target(javascript)
 pub fn websocket_connect_calls_on_disconnect_test() {
-  test_setup.reset_dom()
-  test_setup.reset_mocks()
+  test_support.reset_dom()
+  test_support.reset_mocks()
   let runtime = new_runtime()
-  let disconnect_ref = test_ref.new(False)
+  let disconnect_ref = test_support.new(False)
   let connector =
     transport.make_connector(fn(handler: transport.Handler) {
       handler.on_disconnect()
-      test_ref.set(disconnect_ref, True)
+      test_support.set(disconnect_ref, True)
       transport.new(send: fn(_) { Nil }, close: fn() { Nil })
     })
-  let _r =
-    client.connect(
-      runtime,
-      with: connector,
-      serialiser: test_fixtures.custom_serialiser(),
-    )
-  test_ref.get(disconnect_ref)
+  let _r = client.connect(runtime, with: connector)
+  test_support.get(disconnect_ref)
   |> should.be_true
 }
 
 @target(javascript)
 pub fn websocket_connect_receives_messages_test() {
-  test_setup.reset_dom()
-  test_setup.reset_mocks()
+  test_support.reset_dom()
+  test_support.reset_mocks()
   let runtime = new_runtime()
   // Use the real websocket connector and trigger open on the mock WS
   let connector =
     transport.websocket(url: "ws://localhost/ws") |> transport.websocket_connect
-  let _r =
-    client.connect(
-      runtime,
-      with: connector,
-      serialiser: test_fixtures.custom_serialiser(),
-    )
-  let ws = test_setup.get_last_websocket()
-  test_setup.trigger_websocket_open(ws)
+  let _r = client.connect(runtime, with: connector)
+  let ws = test_support.get_last_websocket()
+  test_support.trigger_websocket_open(ws)
   let snapshot_json =
     "{\"type\":\"snapshot\",\"target\":{\"kind\":\"session\"},\"sequence\":0,\"state\":{\"count\":5,\"name\":\"Bob\",\"connected\":false,\"active_tab\":\"TabA\",\"secondary_count\":0,\"transition_item\":null}}"
-  test_setup.trigger_websocket_message(ws, snapshot_json)
+  test_support.trigger_websocket_message(ws, snapshot_json)
   client.get_current_model(runtime).count
   |> should.equal(5)
 }
@@ -166,42 +143,32 @@ pub fn websocket_connect_receives_messages_test() {
 
 @target(javascript)
 pub fn websocket_send_when_open_sends_directly_test() {
-  test_setup.reset_dom()
-  test_setup.reset_mocks()
+  test_support.reset_dom()
+  test_support.reset_mocks()
   let runtime = new_runtime()
   let connector =
     transport.websocket(url: "ws://localhost/ws") |> transport.websocket_connect
-  let _r =
-    client.connect(
-      runtime,
-      with: connector,
-      serialiser: test_fixtures.custom_serialiser(),
-    )
-  let ws = test_setup.get_last_websocket()
-  test_setup.trigger_websocket_open(ws)
-  client.dispatch(runtime)(test_fixtures.Increment)
-  let sent = test_setup.get_websocket_sent(ws)
+  let _r = client.connect(runtime, with: connector)
+  let ws = test_support.get_last_websocket()
+  test_support.trigger_websocket_open(ws)
+  client.dispatch(runtime)(test_support.Increment)
+  let sent = test_support.get_websocket_sent(ws)
   list.any(sent, fn(frame) { string.contains(frame, "session_message") })
   |> should.be_true
 }
 
 @target(javascript)
 pub fn websocket_send_when_closed_queues_to_sessionstorage_test() {
-  test_setup.reset_dom()
-  test_setup.reset_mocks()
+  test_support.reset_dom()
+  test_support.reset_mocks()
   let runtime = new_runtime()
   let connector =
     transport.websocket(url: "ws://localhost/ws") |> transport.websocket_connect
-  let _r =
-    client.connect(
-      runtime,
-      with: connector,
-      serialiser: test_fixtures.custom_serialiser(),
-    )
+  let _r = client.connect(runtime, with: connector)
   // Do NOT open the WS, remains in CONNECTING state
   // Dispatch a message, should be queued in sessionStorage
-  client.dispatch(runtime)(test_fixtures.Increment)
-  let queued = read_session_storage("lily_ws_pending")
+  client.dispatch(runtime)(test_support.Increment)
+  let queued = test_support.read_session_storage("lily_ws_pending")
   queued
   |> should.not_equal("")
 }
@@ -212,25 +179,20 @@ pub fn websocket_send_when_closed_queues_to_sessionstorage_test() {
 
 @target(javascript)
 pub fn websocket_flush_pending_on_reconnect_test() {
-  test_setup.reset_dom()
-  test_setup.reset_mocks()
+  test_support.reset_dom()
+  test_support.reset_mocks()
   // Pre-seed the pending queue in sessionStorage
-  write_session_storage(
+  test_support.write_session_storage(
     "lily_ws_pending",
     "[\"queued-message-1\",\"queued-message-2\"]",
   )
   let runtime = new_runtime()
   let connector =
     transport.websocket(url: "ws://localhost/ws") |> transport.websocket_connect
-  let _r =
-    client.connect(
-      runtime,
-      with: connector,
-      serialiser: test_fixtures.custom_serialiser(),
-    )
-  let ws = test_setup.get_last_websocket()
-  test_setup.trigger_websocket_open(ws)
-  let sent = test_setup.get_websocket_sent(ws)
+  let _r = client.connect(runtime, with: connector)
+  let ws = test_support.get_last_websocket()
+  test_support.trigger_websocket_open(ws)
+  let sent = test_support.get_websocket_sent(ws)
   { sent != [] }
   |> should.be_true
 }
@@ -238,18 +200,6 @@ pub fn websocket_flush_pending_on_reconnect_test() {
 // =============================================================================
 // PRIVATE FFI HELPERS
 // =============================================================================
-
-@target(javascript)
-@external(javascript, "./session_test.ffi.mjs", "writeSessionStorage")
-fn write_session_storage(_key: String, _value: String) -> Nil {
-  Nil
-}
-
-@target(javascript)
-@external(javascript, "./session_test.ffi.mjs", "readSessionStorage")
-fn read_session_storage(_key: String) -> String {
-  ""
-}
 
 @target(javascript)
 @external(javascript, "./websocket_test.ffi.mjs", "isNull")

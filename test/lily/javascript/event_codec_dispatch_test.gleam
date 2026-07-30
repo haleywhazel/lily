@@ -15,27 +15,7 @@ import lily/event
 @target(javascript)
 import lily/store
 @target(javascript)
-import lily/test_dom
-@target(javascript)
-import lily/test_fixtures.{type Message, type Model, Increment, SetName}
-@target(javascript)
-import lily/test_setup
-
-@target(javascript)
-fn new_runtime() -> client.Runtime(Model, Message) {
-  store.new(test_fixtures.initial_model(), with: test_fixtures.update)
-  |> client.start(store.wiring())
-}
-
-@target(javascript)
-fn to_html(html: String) -> String {
-  html
-}
-
-@target(javascript)
-fn to_slot() -> String {
-  "<lily-slot></lily-slot>"
-}
+import lily/test_support.{type Message, type Model, Increment, SetName}
 
 // A slotted child that carries a typed message in its data-message via the
 // codec, exactly as a converted lily_ui component does.
@@ -50,14 +30,14 @@ fn encoded_child() -> component.Component(Model, Message, String) {
 
 @target(javascript)
 pub fn slotted_encoded_message_dispatches_via_root_decoder_test() {
-  test_setup.reset_dom()
-  let runtime = new_runtime()
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
 
   component.mount(
     runtime,
     selector: "#app",
-    to_html: to_html,
-    to_slot: to_slot,
+    to_html: test_support.to_html,
+    to_slot: test_support.to_slot,
     view: fn(_model) {
       component.simple(slice: fn(_) { Nil }, render: fn(_, slot) {
         "<div>" <> slot(encoded_child()) <> "</div>"
@@ -66,11 +46,12 @@ pub fn slotted_encoded_message_dispatches_via_root_decoder_test() {
         event: event.click,
         selector: "#app",
         decoder: event.decode_message,
+        options: event.options(),
       )
     },
   )
 
-  test_dom.click("#child")
+  test_support.click("#child")
   client.get_current_model(runtime).count
   |> should.equal(1)
 }
@@ -80,8 +61,8 @@ pub fn slotted_encoded_message_dispatches_via_root_decoder_test() {
 // its payload intact.
 @target(javascript)
 pub fn slotted_value_carrying_message_dispatches_via_root_decoder_test() {
-  test_setup.reset_dom()
-  let runtime = new_runtime()
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
 
   let child =
     component.simple(slice: fn(_) { Nil }, render: fn(_, _slot) {
@@ -93,8 +74,8 @@ pub fn slotted_value_carrying_message_dispatches_via_root_decoder_test() {
   component.mount(
     runtime,
     selector: "#app",
-    to_html: to_html,
-    to_slot: to_slot,
+    to_html: test_support.to_html,
+    to_slot: test_support.to_slot,
     view: fn(_model) {
       component.simple(slice: fn(_) { Nil }, render: fn(_, slot) {
         "<div>" <> slot(child) <> "</div>"
@@ -103,11 +84,12 @@ pub fn slotted_value_carrying_message_dispatches_via_root_decoder_test() {
         event: event.click,
         selector: "#app",
         decoder: event.decode_message,
+        options: event.options(),
       )
     },
   )
 
-  test_dom.click("#named")
+  test_support.click("#named")
   client.get_current_model(runtime).name
   |> should.equal("Ada")
 }

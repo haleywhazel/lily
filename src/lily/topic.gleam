@@ -46,7 +46,7 @@
 ////
 //// ```gleam
 //// runtime
-//// |> client.connect(with: connector, serialiser: shared.serialiser())
+//// |> client.connect(with: connector)
 //// |> client.subscribe("chat")
 //// ```
 ////
@@ -114,18 +114,11 @@ import gleam/dict.{type Dict}
 import gleam/option.{type Option}
 import gleam/result
 import gleam/string
+import lily/internal/actor_cell.{type Cell, Continue, Halt}
 import lily/logging
 import lily/server.{type Server, type ServerTopicEntry, ServerTopicEntry}
 import lily/store
 import lily/transport.{type Serialiser}
-
-@target(erlang)
-import gleam/erlang/process.{type Subject}
-@target(erlang)
-import gleam/otp/actor
-
-@target(javascript)
-import lily/internal/reference.{type Reference}
 
 // =============================================================================
 // PUBLIC TYPES
@@ -160,7 +153,7 @@ pub opaque type Topic(model, message, kind) {
 /// topic.broadcast(typing_topic, UserIsTyping(client_id))
 /// ```
 pub fn broadcast(topic: Topic(model, message, kind), message: message) -> Nil {
-  platform_broadcast(topic.handle, message, option.None)
+  actor_cell.send(topic.handle, Broadcast(message:, exclude: option.None))
 }
 
 /// Like `broadcast` but skips the originating client.
@@ -177,7 +170,10 @@ pub fn broadcast_from(
   except client_id: String,
   message message: message,
 ) -> Nil {
-  platform_broadcast(topic.handle, message, option.Some(client_id))
+  actor_cell.send(
+    topic.handle,
+    Broadcast(message:, exclude: option.Some(client_id)),
+  )
 }
 
 /// Apply a message to the topic's store and emit
@@ -190,7 +186,7 @@ pub fn broadcast_from(
 /// topic.dispatch(chat_topic, Chat(NewChatMessage(body)))
 /// ```
 pub fn dispatch(topic: Topic(model, message, Stateful), message: message) -> Nil {
-  platform_dispatch(topic.handle, option.None, message)
+  actor_cell.send(topic.handle, Dispatch(from: option.None, message:))
 }
 
 /// Register a parametric topic kind. When a client subscribes to
@@ -233,7 +229,7 @@ pub fn kind(
       Ok(parsed) -> {
         let #(_, serialiser, _) = server.internals(server)
         let initial_state = make_initial_state(topic_id, serialiser)
-        case platform_start(initial_state) {
+        case actor_cell.start(initial_state, reduce:) {
           Error(_) -> option.None
           Ok(handle) -> {
             let pre_topic = Topic(id: topic_id, handle:, server:)
@@ -260,7 +256,7 @@ pub fn new(
 ) -> Result(Topic(model, message, Ephemeral), Nil) {
   let #(_, serialiser, _) = server.internals(server)
   let initial_state = make_initial_state(id, serialiser)
-  use handle <- result.try(platform_start(initial_state))
+  use handle <- result.try(actor_cell.start(initial_state, reduce:))
   let entry = make_entry_from_handle(handle)
   use _ <- result.try(server.register_topic(server, id, entry))
   Ok(Topic(id:, handle:, server:))
@@ -276,7 +272,7 @@ pub fn new(
 /// topic.stop(chat_topic)
 /// ```
 pub fn stop(topic: Topic(model, message, kind)) -> Nil {
-  platform_stop_actor(topic.handle)
+  actor_cell.send(topic.handle, Stop)
   server.unregister_topic(topic.server, topic.id)
 }
 
@@ -296,7 +292,7 @@ pub fn subscribe(topic: Topic(model, message, kind), client_id: String) -> Nil {
 /// topic.unsubscribe(chat_topic, client_id)
 /// ```
 pub fn unsubscribe(topic: Topic(model, message, kind), client_id: String) -> Nil {
-  platform_unsubscribe(topic.handle, client_id)
+  actor_cell.send(topic.handle, ClientUnsubscribe(client_id:))
 }
 
 /// Set an authorisation predicate for client-initiated subscribes.
@@ -312,7 +308,7 @@ pub fn with_can_subscribe(
   topic: Topic(model, message, kind),
   predicate: fn(String, String) -> Bool,
 ) -> Topic(model, message, kind) {
-  platform_set_can_subscribe(topic.handle, predicate)
+  actor_cell.send(topic.handle, SetCanSubscribe(predicate:))
   topic
 }
 
@@ -329,7 +325,7 @@ pub fn with_on_subscribe(
   topic: Topic(model, message, kind),
   hook: fn(String) -> List(message),
 ) -> Topic(model, message, kind) {
-  platform_set_on_subscribe(topic.handle, hook)
+  actor_cell.send(topic.handle, SetOnSubscribe(hook:))
   topic
 }
 
@@ -343,7 +339,7 @@ pub fn with_on_unsubscribe(
   topic: Topic(model, message, kind),
   hook: fn(String) -> List(message),
 ) -> Topic(model, message, kind) {
-  platform_set_on_unsubscribe(topic.handle, hook)
+  actor_cell.send(topic.handle, SetOnUnsubscribe(hook:))
   topic
 }
 
@@ -363,48 +359,26 @@ pub fn with_store(
     option.Some(f) -> f
     option.None -> fn(m, _) { m }
   }
-  platform_upgrade_to_stateful(topic.handle, initial, apply_message)
+  actor_cell.send(topic.handle, UpgradeToStateful(initial:, apply_message:))
   Topic(id: topic.id, handle: topic.handle, server: topic.server)
-}
-
-// =============================================================================
-// PRIVATE FUNCTIONS
-// =============================================================================
-
-fn make_initial_state(
-  id: String,
-  serialiser: Serialiser(model, message),
-) -> TopicActorState(model, message) {
-  TopicActorState(
-    id:,
-    serialiser:,
-    subscribers: dict.new(),
-    store: option.None,
-    can_subscribe: fn(_, _) { True },
-    on_subscribe: fn(_) { [] },
-    on_unsubscribe: fn(_) { [] },
-  )
-}
-
-fn make_entry_from_handle(
-  handle: TopicHandle(model, message),
-) -> ServerTopicEntry(model, message) {
-  ServerTopicEntry(
-    handle_incoming: fn(client_id, message) {
-      platform_dispatch(handle, option.Some(client_id), message)
-    },
-    subscribe: fn(client_id, send) {
-      platform_subscribe(handle, client_id, send)
-    },
-    unsubscribe: fn(client_id) { platform_unsubscribe(handle, client_id) },
-    send_snapshot: fn(send) { platform_send_snapshot(handle, send) },
-    stop: fn() { platform_stop_actor(handle) },
-  )
 }
 
 // =============================================================================
 // PRIVATE TYPES
 // =============================================================================
+
+type InternalEvent(model, message) {
+  ClientSubscribe(client_id: String, send: fn(BitArray) -> Nil)
+  ClientUnsubscribe(client_id: String)
+  Dispatch(from: Option(String), message: message)
+  Broadcast(message: message, exclude: Option(String))
+  SendSnapshot(send: fn(BitArray) -> Nil)
+  SetCanSubscribe(predicate: fn(String, String) -> Bool)
+  SetOnSubscribe(hook: fn(String) -> List(message))
+  SetOnUnsubscribe(hook: fn(String) -> List(message))
+  UpgradeToStateful(initial: model, apply_message: fn(model, message) -> model)
+  Stop
+}
 
 type TopicActorState(model, message) {
   TopicActorState(
@@ -418,6 +392,9 @@ type TopicActorState(model, message) {
   )
 }
 
+type TopicHandle(model, message) =
+  Cell(TopicActorState(model, message), InternalEvent(model, message), Nil)
+
 type TopicStore(model, message) {
   TopicStore(
     current: model,
@@ -426,26 +403,168 @@ type TopicStore(model, message) {
   )
 }
 
-@target(erlang)
-type TopicHandle(model, message) =
-  Subject(InternalEvent(model, message))
+// =============================================================================
+// PRIVATE FUNCTIONS
+// =============================================================================
 
-@target(javascript)
-type TopicHandle(model, message) =
-  Reference(Option(TopicActorState(model, message)))
+fn handle_broadcast_logic(
+  state: TopicActorState(model, message),
+  message: message,
+  exclude: Option(String),
+) -> TopicActorState(model, message) {
+  case dict.is_empty(state.subscribers) {
+    True -> Nil
+    False -> {
+      let push_frame =
+        transport.encode(
+          transport.Push(topic_id: state.id, payload: message),
+          serialiser: state.serialiser,
+        )
+      dict.each(state.subscribers, fn(id, send) {
+        case exclude {
+          option.Some(excluded) if excluded == id -> Nil
+          option.Some(_) | option.None -> send(push_frame)
+        }
+      })
+    }
+  }
+  state
+}
 
-@target(erlang)
-type InternalEvent(model, message) {
-  ClientSubscribe(client_id: String, send: fn(BitArray) -> Nil)
-  ClientUnsubscribe(client_id: String)
-  Dispatch(from: Option(String), message: message)
-  Broadcast(message: message, exclude: Option(String))
-  SendSnapshot(send: fn(BitArray) -> Nil)
-  SetCanSubscribe(predicate: fn(String, String) -> Bool)
-  SetOnSubscribe(hook: fn(String) -> List(message))
-  SetOnUnsubscribe(hook: fn(String) -> List(message))
-  UpgradeToStateful(initial: model, apply_message: fn(model, message) -> model)
-  Stop
+fn handle_dispatch_logic(
+  state: TopicActorState(model, message),
+  from: Option(String),
+  message: message,
+) -> TopicActorState(model, message) {
+  // A client may only write to a topic it is subscribed to, since subscribing
+  // already cleared `can_subscribe`. Server dispatches carry `from = None` and
+  // are trusted. An unsubscribed client's message is dropped silently.
+  let authorised = case from {
+    option.Some(client_id) -> dict.has_key(state.subscribers, client_id)
+    option.None -> True
+  }
+  use <- bool.guard(when: !authorised, return: state)
+  case state.store {
+    // Ephemeral topic with no store to apply to, so relay the client's message
+    // straight to the other subscribers as a Push (no sequence, no replay).
+    // The originator is skipped, it already applied the message optimistically.
+    // This makes client-to-client signalling fan out without an
+    // `on_topic_message` hook.
+    option.None -> handle_broadcast_logic(state, message, from)
+    option.Some(store) ->
+      // A subscribed client can still send a payload the update function
+      // cannot match, so a crash here drops the frame, not the topic actor.
+      case server.rescue(fn() { store.apply_message(store.current, message) }) {
+        Error(reason) -> {
+          logging.log(
+            logging.Warning,
+            "lily: dropped malformed topic message on "
+              <> state.id
+              <> ": "
+              <> reason,
+          )
+          state
+        }
+        Ok(new_model) -> {
+          let new_seq = store.sequence + 1
+          case dict.is_empty(state.subscribers) {
+            True -> Nil
+            False -> {
+              let update_frame =
+                transport.encode(
+                  transport.TopicUpdate(
+                    topic_id: state.id,
+                    sequence: new_seq,
+                    payload: message,
+                  ),
+                  serialiser: state.serialiser,
+                )
+              let ack_frame =
+                transport.encode(
+                  transport.Acknowledge(
+                    target: transport.Topic(state.id),
+                    sequence: new_seq,
+                  ),
+                  serialiser: state.serialiser,
+                )
+              // Originator gets the ack, everyone else gets the update.
+              dict.each(state.subscribers, fn(id, send) {
+                case from {
+                  option.Some(sender) if sender == id -> send(ack_frame)
+                  option.Some(_) | option.None -> send(update_frame)
+                }
+              })
+            }
+          }
+          let store = TopicStore(..store, current: new_model, sequence: new_seq)
+          TopicActorState(..state, store: option.Some(store))
+        }
+      }
+  }
+}
+
+fn handle_hook_messages(
+  state: TopicActorState(model, message),
+  messages: List(message),
+  exclude: Option(String),
+) -> TopicActorState(model, message) {
+  case messages {
+    [] -> state
+    [message, ..rest] -> {
+      let state = case state.store {
+        option.Some(_) -> handle_dispatch_logic(state, exclude, message)
+        option.None -> handle_broadcast_logic(state, message, exclude)
+      }
+      handle_hook_messages(state, rest, exclude)
+    }
+  }
+}
+
+fn handle_send_snapshot_logic(
+  state: TopicActorState(model, message),
+  send: fn(BitArray) -> Nil,
+) -> TopicActorState(model, message) {
+  case state.store {
+    option.None -> state
+    option.Some(store) -> {
+      send(snapshot_frame(state, store))
+      state
+    }
+  }
+}
+
+fn handle_set_can_subscribe_logic(
+  state: TopicActorState(model, message),
+  predicate: fn(String, String) -> Bool,
+) -> TopicActorState(model, message) {
+  TopicActorState(..state, can_subscribe: predicate)
+}
+
+fn handle_set_on_subscribe_logic(
+  state: TopicActorState(model, message),
+  hook: fn(String) -> List(message),
+) -> TopicActorState(model, message) {
+  TopicActorState(..state, on_subscribe: hook)
+}
+
+fn handle_set_on_unsubscribe_logic(
+  state: TopicActorState(model, message),
+  hook: fn(String) -> List(message),
+) -> TopicActorState(model, message) {
+  TopicActorState(..state, on_unsubscribe: hook)
+}
+
+fn handle_stop_logic(state: TopicActorState(model, message)) -> Nil {
+  let seq = case state.store {
+    option.Some(store) -> store.sequence
+    option.None -> 0
+  }
+  let ack_frame =
+    transport.encode(
+      transport.Acknowledge(target: transport.Topic(state.id), sequence: seq),
+      serialiser: state.serialiser,
+    )
+  dict.each(state.subscribers, fn(_id, send) { send(ack_frame) })
 }
 
 fn handle_subscribe_logic(
@@ -488,111 +607,82 @@ fn handle_unsubscribe_logic(
   handle_hook_messages(state, state.on_unsubscribe(client_id), option.None)
 }
 
-fn handle_dispatch_logic(
+fn handle_upgrade_to_stateful_logic(
   state: TopicActorState(model, message),
-  from: Option(String),
-  message: message,
+  initial: model,
+  apply_message: fn(model, message) -> model,
 ) -> TopicActorState(model, message) {
-  // A client may only write to a topic it is subscribed to, since subscribing
-  // already cleared `can_subscribe`. Server dispatches carry `from = None` and
-  // are trusted. An unsubscribed client's message is dropped silently.
-  let authorised = case from {
-    option.Some(client_id) -> dict.has_key(state.subscribers, client_id)
-    option.None -> True
-  }
-  use <- bool.guard(when: !authorised, return: state)
-  case state.store {
-    // Ephemeral topic with no store to apply to, so relay the client's message
-    // straight to the other subscribers as a Push (no sequence, no replay).
-    // The originator is skipped, it already applied the message optimistically.
-    // This makes client-to-client signalling fan out without an
-    // `on_topic_message` hook.
-    option.None -> handle_broadcast_logic(state, message, from)
-    option.Some(store) ->
-      // A subscribed client can still send a payload the update function
-      // cannot match, so a crash here drops the frame, not the topic actor.
-      case server.rescue(fn() { store.apply_message(store.current, message) }) {
-        Error(reason) -> {
-          logging.warning(
-            "lily: dropped malformed topic message on "
-            <> state.id
-            <> ": "
-            <> reason,
-          )
-          state
-        }
-        Ok(new_model) -> {
-          let new_seq = store.sequence + 1
-          case dict.is_empty(state.subscribers) {
-            True -> Nil
-            False -> {
-              let update_frame =
-                transport.encode(
-                  transport.TopicUpdate(
-                    topic_id: state.id,
-                    sequence: new_seq,
-                    payload: message,
-                  ),
-                  serialiser: state.serialiser,
-                )
-              let ack_frame =
-                transport.encode(
-                  transport.Acknowledge(
-                    target: transport.Topic(state.id),
-                    sequence: new_seq,
-                  ),
-                  serialiser: state.serialiser,
-                )
-              // Originator gets the ack, everyone else gets the update.
-              dict.each(state.subscribers, fn(id, send) {
-                case from {
-                  option.Some(sender) if sender == id -> send(ack_frame)
-                  option.Some(_) | option.None -> send(update_frame)
-                }
-              })
-            }
-          }
-          let store = TopicStore(..store, current: new_model, sequence: new_seq)
-          TopicActorState(..state, store: option.Some(store))
-        }
-      }
-  }
+  let store = TopicStore(current: initial, apply_message:, sequence: 0)
+  TopicActorState(..state, store: option.Some(store))
 }
 
-fn handle_broadcast_logic(
-  state: TopicActorState(model, message),
-  message: message,
-  exclude: Option(String),
-) -> TopicActorState(model, message) {
-  case dict.is_empty(state.subscribers) {
-    True -> Nil
-    False -> {
-      let push_frame =
-        transport.encode(
-          transport.Push(topic_id: state.id, payload: message),
-          serialiser: state.serialiser,
-        )
-      dict.each(state.subscribers, fn(id, send) {
-        case exclude {
-          option.Some(excluded) if excluded == id -> Nil
-          option.Some(_) -> send(push_frame)
-          option.None -> send(push_frame)
-        }
-      })
-    }
-  }
-  state
+fn make_entry_from_handle(
+  handle: TopicHandle(model, message),
+) -> ServerTopicEntry(model, message) {
+  ServerTopicEntry(
+    handle_incoming: fn(client_id, message) {
+      actor_cell.send(handle, Dispatch(from: option.Some(client_id), message:))
+    },
+    subscribe: fn(client_id, send) {
+      actor_cell.send(handle, ClientSubscribe(client_id:, send:))
+    },
+    unsubscribe: fn(client_id) {
+      actor_cell.send(handle, ClientUnsubscribe(client_id:))
+    },
+    send_snapshot: fn(send) { actor_cell.send(handle, SendSnapshot(send:)) },
+    stop: fn() { actor_cell.send(handle, Stop) },
+  )
 }
 
-fn handle_send_snapshot_logic(
-  state: TopicActorState(model, message),
-  send: fn(BitArray) -> Nil,
+fn make_initial_state(
+  id: String,
+  serialiser: Serialiser(model, message),
 ) -> TopicActorState(model, message) {
-  case state.store {
-    option.None -> state
-    option.Some(store) -> {
-      send(snapshot_frame(state, store))
-      state
+  TopicActorState(
+    id:,
+    serialiser:,
+    subscribers: dict.new(),
+    store: option.None,
+    can_subscribe: fn(_, _) { True },
+    on_subscribe: fn(_) { [] },
+    on_unsubscribe: fn(_) { [] },
+  )
+}
+
+fn reduce(
+  event: InternalEvent(model, message),
+  state: TopicActorState(model, message),
+) -> actor_cell.Reduction(TopicActorState(model, message), Nil) {
+  case event {
+    ClientSubscribe(client_id:, send:) ->
+      Continue(handle_subscribe_logic(state, client_id, send))
+
+    ClientUnsubscribe(client_id:) ->
+      Continue(handle_unsubscribe_logic(state, client_id))
+
+    Dispatch(from:, message:) ->
+      Continue(handle_dispatch_logic(state, from, message))
+
+    Broadcast(message:, exclude:) ->
+      Continue(handle_broadcast_logic(state, message, exclude))
+
+    SendSnapshot(send:) -> Continue(handle_send_snapshot_logic(state, send))
+
+    SetCanSubscribe(predicate:) ->
+      Continue(handle_set_can_subscribe_logic(state, predicate))
+
+    SetOnSubscribe(hook:) ->
+      Continue(handle_set_on_subscribe_logic(state, hook))
+
+    SetOnUnsubscribe(hook:) ->
+      Continue(handle_set_on_unsubscribe_logic(state, hook))
+
+    UpgradeToStateful(initial:, apply_message:) ->
+      Continue(handle_upgrade_to_stateful_logic(state, initial, apply_message))
+
+    Stop -> {
+      handle_stop_logic(state)
+      Halt(state)
     }
   }
 }
@@ -609,302 +699,4 @@ fn snapshot_frame(
     ),
     serialiser: state.serialiser,
   )
-}
-
-fn handle_hook_messages(
-  state: TopicActorState(model, message),
-  messages: List(message),
-  exclude: Option(String),
-) -> TopicActorState(model, message) {
-  case messages {
-    [] -> state
-    [message, ..rest] -> {
-      let state = case state.store {
-        option.Some(_) -> handle_dispatch_logic(state, exclude, message)
-        option.None -> handle_broadcast_logic(state, message, exclude)
-      }
-      handle_hook_messages(state, rest, exclude)
-    }
-  }
-}
-
-fn handle_stop_logic(state: TopicActorState(model, message)) -> Nil {
-  let seq = case state.store {
-    option.Some(store) -> store.sequence
-    option.None -> 0
-  }
-  let ack_frame =
-    transport.encode(
-      transport.Acknowledge(target: transport.Topic(state.id), sequence: seq),
-      serialiser: state.serialiser,
-    )
-  dict.each(state.subscribers, fn(_id, send) { send(ack_frame) })
-}
-
-fn handle_set_can_subscribe_logic(
-  state: TopicActorState(model, message),
-  predicate: fn(String, String) -> Bool,
-) -> TopicActorState(model, message) {
-  TopicActorState(..state, can_subscribe: predicate)
-}
-
-fn handle_set_on_subscribe_logic(
-  state: TopicActorState(model, message),
-  hook: fn(String) -> List(message),
-) -> TopicActorState(model, message) {
-  TopicActorState(..state, on_subscribe: hook)
-}
-
-fn handle_set_on_unsubscribe_logic(
-  state: TopicActorState(model, message),
-  hook: fn(String) -> List(message),
-) -> TopicActorState(model, message) {
-  TopicActorState(..state, on_unsubscribe: hook)
-}
-
-fn handle_upgrade_to_stateful_logic(
-  state: TopicActorState(model, message),
-  initial: model,
-  apply_message: fn(model, message) -> model,
-) -> TopicActorState(model, message) {
-  let store = TopicStore(current: initial, apply_message:, sequence: 0)
-  TopicActorState(..state, store: option.Some(store))
-}
-
-@target(erlang)
-fn handle_message(
-  state: TopicActorState(model, message),
-  event: InternalEvent(model, message),
-) -> actor.Next(TopicActorState(model, message), InternalEvent(model, message)) {
-  case event {
-    ClientSubscribe(client_id:, send:) ->
-      handle_subscribe_logic(state, client_id, send) |> actor.continue
-
-    ClientUnsubscribe(client_id:) ->
-      handle_unsubscribe_logic(state, client_id) |> actor.continue
-
-    Dispatch(from:, message:) ->
-      handle_dispatch_logic(state, from, message) |> actor.continue
-
-    Broadcast(message:, exclude:) ->
-      handle_broadcast_logic(state, message, exclude) |> actor.continue
-
-    SendSnapshot(send:) ->
-      handle_send_snapshot_logic(state, send) |> actor.continue
-
-    SetCanSubscribe(predicate:) ->
-      handle_set_can_subscribe_logic(state, predicate) |> actor.continue
-
-    SetOnSubscribe(hook:) ->
-      handle_set_on_subscribe_logic(state, hook) |> actor.continue
-
-    SetOnUnsubscribe(hook:) ->
-      handle_set_on_unsubscribe_logic(state, hook) |> actor.continue
-
-    UpgradeToStateful(initial:, apply_message:) ->
-      handle_upgrade_to_stateful_logic(state, initial, apply_message)
-      |> actor.continue
-
-    Stop -> {
-      handle_stop_logic(state)
-      actor.stop()
-    }
-  }
-}
-
-@target(erlang)
-fn platform_broadcast(
-  handle: TopicHandle(model, message),
-  message: message,
-  exclude: Option(String),
-) -> Nil {
-  actor.send(handle, Broadcast(message:, exclude:))
-}
-
-@target(erlang)
-fn platform_dispatch(
-  handle: TopicHandle(model, message),
-  from: Option(String),
-  message: message,
-) -> Nil {
-  actor.send(handle, Dispatch(from:, message:))
-}
-
-@target(erlang)
-fn platform_send_snapshot(
-  handle: TopicHandle(model, message),
-  send: fn(BitArray) -> Nil,
-) -> Nil {
-  actor.send(handle, SendSnapshot(send:))
-}
-
-@target(erlang)
-fn platform_set_can_subscribe(
-  handle: TopicHandle(model, message),
-  predicate: fn(String, String) -> Bool,
-) -> Nil {
-  actor.send(handle, SetCanSubscribe(predicate:))
-}
-
-@target(erlang)
-fn platform_set_on_subscribe(
-  handle: TopicHandle(model, message),
-  hook: fn(String) -> List(message),
-) -> Nil {
-  actor.send(handle, SetOnSubscribe(hook:))
-}
-
-@target(erlang)
-fn platform_set_on_unsubscribe(
-  handle: TopicHandle(model, message),
-  hook: fn(String) -> List(message),
-) -> Nil {
-  actor.send(handle, SetOnUnsubscribe(hook:))
-}
-
-@target(erlang)
-fn platform_start(
-  initial_state: TopicActorState(model, message),
-) -> Result(TopicHandle(model, message), Nil) {
-  actor.new(initial_state)
-  |> actor.on_message(handle_message)
-  |> actor.start
-  |> result.map(fn(started) { started.data })
-  |> result.replace_error(Nil)
-}
-
-@target(erlang)
-fn platform_stop_actor(handle: TopicHandle(model, message)) -> Nil {
-  actor.send(handle, Stop)
-}
-
-@target(erlang)
-fn platform_subscribe(
-  handle: TopicHandle(model, message),
-  client_id: String,
-  send: fn(BitArray) -> Nil,
-) -> Nil {
-  actor.send(handle, ClientSubscribe(client_id:, send:))
-}
-
-@target(erlang)
-fn platform_unsubscribe(
-  handle: TopicHandle(model, message),
-  client_id: String,
-) -> Nil {
-  actor.send(handle, ClientUnsubscribe(client_id:))
-}
-
-@target(erlang)
-fn platform_upgrade_to_stateful(
-  handle: TopicHandle(model, message),
-  initial: model,
-  apply_message: fn(model, message) -> model,
-) -> Nil {
-  actor.send(handle, UpgradeToStateful(initial:, apply_message:))
-}
-
-@target(javascript)
-fn modify(
-  handle: TopicHandle(model, message),
-  update: fn(TopicActorState(model, message)) -> TopicActorState(model, message),
-) -> Nil {
-  case reference.get(handle) {
-    option.Some(state) -> reference.set(handle, option.Some(update(state)))
-    option.None -> Nil
-  }
-}
-
-@target(javascript)
-fn platform_broadcast(
-  handle: TopicHandle(model, message),
-  message: message,
-  exclude: Option(String),
-) -> Nil {
-  modify(handle, handle_broadcast_logic(_, message, exclude))
-}
-
-@target(javascript)
-fn platform_dispatch(
-  handle: TopicHandle(model, message),
-  from: Option(String),
-  message: message,
-) -> Nil {
-  modify(handle, handle_dispatch_logic(_, from, message))
-}
-
-@target(javascript)
-fn platform_send_snapshot(
-  handle: TopicHandle(model, message),
-  send: fn(BitArray) -> Nil,
-) -> Nil {
-  modify(handle, handle_send_snapshot_logic(_, send))
-}
-
-@target(javascript)
-fn platform_set_can_subscribe(
-  handle: TopicHandle(model, message),
-  predicate: fn(String, String) -> Bool,
-) -> Nil {
-  modify(handle, handle_set_can_subscribe_logic(_, predicate))
-}
-
-@target(javascript)
-fn platform_set_on_subscribe(
-  handle: TopicHandle(model, message),
-  hook: fn(String) -> List(message),
-) -> Nil {
-  modify(handle, handle_set_on_subscribe_logic(_, hook))
-}
-
-@target(javascript)
-fn platform_set_on_unsubscribe(
-  handle: TopicHandle(model, message),
-  hook: fn(String) -> List(message),
-) -> Nil {
-  modify(handle, handle_set_on_unsubscribe_logic(_, hook))
-}
-
-@target(javascript)
-fn platform_start(
-  initial_state: TopicActorState(model, message),
-) -> Result(TopicHandle(model, message), Nil) {
-  Ok(reference.make(option.Some(initial_state)))
-}
-
-@target(javascript)
-fn platform_stop_actor(handle: TopicHandle(model, message)) -> Nil {
-  case reference.get(handle) {
-    option.Some(state) -> {
-      handle_stop_logic(state)
-      reference.set(handle, option.None)
-    }
-    option.None -> Nil
-  }
-}
-
-@target(javascript)
-fn platform_subscribe(
-  handle: TopicHandle(model, message),
-  client_id: String,
-  send: fn(BitArray) -> Nil,
-) -> Nil {
-  modify(handle, handle_subscribe_logic(_, client_id, send))
-}
-
-@target(javascript)
-fn platform_unsubscribe(
-  handle: TopicHandle(model, message),
-  client_id: String,
-) -> Nil {
-  modify(handle, handle_unsubscribe_logic(_, client_id))
-}
-
-@target(javascript)
-fn platform_upgrade_to_stateful(
-  handle: TopicHandle(model, message),
-  initial: model,
-  apply_message: fn(model, message) -> model,
-) -> Nil {
-  modify(handle, handle_upgrade_to_stateful_logic(_, initial, apply_message))
 }

@@ -21,19 +21,19 @@
 ////   logging.configure()
 ////   logging.set_level(logging.Info)
 ////
-////   logging.info("server ready")
-////   logging.warning("cache miss")
-////   logging.error("payment gateway timed out")
-////   logging.debug("dropped while the level is Info")
+////   logging.log(logging.Info, "server ready")
+////   logging.log(logging.Warning, "cache miss")
+////   logging.log(logging.Error, "payment gateway timed out")
+////   logging.log(logging.Debug, "dropped while the level is Info")
 //// }
 //// ```
 ////
-//// [`auto_info`](#auto_info) and its siblings log any value with
-//// `string.inspect`, skipping the work when the level is suppressed.
+//// [`auto_log`](#auto_log) logs any value with `string.inspect`, skipping the
+//// work when the level is suppressed.
 ////
 //// For an HTTP server you probably want one compact line per request.
-//// Build a [`RequestLog`](#RequestLog) with [`request_log`](#request_log) and
-//// emit it with [`request`](#request). In a real backend that's a small
+//// Build a [`RequestLog`](#RequestLog) and emit it with [`request`](#request).
+//// In a real backend that's a small
 //// middleware that times the handler and mints a correlation id, sat behind
 //// your static-file serving so only real routes get a line:
 ////
@@ -98,8 +98,8 @@ pub type Level {
 }
 
 /// A single HTTP request to log. `request_id` is an optional correlation id
-/// that, when set, is echoed into the line as `#<id>`. Build one with
-/// [`request_log()`](#request_log) and emit it with [`request()`](#request).
+/// that, when set, is echoed into the line as `#<id>`. Construct a
+/// `RequestLog(...)` directly and emit it with [`request()`](#request).
 ///
 /// Request and response bodies are deliberately absent. Logging them risks
 /// leaking passwords, tokens, and other GDPR-protected data, so the transport
@@ -128,33 +128,6 @@ pub fn auto_log(level: Level, value: a) -> Nil {
   }
 }
 
-/// Inspect `value` with `string.inspect` and log the result at `Debug` level.
-pub fn auto_debug(value: a) -> Nil {
-  auto_log(Debug, value)
-}
-
-/// Inspect `value` with `string.inspect` and log the result at `Error` level.
-pub fn auto_error(value: a) -> Nil {
-  auto_log(Error, value)
-}
-
-/// Inspect `value` with `string.inspect` and log the result at `Info` level.
-/// This is probably used the most.
-///
-/// ```gleam
-/// server.on_message(server, fn(message, _model, _client_id) {
-///   logging.auto_info(message)  // e.g. logs "INFO AddTodo(\"milk\")"
-/// })
-/// ```
-pub fn auto_info(value: a) -> Nil {
-  auto_log(Info, value)
-}
-
-/// Inspect `value` with `string.inspect` and log the result at `Warning` level.
-pub fn auto_warning(value: a) -> Nil {
-  auto_log(Warning, value)
-}
-
 /// Configure the default logger. On Erlang, this installs the `logging`
 /// package's pretty formatter and sets the level to `Info`. On JavaScript,
 /// this is a no-op, the console is always ready.
@@ -162,28 +135,13 @@ pub fn configure() -> Nil {
   do_configure()
 }
 
-/// Shortcut for `log(Debug, message)`.
-pub fn debug(message: String) -> Nil {
-  log(Debug, message)
-}
-
-/// Shortcut for `log(Error, message)`.
-pub fn error(message: String) -> Nil {
-  log(Error, message)
-}
-
-/// Shortcut for `log(Info, message)`.
-pub fn info(message: String) -> Nil {
-  log(Info, message)
-}
-
 /// Returns `True` if a message at `level` would be emitted by the current
 /// logger configuration. Useful for guarding expensive payload construction
-/// outside the `auto_*` helpers.
+/// outside [`auto_log`](#auto_log).
 ///
 /// ```gleam
 /// case logging.is_enabled(logging.Debug) {
-///   True -> logging.debug(expensive_dump(state))
+///   True -> logging.log(logging.Debug, expensive_dump(state))
 ///   False -> Nil
 /// }
 /// ```
@@ -203,11 +161,12 @@ pub fn log(level: Level, message: String) -> Nil {
 /// is built.
 ///
 /// ```gleam
-/// logging.request_log(
+/// logging.RequestLog(
 ///   method: "GET",
 ///   path: "/controls",
 ///   status: 200,
 ///   duration_milliseconds: 12,
+///   request_id: option.Some(request_id),
 /// )
 /// |> logging.request
 /// // Logs `INFO GET /controls 200 in 12ms`
@@ -220,29 +179,6 @@ pub fn request(entry: RequestLog) -> Nil {
   }
 }
 
-/// Build a [`RequestLog`](#RequestLog) from the four fields every transport
-/// can supply, leaving `request_id` as `option.None`. Add a correlation id
-/// with a record update where you have one.
-///
-/// ```gleam
-/// logging.request_log(method: "GET", path: "/", status: 200, duration_milliseconds: 3)
-/// |> fn(entry) { logging.RequestLog(..entry, request_id: option.Some(id)) }
-/// ```
-pub fn request_log(
-  method method: String,
-  path path: String,
-  status status: Int,
-  duration_milliseconds duration_milliseconds: Int,
-) -> RequestLog {
-  RequestLog(
-    method:,
-    path:,
-    status:,
-    duration_milliseconds:,
-    request_id: option.None,
-  )
-}
-
 /// Set the minimum level of log messages to emit. Messages below this level
 /// are suppressed.
 ///
@@ -251,11 +187,6 @@ pub fn request_log(
 /// DevTools is not available.
 pub fn set_level(level: Level) -> Nil {
   do_set_level(level)
-}
-
-/// Shortcut for `log(Warning, message)`.
-pub fn warning(message: String) -> Nil {
-  log(Warning, message)
 }
 
 // =============================================================================

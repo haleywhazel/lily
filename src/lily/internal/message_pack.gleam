@@ -150,6 +150,21 @@ pub fn decode_bounded(
   decode_at(bytes, 0, max_depth)
 }
 
+/// Find the value for a string key in a decoded map's entry list. Shared by
+/// the transport envelope decoder and the auto codec, both of which read
+/// string-keyed MessagePack maps.
+@internal
+pub fn lookup_string_key(
+  entries: List(#(Value, Value)),
+  key: String,
+) -> Result(Value, Nil) {
+  case entries {
+    [] -> Error(Nil)
+    [#(ValueString(k), v), ..] if k == key -> Ok(v)
+    [_, ..rest] -> lookup_string_key(rest, key)
+  }
+}
+
 fn decode_at(
   bytes: BitArray,
   depth: Int,

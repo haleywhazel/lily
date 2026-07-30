@@ -12,9 +12,7 @@ import lily/server
 @target(javascript)
 import lily/store
 @target(javascript)
-import lily/test_fixtures.{type Message, type Model, Decrement, Increment}
-@target(javascript)
-import lily/test_ref
+import lily/test_support.{type Message, type Model, Decrement, Increment}
 @target(javascript)
 import lily/topic
 @target(javascript)
@@ -26,46 +24,7 @@ import lily/transport
 
 @target(javascript)
 fn ser() {
-  test_fixtures.custom_serialiser()
-}
-
-@target(javascript)
-fn new_server() -> server.Server(Model, Message) {
-  let assert Ok(srv) =
-    server.new(
-      initial: test_fixtures.initial_model(),
-      serialiser: ser(),
-      wiring: store.wiring()
-        |> store.topic(
-          id: "chat",
-          extract: fn(message) { Ok(message) },
-          update: test_fixtures.update,
-          field_get: fn(model) { model },
-          field_set: fn(_, inner) { inner },
-        ),
-    )
-    |> server.start
-  srv
-}
-
-@target(javascript)
-/// Connect a mock client that accumulates received frames in a ref.
-/// Returns a drain function that returns and clears the accumulated frames.
-/// Drains the Connected frame sent on connect.
-fn connect_client(
-  srv: server.Server(Model, Message),
-  client_id: String,
-) -> fn() -> List(BitArray) {
-  let ref = test_ref.new([])
-  server.connect(srv, client_id: client_id, send: fn(frame) {
-    test_ref.set(ref, [frame, ..test_ref.get(ref)])
-  })
-  test_ref.set(ref, [])
-  fn() {
-    let frames = list.reverse(test_ref.get(ref))
-    test_ref.set(ref, [])
-    frames
-  }
+  test_support.custom_serialiser()
 }
 
 @target(javascript)
@@ -114,14 +73,14 @@ fn new_stateful_topic(
 
 @target(javascript)
 pub fn topic_new_returns_ok_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   topic.new(srv, id: "chat")
   |> should.be_ok
 }
 
 @target(javascript)
 pub fn topic_new_duplicate_id_returns_error_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let assert Ok(_) = topic.new(srv, id: "chat")
   topic.new(srv, id: "chat")
   |> should.be_error
@@ -133,10 +92,10 @@ pub fn topic_new_duplicate_id_returns_error_test() {
 
 @target(javascript)
 pub fn topic_broadcast_reaches_all_subscribers_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let t = new_ephemeral_topic(srv)
-  let drain1 = connect_client(srv, "c1")
-  let drain2 = connect_client(srv, "c2")
+  let drain1 = test_support.connect_client(srv, "c1")
+  let drain2 = test_support.connect_client(srv, "c2")
   server.incoming(srv, client_id: "c1", bytes: encode_subscribe("test"))
   server.incoming(srv, client_id: "c2", bytes: encode_subscribe("test"))
   let _ = drain1()
@@ -152,7 +111,7 @@ pub fn topic_broadcast_reaches_all_subscribers_test() {
 
 @target(javascript)
 pub fn topic_broadcast_to_zero_subscribers_does_not_crash_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let t = new_ephemeral_topic(srv)
   topic.broadcast(t, Increment)
   True
@@ -161,10 +120,10 @@ pub fn topic_broadcast_to_zero_subscribers_does_not_crash_test() {
 
 @target(javascript)
 pub fn topic_broadcast_from_skips_originator_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let t = new_ephemeral_topic(srv)
-  let drain1 = connect_client(srv, "c1")
-  let drain2 = connect_client(srv, "c2")
+  let drain1 = test_support.connect_client(srv, "c1")
+  let drain2 = test_support.connect_client(srv, "c2")
   server.incoming(srv, client_id: "c1", bytes: encode_subscribe("test"))
   server.incoming(srv, client_id: "c2", bytes: encode_subscribe("test"))
   let _ = drain1()
@@ -181,10 +140,10 @@ pub fn topic_broadcast_from_skips_originator_test() {
 
 @target(javascript)
 pub fn topic_client_message_on_ephemeral_relays_to_others_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let _t = new_ephemeral_topic(srv)
-  let drain1 = connect_client(srv, "c1")
-  let drain2 = connect_client(srv, "c2")
+  let drain1 = test_support.connect_client(srv, "c1")
+  let drain2 = test_support.connect_client(srv, "c2")
   server.incoming(srv, client_id: "c1", bytes: encode_subscribe("test"))
   server.incoming(srv, client_id: "c2", bytes: encode_subscribe("test"))
   let _ = drain1()
@@ -210,9 +169,9 @@ pub fn topic_client_message_on_ephemeral_relays_to_others_test() {
 
 @target(javascript)
 pub fn topic_with_store_dispatch_emits_topic_update_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let t = new_stateful_topic(srv)
-  let drain1 = connect_client(srv, "c1")
+  let drain1 = test_support.connect_client(srv, "c1")
   server.incoming(srv, client_id: "c1", bytes: encode_subscribe("chat"))
   let _ = drain1()
   topic.dispatch(t, Increment)
@@ -225,9 +184,9 @@ pub fn topic_with_store_dispatch_emits_topic_update_test() {
 
 @target(javascript)
 pub fn topic_with_store_dispatch_increments_sequence_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let t = new_stateful_topic(srv)
-  let drain1 = connect_client(srv, "c1")
+  let drain1 = test_support.connect_client(srv, "c1")
   server.incoming(srv, client_id: "c1", bytes: encode_subscribe("chat"))
   let _ = drain1()
   topic.dispatch(t, Increment)
@@ -242,10 +201,10 @@ pub fn topic_with_store_dispatch_increments_sequence_test() {
 
 @target(javascript)
 pub fn topic_dispatch_from_client_sends_acknowledge_and_updates_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let _t = new_stateful_topic(srv)
-  let drain1 = connect_client(srv, "c1")
-  let drain2 = connect_client(srv, "c2")
+  let drain1 = test_support.connect_client(srv, "c1")
+  let drain2 = test_support.connect_client(srv, "c2")
   server.incoming(srv, client_id: "c1", bytes: encode_subscribe("chat"))
   server.incoming(srv, client_id: "c2", bytes: encode_subscribe("chat"))
   let _ = drain1()
@@ -275,9 +234,9 @@ pub fn topic_dispatch_from_client_sends_acknowledge_and_updates_test() {
 
 @target(javascript)
 pub fn topic_subscribe_sends_snapshot_to_new_subscriber_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let _t = new_stateful_topic(srv)
-  let drain1 = connect_client(srv, "c1")
+  let drain1 = test_support.connect_client(srv, "c1")
   server.incoming(srv, client_id: "c1", bytes: encode_subscribe("chat"))
   drain1()
   |> list.map(decode)
@@ -285,15 +244,15 @@ pub fn topic_subscribe_sends_snapshot_to_new_subscriber_test() {
     transport.Snapshot(
       target: transport.Topic("chat"),
       sequence: 0,
-      state: test_fixtures.initial_model(),
+      state: test_support.initial_model(),
     ),
   ])
 }
 
 @target(javascript)
 pub fn topic_subscribe_to_unknown_topic_sends_rejected_test() {
-  let srv = new_server()
-  let drain1 = connect_client(srv, "c1")
+  let srv = test_support.new_server()
+  let drain1 = test_support.connect_client(srv, "c1")
   server.incoming(srv, client_id: "c1", bytes: encode_subscribe("missing"))
   drain1()
   |> list.map(decode)
@@ -306,12 +265,12 @@ pub fn topic_subscribe_to_unknown_topic_sends_rejected_test() {
 
 @target(javascript)
 pub fn topic_with_can_subscribe_false_sends_rejected_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let assert Ok(t) = topic.new(srv, id: "private")
   let _ =
     t
     |> topic.with_can_subscribe(fn(_client_id, _topic_id) { False })
-  let drain1 = connect_client(srv, "c1")
+  let drain1 = test_support.connect_client(srv, "c1")
   server.incoming(srv, client_id: "c1", bytes: encode_subscribe("private"))
   drain1()
   |> list.map(decode)
@@ -326,12 +285,12 @@ pub fn topic_with_can_subscribe_false_sends_rejected_test() {
 
 @target(javascript)
 pub fn topic_with_on_subscribe_broadcasts_hook_messages_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let assert Ok(t) = topic.new(srv, id: "announce")
   let _ =
     t
     |> topic.with_on_subscribe(fn(_client_id) { [Increment] })
-  let drain1 = connect_client(srv, "c1")
+  let drain1 = test_support.connect_client(srv, "c1")
   server.incoming(srv, client_id: "c1", bytes: encode_subscribe("announce"))
   drain1()
   |> list.map(decode)
@@ -340,13 +299,13 @@ pub fn topic_with_on_subscribe_broadcasts_hook_messages_test() {
 
 @target(javascript)
 pub fn topic_with_on_unsubscribe_broadcasts_hook_messages_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let assert Ok(t) = topic.new(srv, id: "announce")
   let _ =
     t
     |> topic.with_on_unsubscribe(fn(_client_id) { [Decrement] })
-  let drain1 = connect_client(srv, "c1")
-  let drain2 = connect_client(srv, "c2")
+  let drain1 = test_support.connect_client(srv, "c1")
+  let drain2 = test_support.connect_client(srv, "c2")
   server.incoming(srv, client_id: "c1", bytes: encode_subscribe("announce"))
   server.incoming(srv, client_id: "c2", bytes: encode_subscribe("announce"))
   let _ = drain1()
@@ -363,7 +322,7 @@ pub fn topic_with_on_unsubscribe_broadcasts_hook_messages_test() {
 
 @target(javascript)
 pub fn topic_kind_creates_topic_on_subscribe_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let assert Ok(_) =
     topic.kind(
       srv,
@@ -371,7 +330,7 @@ pub fn topic_kind_creates_topic_on_subscribe_test() {
       parse_id: int.parse,
       configure: fn(_, topic) { topic },
     )
-  let drain1 = connect_client(srv, "c1")
+  let drain1 = test_support.connect_client(srv, "c1")
   server.incoming(srv, client_id: "c1", bytes: encode_subscribe("room:42"))
   // Ephemeral kind topic, no Snapshot, no Rejected
   drain1()
@@ -380,7 +339,7 @@ pub fn topic_kind_creates_topic_on_subscribe_test() {
 
 @target(javascript)
 pub fn topic_kind_parse_failure_sends_rejected_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let assert Ok(_) =
     topic.kind(
       srv,
@@ -388,7 +347,7 @@ pub fn topic_kind_parse_failure_sends_rejected_test() {
       parse_id: int.parse,
       configure: fn(_, topic) { topic },
     )
-  let drain1 = connect_client(srv, "c1")
+  let drain1 = test_support.connect_client(srv, "c1")
   server.incoming(srv, client_id: "c1", bytes: encode_subscribe("room:abc"))
   drain1()
   |> list.map(decode)
@@ -403,10 +362,10 @@ pub fn topic_kind_parse_failure_sends_rejected_test() {
 
 @target(javascript)
 pub fn topic_stop_rejects_subsequent_subscribe_test() {
-  let srv = new_server()
+  let srv = test_support.new_server()
   let assert Ok(t) = topic.new(srv, id: "chat")
   topic.stop(t)
-  let drain1 = connect_client(srv, "c1")
+  let drain1 = test_support.connect_client(srv, "c1")
   server.incoming(srv, client_id: "c1", bytes: encode_subscribe("chat"))
   drain1()
   |> list.map(decode)

@@ -5,18 +5,11 @@
 import gleam/int
 import gleeunit/should
 import lily/component
-import lily/test_fixtures.{type Message, type Model}
+import lily/test_support.{type Message, type Model}
 
 // =============================================================================
 // HELPERS
 // =============================================================================
-
-/// View library: `html` is the same type as `String`, so `to_html` and
-/// `from_string` are both identity. This keeps the tests focused on the
-/// walker's structural behaviour rather than any specific HTML library.
-fn to_html(s: String) -> String {
-  s
-}
 
 fn from_string(s: String) -> String {
   s
@@ -27,8 +20,8 @@ fn render(
 ) -> String {
   component.render_to_string(
     view: view,
-    model: test_fixtures.initial_model(),
-    to_html: to_html,
+    model: test_support.initial_model(),
+    to_html: test_support.to_html,
     from_string: from_string,
   )
 }

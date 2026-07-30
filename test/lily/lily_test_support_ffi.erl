@@ -1,4 +1,4 @@
--module(lily_test_ref_ffi).
+-module(lily_test_support_ffi).
 
 -export([new_ref/1, get_ref/1, set_ref/2]).
 

@@ -68,3 +68,12 @@ pub fn reflect(value: a) -> Reflected
 @external(javascript, "./reflection.ffi.mjs", "construct")
 @internal
 pub fn construct(reflected: Reflected) -> Result(Dynamic, Nil)
+
+/// Reinterpret a `Dynamic` as the call site's expected type. Erlang and JS
+/// values carry no static type at runtime, so recasting is sound when the
+/// value was just rebuilt by [`construct`](#construct) and matches the shape
+/// of `a` by construction. Shared by transport and event decoding.
+@external(erlang, "lily_reflection_ffi", "passthrough")
+@external(javascript, "./reflection.ffi.mjs", "passthrough")
+@internal
+pub fn passthrough(value: Dynamic) -> a

@@ -2,6 +2,9 @@
   "name": "lily",
   "private": true,
   "description": "JavaScript test dependencies for Lily",
+  "scripts": {
+    "test:all": "gleam test --target erlang && gleam test --target javascript"
+  },
   "devDependencies": {
     "jsdom": "^25.0.0"
   }
