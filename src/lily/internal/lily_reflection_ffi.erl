@@ -1,15 +1,13 @@
 %%% Reflection FFI for Erlang. Inspects Gleam runtime values (atoms and
-%%% tagged tuples are how Gleam custom types compile on Erlang) and produces
-%%% target-neutral Reflected trees that the pure-Gleam codec can walk.
+%%% tagged tuples are how Gleam custom types compile on Erlang) into
+%%% target-neutral Reflected trees the pure-Gleam codec can walk.
 %%%
-%%% Constructor names: Gleam compiles PascalCase variants to snake_case
-%%% atoms on Erlang. The wire format uses PascalCase to match the JavaScript
-%%% representation, so we convert in both directions here.
+%%% Gleam compiles PascalCase variants to snake_case atoms on Erlang. The wire
+%%% format uses PascalCase to match JavaScript, so we convert both ways here.
 %%%
-%%% Decoding uses binary_to_existing_atom so unknown constructor names
-%%% (e.g. from a stale client speaking a different schema) raise badarg
-%%% rather than leaking a fresh atom into the table. The construct/1 wrapper
-%%% catches that and surfaces it as {error, nil}.
+%%% Decoding uses binary_to_existing_atom so unknown constructor names (e.g.
+%%% from a stale client on a different schema) raise badarg rather than leaking
+%%% a fresh atom. construct/1 catches that and surfaces {error, nil}.
 
 -module(lily_reflection_ffi).
 
@@ -55,12 +53,11 @@ reflect({set, Inner}) when is_map(Inner) ->
     Members = [reflect(K) || K <- maps:keys(Inner)],
     {reflected_set, Members};
 reflect(Value) when is_tuple(Value), tuple_size(Value) > 0 ->
-    %% Two cases share `is_tuple`: a Gleam custom type (first element is
-    %% the constructor atom) and a raw Gleam tuple `#(a, b)` (first
-    %% element is a value of any non-atom type). Discriminate by whether
-    %% the first element is an atom. Gleam custom-type tags are always
-    %% atoms; raw tuples never start with a bare atom in well-typed Gleam
-    %% code.
+    %% Two cases share `is_tuple`, a Gleam custom type (first element the
+    %% constructor atom) and a raw tuple `#(a, b)` (first element a non-atom
+    %% value). Discriminate by whether the first element is an atom. Custom-type
+    %% tags are always atoms, raw tuples never start with a bare atom in
+    %% well-typed Gleam.
     First = element(1, Value),
     case is_atom(First) of
         true ->

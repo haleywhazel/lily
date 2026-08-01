@@ -22,9 +22,9 @@
 //// decoder), reach for [`on_global()`](#on_global) with an explicit
 //// selector. Either way the listener delegates from `document`, so one
 //// registration keeps working as you patch the DOM underneath it. As with
-//// components, bindings declared inside [`each`](./component.html#each) and
-//// [`each_live`](./component.html#each_live) item bodies aren't collected, so
-//// put them on the each/each_live wrapper or any static ancestor.
+//// components, bindings declared inside [`each`](./component.html#each) item
+//// bodies aren't collected, so put them on the each wrapper or any static
+//// ancestor.
 ////
 //// ```gleam
 //// import lily/client
@@ -172,19 +172,18 @@ import lily/internal/reflection
 // =============================================================================
 
 @target(javascript)
-/// Data extracted from the DOM element that matched the event handler's
-/// selector. `dataset` contains all `data-*` attributes as name/value pairs
-/// using their original kebab-case names, so `data-card-id` becomes
-/// `"card-id"`.
+/// Data from the DOM element that matched the handler's selector. `dataset`
+/// holds all `data-*` attributes as name/value pairs in their original
+/// kebab-case, so `data-card-id` becomes `'card-id'`.
 pub type ElementData {
   ElementData(dataset: List(#(String, String)))
 }
 
 @target(javascript)
-/// A typed handle for a DOM event. The `payload` parameter is fixed by
-/// each constant (e.g. [`mouse_down`](#mouse_down) is `Event(#(Int, Int,
-/// ElementData))`), so the handler signature is checked at compile time.
-/// Pass these constants to [`on()`](#on) and friends.
+/// A typed handle for a DOM event. `payload` is fixed by each constant (e.g.
+/// [`mouse_down`](#mouse_down) is `Event(#(Int, Int, ElementData))`), so the
+/// handler signature is checked at compile time. Pass these to [`on()`](#on)
+/// and friends.
 pub opaque type Event(payload) {
   Event(name: String, event_type: EventType)
 }
@@ -210,16 +209,14 @@ pub opaque type EventOptions {
 }
 
 @target(javascript)
-/// Data extracted from a keyboard event. `key` is the key name (e.g.,
-/// `"Enter"`, `"ArrowUp"`, `"a"`). The modifier flags match the
-/// corresponding browser event properties.
+/// Data from a keyboard event. `key` is the key name (e.g. `'Enter'`,
+/// `'ArrowUp'`, `'a'`). The modifier flags match the browser event properties.
 pub type KeyEvent {
   KeyEvent(key: String, ctrl: Bool, shift: Bool, alt: Bool, meta: Bool)
 }
 
-/// Axis a [`arrow_group`](#arrow_group) navigates with the arrow keys:
-/// `Horizontal` listens to Left and Right, `Vertical` to Up and Down, and
-/// `Both` to all four.
+/// Axis an [`arrow_group`](#arrow_group) navigates. `Horizontal` for
+/// Left/Right, `Vertical` for Up/Down, `Both` for all four.
 pub type Orientation {
   Horizontal
   Vertical
@@ -231,9 +228,9 @@ pub type Orientation {
 // =============================================================================
 
 @target(erlang)
-/// Erlang no-op twin of [`arrow_grid`](#arrow_grid): returns the component
-/// unchanged so shared views compile on the server, where focus groups never
-/// register (mount is JavaScript-only).
+/// Erlang no-op twin of [`arrow_grid`](#arrow_grid), returns the component
+/// unchanged so shared views compile on the server (mount is JavaScript-only,
+/// focus groups never register there).
 pub fn arrow_grid(
   component: Component(model, message, html),
   items _items: String,
@@ -244,17 +241,15 @@ pub fn arrow_grid(
 }
 
 @target(javascript)
-/// Make a set of elements an arrow-navigable grid of `columns` columns (the
-/// roving-tabindex pattern in two dimensions). Left and right move focus by
-/// one cell, up and down by a full row. `wrap` decides whether moving past an
-/// edge loops around.
+/// Make a set of elements an arrow-navigable grid of `columns` columns
+/// (roving-tabindex in two dimensions). Left/right move by one cell, up/down by
+/// a full row. `wrap` decides whether moving past an edge loops around.
 ///
-/// Pipe-friendly and scoped like [`on`](#on): `items` is a selector
-/// **relative to the component's scope** (its `id`), so `"[role=gridcell]"`
-/// composes to `#<id> [role=gridcell]`. The group registers at
-/// [`component.mount()`](./component.html#mount) and re-queries its items on
-/// every keypress, so items rendered later (an overlay opening) are picked
-/// up automatically.
+/// Pipe-friendly and scoped like [`on`](#on): `items` is relative to the
+/// component's scope (its `id`), so `'[role=gridcell]'` composes to
+/// `#<id> [role=gridcell]`. Registers at
+/// [`component.mount()`](./component.html#mount) and re-queries items on every
+/// keypress, so items rendered later (an overlay opening) are picked up.
 pub fn arrow_grid(
   component: Component(model, message, html),
   items items: String,
@@ -268,9 +263,9 @@ pub fn arrow_grid(
 }
 
 @target(erlang)
-/// Erlang no-op twin of [`arrow_group`](#arrow_group): returns the component
-/// unchanged so shared views compile on the server, where focus groups never
-/// register (mount is JavaScript-only).
+/// Erlang no-op twin of [`arrow_group`](#arrow_group), returns the component
+/// unchanged so shared views compile on the server (mount is JavaScript-only,
+/// focus groups never register there).
 pub fn arrow_group(
   component: Component(model, message, html),
   items _items: String,
@@ -281,23 +276,21 @@ pub fn arrow_group(
 }
 
 @target(javascript)
-/// Make a set of sibling elements a single arrow-navigable group (the
-/// "roving tabindex" accessibility pattern). While focus is on one of them,
-/// the arrow keys allowed by `orientation` (plus Home and End) move focus to
-/// the previous or next item. `wrap` decides whether moving past either end
-/// loops around.
+/// Make a set of sibling elements one arrow-navigable group (the 'roving
+/// tabindex' pattern). While focus is on one, the arrow keys allowed by
+/// `orientation` (plus Home and End) move to the previous or next item. `wrap`
+/// decides whether moving past either end loops around.
 ///
-/// Pipe-friendly and scoped like [`on`](#on): `items` is a selector
-/// **relative to the component's scope** (its `id`), so `"[role=menuitem]"`
-/// composes to `#<id> [role=menuitem]`. The group registers at
-/// [`component.mount()`](./component.html#mount) and re-queries its items on
-/// every keypress, so a transient overlay's items are handled the moment it
-/// opens, with no per-open wiring.
+/// Pipe-friendly and scoped like [`on`](#on): `items` is relative to the
+/// component's scope (its `id`), so `'[role=menuitem]'` composes to
+/// `#<id> [role=menuitem]`. Registers at
+/// [`component.mount()`](./component.html#mount) and re-queries items on every
+/// keypress, so a transient overlay's items are handled the moment it opens.
 ///
-/// Unlike [`focus_trap`](#focus_trap), which is a one-active stack, several
-/// groups coexist, the active one on a keypress is whichever contains the
-/// focused element. Focus moves with `element.focus()`, so non-active items
-/// can carry `tabindex="-1"` and still be reached by the arrows.
+/// Unlike [`focus_trap`](#focus_trap)'s one-active stack, several groups
+/// coexist, the active one on a keypress is whichever contains the focused
+/// element. Focus moves with `element.focus()`, so non-active items can carry
+/// `tabindex="-1"` and still be reached by the arrows.
 pub fn arrow_group(
   component: Component(model, message, html),
   items items: String,
@@ -315,18 +308,40 @@ pub fn arrow_group(
   })
 }
 
+@target(erlang)
+/// Erlang no-op twin of [`focus_on_mount`](#focus_on_mount), returns the
+/// component unchanged so shared views compile on the server.
+pub fn focus_on_mount(
+  component: Component(model, message, html),
+  selector _selector: String,
+) -> Component(model, message, html) {
+  component
+}
+
 @target(javascript)
-/// Set the debounce delay in milliseconds. Multiple events within the
-/// window collapse to a single dispatch fired after the gap.
+/// Focus the first match of `selector` when the component renders in. The
+/// non-modal counterpart to [`focus_trap`](#focus_trap), it fires from the
+/// component's own render, not a DOM observer, so an overlay seeds focus as it
+/// opens.
+pub fn focus_on_mount(
+  component: Component(model, message, html),
+  selector selector: String,
+) -> Component(model, message, html) {
+  component.attach_event(component, fn(_runtime) { setup_focus(selector) })
+}
+
+@target(javascript)
+/// Set the debounce delay in milliseconds. Events within the window collapse to
+/// one dispatch fired after the gap.
 pub fn debounce_milliseconds(options: EventOptions, value: Int) -> EventOptions {
   EventOptions(..options, debounce_milliseconds: option.Some(value))
 }
 
 /// Recover a message encoded by [`encode_message`](#encode_message). Returns
-/// `Error(Nil)` for any string this module did not produce, so it drops
-/// straight into [`on_decoded()`](#on_decoded) as the `decoder` and coexists
-/// with handlers that read readable `data-message` tags (those decline here
-/// and are handled by their own listeners).
+/// `Error(Nil)` for any string this module did not produce, so it drops into
+/// [`on_decoded()`](#on_decoded) as the `decoder` and coexists with handlers
+/// reading readable `data-message` tags (those decline here and are handled by
+/// their own listeners).
 ///
 /// ```gleam
 /// root
@@ -348,8 +363,8 @@ pub fn decode_message(encoded: String) -> Result(message, Nil) {
 }
 
 @target(javascript)
-/// Install page-wide click dispatcher, any element carrying a `data-message`
-/// attribute dispatches its message when clicked.
+/// Install a page-wide click dispatcher, any element carrying `data-message`
+/// dispatches its message when clicked.
 ///
 /// ```gleam
 /// runtime
@@ -369,9 +384,9 @@ pub fn dispatch_messages(
   runtime
 }
 
-/// Serialise `message` into an attribute-safe string for a `data-message`
-/// attribute, so a stateless element can carry a typed message that
-/// [`decode_message()`](#decode_message) recovers at the root. It round-trips
+/// Serialise `message` into an attribute-safe string for `data-message`, so a
+/// stateless element can carry a typed message that
+/// [`decode_message()`](#decode_message) recovers at the root. Round-trips
 /// through Lily's reflection codec, the same one
 /// [`transport`](./transport.html) uses, so no separate encoder is needed.
 ///
@@ -387,10 +402,9 @@ pub fn encode_message(message: a) -> String {
 }
 
 @target(javascript)
-/// Programmatically move focus to the first element matching `selector`.
-/// Runs after the next paint so the call is safe from a `client.on_message`
-/// hook whose dispatch may have just rendered the target element. No-op if
-/// the selector matches nothing.
+/// Move focus to the first element matching `selector`. Runs after the next
+/// paint so it's safe from a `client.on_message` hook whose dispatch may have
+/// just rendered the target. No-op if nothing matches.
 ///
 /// ```gleam
 /// client.on_message(runtime, fn(message, _model) {
@@ -408,10 +422,10 @@ pub fn focus(_runtime: Runtime(model, message), selector: String) -> Nil {
 @target(javascript)
 /// Confine Tab and Shift+Tab cycling to focusable descendants of the element
 /// matching `within`. Pushes onto a stack so nested overlays (a Combobox in a
-/// Dialog in a Drawer) each keep their own scope. Focusables are re-enumerated
-/// on every Tab press, so dynamic content is handled.
+/// Dialog in a Drawer) each keep their scope. Focusables are re-enumerated on
+/// every Tab press, so dynamic content is handled.
 ///
-/// While this trap is on top, `release_on` runs on every keydown, and returning
+/// While this trap is on top, `release_on` runs on every keydown, returning
 /// `True` pops the trap and dispatches `on_exit`'s message. Opening another
 /// trap suspends this one until it pops.
 ///
@@ -430,25 +444,23 @@ pub fn focus_trap(
 
 @target(javascript)
 /// Bind an event handler to a component. The handler dispatches a message, and
-/// the `event` argument fixes the payload type so the handler is checked at
-/// compile time. Registered during
-/// [`component.mount()`](./component.html#mount).
+/// `event` fixes the payload type so it's checked at compile time. Registered
+/// during [`component.mount()`](./component.html#mount).
 ///
-/// The listener is **scoped to the component's own subtree**, firing only for
-/// `event`s inside the element matched by the component's scope selector (its
-/// `id`, via [`component.scoped`](./component.html#scoped)). Attach to a
-/// narrower or wider component to narrow or widen. For page-level listeners
-/// (`document` keydown, `window` resize, a root `data-message` decoder) use
+/// Scoped to the component's own subtree, firing only for `event`s inside the
+/// element matched by its scope selector (the `id`, via
+/// [`component.scoped`](./component.html#scoped)). Attach to a narrower or
+/// wider component to narrow or widen. For page-level listeners (`document`
+/// keydown, `window` resize, a root `data-message` decoder) use
 /// [`on_global`](#on_global).
 ///
 /// A scopeless component still works, the binding falls back to a document-wide
 /// listener and a dev warning nudges you to add an `id`. Bindings inside
-/// [`each`](./component.html#each) and
-/// [`each_live`](./component.html#each_live) item bodies are ignored, so attach
-/// them to the wrapper or a static ancestor.
+/// [`each`](./component.html#each) item bodies are ignored, so attach them to
+/// the wrapper or a static ancestor.
 ///
-/// Pass `options: event.options()` for the defaults, or build modifiers onto
-/// it with [`debounce_milliseconds`](#debounce_milliseconds) and friends.
+/// Pass `options: event.options()` for the defaults, or build modifiers with
+/// [`debounce_milliseconds`](#debounce_milliseconds) and friends.
 ///
 /// ```gleam
 /// component.simple(slice: ..., render: ...)
@@ -476,10 +488,9 @@ pub fn on(
 }
 
 @target(javascript)
-/// Bind an event handler whose decoder may decline to dispatch by
-/// returning `Error(Nil)`. Useful for [`click`](#click) (the `data-message`
-/// attribute may not match a known message) and form events (validation
-/// failure should skip dispatching).
+/// Bind an event handler whose decoder may decline by returning `Error(Nil)`.
+/// Useful for [`click`](#click) (the `data-message` may not match a known
+/// message) and form events (validation failure should skip dispatch).
 ///
 /// ```gleam
 /// component.fragment([...])
@@ -510,16 +521,15 @@ pub fn on_decoded(
 }
 
 @target(javascript)
-/// The page-level counterpart to [`on`](#on), binding a handler with an
-/// explicit, verbatim `selector` rather than scoping to the component's
-/// subtree. Use it for listeners genuinely tied to the page rather than one
-/// component, a `document` keydown, a `window` resize, or the app-root
-/// `data-message` click decoder.
+/// The page-level counterpart to [`on`](#on), binding with an explicit,
+/// verbatim `selector` rather than scoping to the component's subtree. Use it
+/// for listeners tied to the page rather than one component, a `document`
+/// keydown, a `window` resize, or the app-root `data-message` click decoder.
 ///
-/// It still takes a `component` first so it composes into the view tree the
-/// same way, the component's scope is ignored and only the mount-time tree walk
-/// that collects the binding matters. `selector` is used exactly as given, so
-/// the listener survives arbitrary DOM churn.
+/// Still takes a `component` first so it composes into the view tree the same
+/// way, the scope is ignored and only the mount-time tree walk that collects
+/// the binding matters. `selector` is used exactly as given, so the listener
+/// survives arbitrary DOM churn.
 ///
 /// ```gleam
 /// root
@@ -548,9 +558,8 @@ pub fn on_global(
 
 @target(javascript)
 /// The [`on_decoded`](#on_decoded) counterpart to [`on_global`](#on_global), a
-/// page-level binding whose decoder may decline with `Error(Nil)`. The
-/// canonical use is the app-root click decoder that recovers every
-/// `data-message` dispatch.
+/// page-level binding whose decoder may decline with `Error(Nil)`. Canonical
+/// use is the app-root click decoder recovering every `data-message` dispatch.
 ///
 /// ```gleam
 /// root
@@ -581,17 +590,15 @@ pub fn on_global_decoded(
 }
 
 @target(javascript)
-/// Set the handler to fire only the first time. After that, all matching
-/// events are ignored.
+/// Fire only on the first matching event, ignore the rest.
 pub fn once(options: EventOptions) -> EventOptions {
   EventOptions(..options, once: True)
 }
 
 @target(javascript)
-/// Build an [`EventOptions`](#EventOptions) with all modifiers off:
-/// no debounce, no throttle, fires every time, does not stop propagation
-/// or prevent default. Compose with the builder functions to enable
-/// modifiers.
+/// Build an [`EventOptions`](#EventOptions) with all modifiers off: no
+/// debounce, no throttle, fires every time, no stop-propagation or
+/// prevent-default. Compose with the builder functions to enable modifiers.
 pub fn options() -> EventOptions {
   EventOptions(
     debounce_milliseconds: option.None,
@@ -603,18 +610,18 @@ pub fn options() -> EventOptions {
 }
 
 @target(javascript)
-/// Set `event.preventDefault()` to fire on every matching event,
-/// regardless of debounce or throttle. Use to suppress browser defaults
-/// (e.g. drop-target behaviour, native form submission).
+/// Fire `event.preventDefault()` on every matching event, regardless of
+/// debounce or throttle. Use to suppress browser defaults (drop-target
+/// behaviour, native form submission).
 pub fn prevent_default(options: EventOptions) -> EventOptions {
   EventOptions(..options, prevent_default: True)
 }
 
 @target(javascript)
-/// Remove a focus group registered with [`arrow_group`](#arrow_group),
-/// matched by the same `items` selector. No-op if no such group is
-/// registered. Call when a transient group (a menu, say) closes, persistent
-/// groups (a radio group always on the page) need never release.
+/// Remove a focus group registered with [`arrow_group`](#arrow_group), matched
+/// by the same `items` selector. No-op if none is registered. Call when a
+/// transient group (a menu) closes, persistent groups (an always-present radio
+/// group) need never release.
 pub fn release_arrow_group(
   _runtime: Runtime(model, message),
   items items: String,
@@ -623,26 +630,25 @@ pub fn release_arrow_group(
 }
 
 @target(javascript)
-/// Pop the top focus trap from the stack. If another trap was below it,
-/// that trap becomes active again. No-op when the stack is empty. Does
-/// not dispatch the popped trap's `on_exit` message, call this when the
-/// caller is already running its own close logic and just needs the trap
-/// unhooked (e.g. a click on a Cancel button that dispatches `CloseDialog`
-/// and restores focus separately).
+/// Pop the top focus trap from the stack, reactivating the one below if any.
+/// No-op when empty. Does not dispatch the popped trap's `on_exit`, call this
+/// when the caller runs its own close logic and just needs the trap unhooked
+/// (a Cancel click that dispatches `CloseDialog` and restores focus
+/// separately).
 pub fn release_focus_trap(_runtime: Runtime(model, message)) -> Nil {
   release_focus_trap_ffi()
 }
 
 @target(javascript)
-/// Set `event.stopPropagation()` to fire before the inner handler. Useful
-/// for delegated events that should not bubble further up.
+/// Fire `event.stopPropagation()` before the inner handler. Useful for
+/// delegated events that shouldn't bubble further up.
 pub fn stop_propagation(options: EventOptions) -> EventOptions {
   EventOptions(..options, stop_propagation: True)
 }
 
 @target(javascript)
-/// Set the throttle interval in milliseconds. Events fire at most once
-/// per interval, subsequent events within the window are dropped.
+/// Set the throttle interval in milliseconds. Events fire at most once per
+/// interval, the rest within the window are dropped.
 pub fn throttle_milliseconds(options: EventOptions, value: Int) -> EventOptions {
   EventOptions(..options, throttle_milliseconds: option.Some(value))
 }
@@ -653,46 +659,65 @@ pub fn throttle_milliseconds(options: EventOptions, value: Int) -> EventOptions 
 /// selector's target clicked, so dismissal flows through the ordinary
 /// `data-message` delegation. Unlike [`watch_focus_traps`](#watch_focus_traps)
 /// it does not trap focus, so it suits non-modal overlays (popover, menu,
-/// select, date picker) that should close on Escape while staying non-modal.
+/// select, date picker) that close on Escape while staying non-modal.
 ///
 /// A component library renders the data attribute on its overlays and calls
-/// this once at startup. Idempotent: repeated calls install a single handler.
+/// this once at startup. Idempotent, repeated calls install one handler.
 pub fn watch_escape_dismiss() -> Nil {
   watch_escape_dismiss_ffi()
 }
 
 @target(javascript)
 /// Install a document-level drag-and-drop handler for file dropzones. A
-/// dropzone opts in with `data-lily-file-drop="<input selector>"`: dropping
+/// dropzone opts in with `data-lily-file-drop="<input selector>"`, dropping
 /// files onto it assigns them to that input and fires a `change` event, so
 /// drops flow through the same path as picking files. While a drag is over the
 /// zone it carries a `data-lily-file-dragover` attribute for styling.
 ///
 /// A component library renders the data attribute on its dropzones and calls
-/// this once at startup. Idempotent: repeated calls install a single handler.
+/// this once at startup. Idempotent, repeated calls install one handler.
 pub fn watch_file_drops() -> Nil {
   watch_file_drops_ffi()
 }
 
 @target(javascript)
-/// Install a document-level observer that activates a focus trap on any
-/// element carrying `data-lily-focus-trap`, declaratively, for as long as it
-/// is in the DOM. This is the hands-off counterpart to
-/// [`focus_trap`](#focus_trap): rather than trapping imperatively from an
-/// update hook, an element declares its own trap and this manages the
-/// lifecycle. While the element is present, Tab and Shift+Tab are confined to
-/// it and focus is seeded to `data-lily-focus-trap-initial` (or the first
-/// focusable descendant), when it leaves the DOM, focus returns to whatever
-/// was focused before. If it also carries `data-lily-focus-trap-dismiss` (a
-/// CSS selector), the Escape key clicks that element, so dismissal flows
-/// through the ordinary `data-message` delegation, without it Escape is inert.
+/// Install a document-level observer that activates a focus trap on any element
+/// carrying `data-lily-focus-trap`, declaratively, for as long as it is in the
+/// DOM. The hands-off counterpart to [`focus_trap`](#focus_trap), an element
+/// declares its own trap and this manages the lifecycle. While present, Tab and
+/// Shift+Tab are confined to it and focus is seeded to
+/// `data-lily-focus-trap-initial` (or the first focusable descendant), when it
+/// leaves the DOM focus returns to whatever was focused before. If it also
+/// carries `data-lily-focus-trap-dismiss` (a CSS selector), Escape clicks that
+/// element so dismissal flows through `data-message` delegation, without it
+/// Escape is inert.
 ///
-/// The primitive has no notion of dialogs or modals: any element can declare
-/// a trap (a wizard step, a command palette, a modal recipe). A component
-/// library renders the data attributes and calls this once at startup.
-/// Idempotent: repeated calls install a single observer.
+/// No notion of dialogs or modals, any element can declare a trap (a wizard
+/// step, a command palette, a modal recipe). A component library renders the
+/// data attributes and calls this once at startup. Idempotent, repeated calls
+/// install one observer.
 pub fn watch_focus_traps() -> Nil {
   watch_focus_traps_ffi()
+}
+
+@target(javascript)
+/// Manage native `<details>` popups carrying `data-lily-focus-on-open`. Opening
+/// seeds focus on the selected option (`aria-selected="true"`) or first
+/// focusable, so an [`arrow_group`](#arrow_group) and typeahead work with no
+/// manual tab in. Escape closes it back to the summary, and focus leaving it
+/// closes it so it never blocks the next tab stop. Idempotent.
+pub fn watch_details_open() -> Nil {
+  watch_details_open_ffi()
+}
+
+@target(javascript)
+/// Install a document-level handler that dismisses a model-controlled popup
+/// when focus leaves it. A panel opts in with `data-lily-focusout-dismiss` set
+/// to its trigger selector, and the trigger is clicked (its toggle message
+/// closes the popup) only if still open, so the tab moves on and never lands
+/// behind an open panel. Idempotent.
+pub fn watch_focusout_dismiss() -> Nil {
+  watch_focusout_dismiss_ffi()
 }
 
 @target(javascript)
@@ -705,10 +730,9 @@ pub const blur: Event(ElementData) = Event("blur", TypeElement)
 pub const change: Event(String) = Event("change", TypeValue)
 
 @target(javascript)
-/// `click` event, uses delegation against the `data-message` attribute. The
-/// payload is the matched element's `data-message` value. Pair with
-/// [`on_decoded()`](#on_decoded) so unknown messages can be skipped via
-/// `Error(Nil)`.
+/// `click` event, delegated against `data-message`. Payload is the matched
+/// element's `data-message` value. Pair with [`on_decoded()`](#on_decoded) so
+/// unknown messages can be skipped via `Error(Nil)`.
 pub const click: Event(String) = Event("click", TypeClick)
 
 @target(javascript)
@@ -770,20 +794,19 @@ pub const drop: Event(#(Int, Int, ElementData)) = Event(
 pub const focus_event: Event(ElementData) = Event("focus", TypeElement)
 
 @target(javascript)
-/// `input` on a form, payload is the current `FormData` as a list of
-/// name/value pairs. The uncontrolled-form counterpart of [`input`](#input).
-/// Pair with [`on_decoded()`](#on_decoded) to skip dispatch on validation
-/// failure.
+/// `input` on a form, payload is the current `FormData` as name/value pairs.
+/// The uncontrolled-form counterpart of [`input`](#input). Pair with
+/// [`on_decoded()`](#on_decoded) to skip dispatch on validation failure.
 pub const form_change: Event(List(#(String, String))) = Event(
   "input",
   TypeFormChange,
 )
 
 @target(javascript)
-/// `submit` on a form, payload is the submitted `FormData` as a list of
-/// name/value pairs. Prevents the browser's default form submission and
-/// resets the form after the handler runs. Pair with
-/// [`on_decoded()`](#on_decoded) to skip dispatch on validation failure.
+/// `submit` on a form, payload is the submitted `FormData` as name/value pairs.
+/// Prevents the browser's default submission and resets the form after the
+/// handler runs. Pair with [`on_decoded()`](#on_decoded) to skip dispatch on
+/// validation failure.
 pub const form_submit: Event(List(#(String, String))) = Event(
   "submit",
   TypeFormSubmit,
@@ -875,10 +898,9 @@ pub const resize: Event(Nil) = Event("resize", TypeEmpty)
 pub const scroll: Event(#(Int, Int)) = Event("scroll", TypeScroll)
 
 @target(javascript)
-/// `submit` event, fires when a form is submitted, with no payload.
-/// Prevents the browser's default form submission. Use for controlled
-/// forms (input state already in the model). For uncontrolled forms,
-/// use [`form_submit`](#form_submit).
+/// `submit` event, no payload. Prevents the browser's default submission. Use
+/// for controlled forms (input state already in the model), for uncontrolled
+/// forms use [`form_submit`](#form_submit).
 pub const submit: Event(Nil) = Event("submit", TypeSubmit)
 
 @target(javascript)
@@ -928,9 +950,8 @@ fn compose_items(
   component: Component(model, message, html),
   items: String,
 ) -> String {
-  // `items` is relative to the component's scope, so an arrow group declares
-  // `[role=menuitem]` and it resolves against `#<id>`. A scopeless component
-  // falls back to treating `items` as an absolute selector.
+  // `items` is relative to the component's scope, so `[role=menuitem]`
+  // resolves against `#<id>`. A scopeless component treats `items` as absolute.
   case component.scope(component) {
     option.Some(scope) -> scope <> " " <> items
     option.None -> items
@@ -944,10 +965,9 @@ fn register_event(
   options: EventOptions,
   dispatch: fn(payload) -> Nil,
 ) -> Nil {
-  // Each Event constant pairs `event_type` with the phantom `payload`
-  // type at the declaration site, so the casts below are safe by
-  // construction, the user's handler signature is already constrained
-  // to match.
+  // Each Event constant pairs `event_type` with the phantom `payload` type at
+  // its declaration, so the casts below are safe by construction, the handler
+  // signature is already constrained to match.
   let unpacked = unpack_options(options)
   case event.event_type {
     TypeClick -> {
@@ -1025,7 +1045,7 @@ fn register_event(
     }
 
     TypeSubmit -> {
-      // Bake prevent-default in regardless of caller options.
+      // Bake prevent-default in regardless of caller options
       let typed: fn(Nil) -> Nil = unsafe_cast(dispatch)
       let with_prevent_default = unpack_options(prevent_default(options))
       setup_simple_event_with_options(
@@ -1053,8 +1073,8 @@ fn register_event(
 @target(javascript)
 fn resolve_scope(component: Component(model, message, html)) -> String {
   // Scoped binders confine the listener to the component's own subtree. A
-  // scopeless component still works via a document-wide fallback, but that is
-  // the old global footgun, so warn to nudge an `id` / `component.scoped`.
+  // scopeless component falls back to document-wide, the old global footgun,
+  // so warn to nudge an `id` / `component.scoped`.
   case component.scope(component) {
     option.Some(selector) -> selector
     option.None -> {
@@ -1221,6 +1241,14 @@ fn watch_file_drops_ffi() -> Nil
 @target(javascript)
 @external(javascript, "./event.ffi.mjs", "watchFocusTraps")
 fn watch_focus_traps_ffi() -> Nil
+
+@target(javascript)
+@external(javascript, "./event.ffi.mjs", "watchDetailsOpen")
+fn watch_details_open_ffi() -> Nil
+
+@target(javascript)
+@external(javascript, "./event.ffi.mjs", "watchFocusoutDismiss")
+fn watch_focusout_dismiss_ffi() -> Nil
 
 @target(javascript)
 @external(javascript, "./event.ffi.mjs", "warnScopeless")

@@ -9,24 +9,19 @@
 //// an event listener). You never reach for the constructors directly, you call
 //// the builder function for the type you want.
 ////
-//// There are seven types, each with its own performance profile:
+//// There are five types, each with its own performance profile:
 ////
 //// 1. [`static`](#static) renders once and never updates
-//// 2. [`simple`](#simple) re-renders via innerHTML when the slice changes
-//// 3. [`live`](#live) applies targeted patches instead of full re-renders
-//// 4. [`each`](#each) handles keyed lists with innerHTML rendering
-//// 5. [`each_live`](#each_live) handles keyed lists with patch-based rendering
-//// 6. [`fragment`](#fragment) groups other components into one slot
-//// 7. [`switch`](#switch) renders one of several children by a discriminator,
-////    keeping DOM identity while the discriminator is unchanged
+//// 2. [`simple`](#simple) morphs the subtree in place when the slice changes
+//// 3. [`live`](#live) applies targeted patches you hand-write
+//// 4. [`each`](#each) handles keyed lists
+//// 5. [`fragment`](#fragment) groups other components into one slot
 ////
-//// `simple` swaps the component's entire DOM on every slice change, which
-//// wipes focus, selection, and any half-typed input. `live` applies targeted
-//// patches instead and leaves existing nodes untouched, so focus and typed
-//// text survive the update. Anywhere there's an `<input>` or `<textarea>`,
-//// `live` is almost certainly what you want, and the same rule carries to
-//// lists, prefer `each_live` over `each` when items contain inputs or must not
-//// lose focus.
+//// `simple` morphs the subtree in place on every slice change, leaving
+//// existing nodes untouched, so focus, selection, and any half-typed input
+//// survive the update. Reach for `simple` almost everywhere. `live` lets you
+//// hand-write the patches instead, the escape hatch for a profiled hot path
+//// where a large subtree updates so often that the morph walk is too costly.
 ////
 //// On top of its type, a component carries decorations, each applied with a
 //// pipe: [`transition`](#transition) adds CSS enter/exit classes timed to a
@@ -48,11 +43,10 @@
 ////   initial: fn(slot) {
 ////     html.section([attribute.class("column")], [
 ////       html.h2([], [html.text("Title")]),
-////       slot(component.each_live(
+////       slot(component.each(
 ////         slice: fn(model) { cards_for(model) },
 ////         key: fn(card) { card.id },
-////         initial: render_card,
-////         patch: card_patches,
+////         render: render_card,
 ////       )),
 ////     ])
 ////   },
@@ -113,10 +107,10 @@
 ////
 //// Every component declares a `slice` that pulls just the data it needs out of
 //// the model. The runtime caches the last slice and skips rendering when it's
-//// unchanged, using reference equality by default, or structural equality if
-//// you pipe on [`structural`](#structural) (handy when the slice builds a new
-//// tuple or record each time). Keep slices cheap and do the heavy lifting in
-//// `render`, which the comparison gates. Here's the whole thing end to end:
+//// unchanged, comparing structurally (deep equality), so a slice that builds a
+//// new tuple or record each time still compares equal by value. Keep slices
+//// cheap and do the heavy lifting in `render`, which the comparison gates.
+//// Here's the whole thing end to end:
 ////
 //// ```gleam
 //// import lily/client
@@ -171,9 +165,8 @@
 //// Event handlers pipe onto the component they belong to via
 //// [`event.on()`](./event.html#on), and the walk that [`mount`](#mount) does
 //// registers each binding once at startup. Events declared inside
-//// [`each`](#each) and [`each_live`](#each_live) item bodies are not
-//// collected, so put them on the each/each_live wrapper or any static
-//// ancestor instead (probably a div).
+//// [`each`](#each) item bodies are not collected, so put them on the each
+//// wrapper or any static ancestor instead (probably a div).
 ////
 //// Building components and rendering them to a string with
 //// [`render_to_string`](#render_to_string) work on both targets so that the
@@ -198,31 +191,26 @@ import lily/client.{type Runtime}
 // PUBLIC TYPES
 // =============================================================================
 
-/// Component is the core type representing renderable content in Lily. The
-/// constructors for Component is kept opaque, use the associated functions to
-/// create components instead. The `html` type parameter is user-provided and
-/// can be any type that represents HTML markup.
+/// The core type for renderable content. Opaque, use the builder functions to
+/// create components. The `html` type parameter is user-provided, any type
+/// representing HTML markup.
 ///
 /// Each dynamic [`ComponentType`](#ComponentType) variant (all but `Static`
-/// and `Fragment`) carries a `compare_structural` flag. `False` (the
-/// default) means slice changes are detected by reference equality (`===`,
-/// O(1)), `True` means structural equality (`==`, O(n)) and is set by
-/// piping a component through [`structural`](#structural). Use structural
-/// when the slice constructs new tuples, lists, or records on every call.
+/// and `Fragment`) detects slice changes by structural equality (`==`, deep),
+/// so a slice constructing new tuples, lists, or records each call still
+/// compares equal by value.
 ///
-/// Components compile on both targets. The constructor functions and the
-/// pure walker [`render_to_string`](#render_to_string) work on Erlang and
-/// JavaScript alike. [`mount`](#mount) is JavaScript-only because it
-/// mutates the live DOM.
+/// Compiles on both targets. Builders and the pure walker
+/// [`render_to_string`](#render_to_string) work on Erlang and JavaScript alike.
+/// [`mount`](#mount) is JavaScript-only, it mutates the live DOM.
 pub opaque type Component(model, message, html) {
-  /// A component is a `component_type` (how it renders) plus a list of
-  /// `decorations` (cross-cutting attributes layered on top: a CSS
-  /// transition, event listeners, a connection gate). Decorations are
-  /// applied innermost-first in list order, so the last one wraps outermost.
+  /// A `component_type` (how it renders) plus `decorations` (cross-cutting
+  /// attributes layered on top: CSS transition, event listeners, connection
+  /// gate). Applied innermost-first in list order, so the last wraps outermost.
   ///
-  /// `scope` is the component's own CSS selector (usually `#<id>`), recorded
-  /// by [`scoped`](#scoped). The `event.on*` binders read it to confine their
-  /// listeners to this component's subtree, `None` means no scope was set.
+  /// `scope` is the component's own CSS selector (usually `#<id>`), recorded by
+  /// [`scoped`](#scoped). The `event.on*` binders read it to confine listeners
+  /// to this subtree, `None` means no scope was set.
   Component(
     component_type: ComponentType(model, message, html),
     decorations: List(Decoration(model)),
@@ -230,15 +218,12 @@ pub opaque type Component(model, message, html) {
   )
 }
 
-/// Patches are DOM updates to apply to a component, avoiding a full re-render
-/// used for [`component.live`](#live) and
-/// [`component.each_live`](#each_live). The `target` field is a CSS selector
-/// relative to the component's root element, with an empty string provided
-/// if the component's root element is itself. Patches are scoped to their
-/// component, preventing cross-component interference. The type compiles
-/// on both targets so it can appear in the [`Component`](#Component)'s
-/// patch-bearing variants on Erlang too, the patches themselves are only
-/// applied by [`mount`](#mount), which is JavaScript-only.
+/// Targeted DOM updates for [`component.live`](#live), avoiding a full
+/// re-render. `target` is a CSS selector relative to the component's root, an
+/// empty string meaning the root itself. Patches are scoped to their component,
+/// preventing cross-component interference. Compiles on both targets so it can
+/// appear in [`Component`](#Component)'s patch-bearing variants on Erlang too,
+/// but patches only apply via [`mount`](#mount), which is JavaScript-only.
 pub type Patch {
   /// Remove an HTML attribute
   RemoveAttribute(target: String, name: String)
@@ -246,15 +231,14 @@ pub type Patch {
   SetAttribute(target: String, name: String, value: String)
   /// Set a CSS style property
   SetStyle(target: String, property: String, value: String)
-  /// Set the textContent of an element (wipes children)
+  /// Set an element's textContent (wipes children)
   SetText(target: String, value: String)
 }
 
-/// A function that accepts a child `Component` and returns a placeholder
-/// value of your `html` type marking where that child will be rendered.
-/// Passed as the first parameter of every `static`, `simple`, and `live`
-/// content function. Call it inline wherever you want the child to appear;
-/// call order determines DOM position.
+/// Takes a child `Component` and returns an `html` placeholder marking where
+/// it renders. Passed as the first parameter of every `static`, `simple`, and
+/// `live` content function. Call inline where the child should appear, call
+/// order determines DOM position.
 pub type Slotter(model, message, html) =
   fn(Component(model, message, html)) -> html
 
@@ -263,17 +247,12 @@ pub type Slotter(model, message, html) =
 // =============================================================================
 
 /// A keyed dynamic list, reconciled by add/remove/reorder so only changed
-/// items update. Like [`each_live`](#each_live) but each changed item is
-/// re-rendered via `innerHTML` rather than patched.
+/// items update.
 ///
-/// Avoid `each` for items containing `<input>`, `<textarea>`, or `<select>`,
-/// the `innerHTML` replace destroys focus and in-progress input. Use
-/// [`each_live`](#each_live) there.
-///
-/// `slice` returns a `List`, and `render` returns a `Component` per item (wrap
-/// plain HTML with [`static`](#static)). Keys can be any type, they are
-/// stringified internally. Event bindings inside `render` aren't collected, so
-/// put per-list events on this component or any ancestor.
+/// `slice` returns a `List`, `render` returns a `Component` per item (wrap
+/// plain HTML with [`static`](#static)). Keys can be any type, stringified
+/// internally. Event bindings inside `render` aren't collected, so put per-list
+/// events on this component or an ancestor.
 ///
 /// ```gleam
 /// component.each(
@@ -293,53 +272,13 @@ pub fn each(
   key key: fn(item) -> key,
   render render: fn(item) -> Component(model, message, html),
 ) -> Component(model, message, html) {
-  new_component(Each(
-    slice: fn(model) { list_dynamic(slice(model)) },
-    key: fn(item) { string.inspect(key(from_dynamic(item))) },
-    render: fn(item) { render(from_dynamic(item)) },
-    compare_structural: False,
-  ))
-}
-
-/// A keyed dynamic list, reconciled by add/remove/reorder so only changed
-/// items update. Like [`each`](#each) but items are patched instead of
-/// re-rendered, which suits frequently-updated items.
-///
-/// `slice` returns a `List`. `initial` returns the first-render `Component`
-/// per item (wrap plain HTML with [`static`](#static)), and `patch` returns
-/// the patches for updates (the item's root must survive). Keys can be any
-/// type, they are stringified internally. Event bindings inside `initial`
-/// aren't collected, so put per-list events on this component or any ancestor.
-///
-/// ```gleam
-/// component.each_live(
-///   slice: fn(model) { model.series },
-///   key: fn(series) { series.id },
-///   initial: fn(series) {
-///     component.static(fn(_) {
-///       html.div([class("display-data")], [
-///         html.span([class("value")], [html.text("0")])
-///       ])
-///     })
-///   },
-///   patch: fn(series) {
-///     [SetText(".value", int.to_string(series.value))]
-///   },
-/// )
-/// ```
-pub fn each_live(
-  slice slice: fn(model) -> List(item),
-  key key: fn(item) -> key,
-  initial initial: fn(item) -> Component(model, message, html),
-  patch patch: fn(item) -> List(Patch),
-) -> Component(model, message, html) {
-  new_component(EachLive(
-    slice: fn(model) { list_dynamic(slice(model)) },
-    key: fn(item) { string.inspect(key(from_dynamic(item))) },
-    initial: fn(item) { initial(from_dynamic(item)) },
-    patch: fn(item) { patch(from_dynamic(item)) },
-    compare_structural: False,
-  ))
+  new_component(
+    Each(
+      slice: fn(model) { list_dynamic(slice(model)) },
+      key: fn(item) { string.inspect(key(from_dynamic(item))) },
+      render: fn(item) { render(from_dynamic(item)) },
+    ),
+  )
 }
 
 /// Returns several components from one function. Children render in order and
@@ -360,19 +299,18 @@ pub fn fragment(
   new_component(Fragment(children))
 }
 
-/// Renders an initial HTML structure once, then applies targeted DOM patches
-/// on update instead of the full `innerHTML` replace of [`simple`](#simple),
-/// so existing nodes survive between updates.
+/// Renders initial HTML once, then applies the targeted patches you return on
+/// update. A hand-written diff, the escape hatch for a profiled hot path where
+/// [`simple`](#simple)'s morph walk is too costly (a large subtree updating at
+/// high frequency where each change touches little).
 ///
-/// Reach for `live` whenever the component holds `<input>`, `<textarea>`, or
-/// `<select>`, since preserving nodes keeps focus, cursor, and in-progress
-/// input intact. It also suits high-frequency updates like drag-and-drop,
-/// animation, and real-time data.
+/// [`simple`](#simple) already preserves nodes, so `live` isn't needed just to
+/// keep focus or in-progress input, use it only for the hot-path case.
 ///
 /// `patch` returns `Patch` values, each targeting an element under the
 /// component root by CSS selector. `initial`'s first parameter is a
-/// [`Slotter`](#Slotter), call `slot(child)` where a nested component should
-/// go, or ignore it with `_`.
+/// [`Slotter`](#Slotter), call `slot(child)` for a nested component or ignore
+/// it with `_`.
 ///
 /// ```gleam
 /// component.live(
@@ -396,29 +334,30 @@ pub fn live(
   initial initial: fn(Slotter(model, message, html)) -> html,
   patch patch: fn(a) -> List(Patch),
 ) -> Component(model, message, html) {
-  new_component(Live(
-    slice: fn(model) { to_dynamic(slice(model)) },
-    initial: initial,
-    apply: fn(data) { patch(from_dynamic(data)) },
-    compare_structural: False,
-  ))
+  new_component(
+    Live(
+      slice: fn(model) { to_dynamic(slice(model)) },
+      initial: initial,
+      apply: fn(data) { patch(from_dynamic(data)) },
+    ),
+  )
 }
 
 @target(javascript)
-/// The entry point for rendering. Mounts a component tree onto a DOM element,
+/// The rendering entry point. Mounts a component tree onto a DOM element,
 /// subscribes it to the store, and registers every event binding attached via
 /// [`event.on()`](./event.html#on) and friends.
 ///
 /// - `selector`: the mount point, e.g. `"#app"`
-/// - `to_html`: converts your `html` type to a `String`, `element.to_string`
-///   for Lustre or `fn(html) { html }` for raw strings
-/// - `to_slot`: returns an `html` placeholder that serialises to
+/// - `to_html`: converts your `html` type to `String`, `element.to_string` for
+///   Lustre or `fn(html) { html }` for raw strings
+/// - `to_slot`: returns an `html` placeholder serialising to
 ///   `<lily-slot></lily-slot>`, used when nesting via [`Slotter`](#Slotter)
-/// - `view`: takes the model and returns the root component tree
+/// - `view`: takes the model, returns the root component tree
 ///
 /// Call `mount` more than once on a shared runtime, with different selectors,
-/// to drive several DOM roots from one model. This is how overlays and portals
-/// work. Mounting the same selector again replaces the previous mount.
+/// to drive several DOM roots from one model (how overlays and portals work).
+/// Mounting the same selector again replaces the previous mount.
 ///
 /// ```gleam
 /// runtime
@@ -438,35 +377,33 @@ pub fn mount(
 ) -> Runtime(model, message) {
   let model = client.get_current_model(runtime)
   let tree = view(model)
-  // Render handles binding registration too. renderComponent on the JS
-  // side queues every component's `Listener` decorations (including those
-  // inside slot children, which the Gleam-side tree walk can't reach
-  // because slot children are constructed via the slotter callback at
-  // render time). render_tree drains the queue after innerHTML, so
-  // element-scoped listeners find their target in the DOM.
+  // Render also registers bindings. renderComponent (JS) queues every
+  // component's `Listener` decorations, including slot children the Gleam
+  // tree walk can't reach (they're built via the slotter callback at render
+  // time). render_tree drains the queue after innerHTML, so element-scoped
+  // listeners find their target in the DOM.
   render_tree(runtime, selector, tree, model, to_html, to_slot)
 
   runtime
 }
 
 /// Render a view to an HTML string without touching the DOM, walking the
-/// [`Component`](#Component) tree and piping each render through `to_html`. It
-/// compiles on both targets, so you can produce the initial markup ahead of
-/// time, at build time or from a plain request handler. Pair it with
+/// [`Component`](#Component) tree and piping each render through `to_html`.
+/// Compiles on both targets, so you can produce initial markup ahead of time,
+/// at build time or from a plain request handler. Pair with
 /// [`transport.encode_initial_snapshot`](./transport.html#encode_initial_snapshot)
 /// and [`client.hydrate`](./client.html#hydrate) so the client adopts the
-/// pre-rendered DOM instead of re-rendering. This is static pre-rendering plus
-/// hydration, not per-request server-side rendering.
+/// pre-rendered DOM. This is static pre-rendering plus hydration, not
+/// per-request SSR.
 ///
 /// Nested components placed via the [`Slotter`](#Slotter) callback render
-/// inline, `from_string` wraps each child's string back into an `html` value.
-/// For raw-HTML libraries it's the identity, for Lustre pass an
-/// `unsafe_raw_html`-style constructor.
+/// inline, `from_string` wraps each child's string back into an `html` value,
+/// the identity for raw-HTML libraries, an `unsafe_raw_html`-style constructor
+/// for Lustre.
 ///
-/// Event bindings, focus, and CSS transitions are skipped since they only make
-/// sense on a live DOM. For [`live`](#live) and [`each_live`](#each_live) the
-/// `initial` baseline renders, patches apply only at runtime via
-/// [`mount`](#mount).
+/// Event bindings, focus, and CSS transitions are skipped, they only make sense
+/// on a live DOM. For [`live`](#live) the `initial` baseline renders, patches
+/// apply only at runtime via [`mount`](#mount).
 ///
 /// ```gleam
 /// let html = component.render_to_string(
@@ -486,11 +423,10 @@ pub fn render_to_string(
 }
 
 /// Disables a component while the transport is disconnected. `connected` reads
-/// the connection status from the model, and when it returns `False` Lily adds
+/// connection status from the model, and when it returns `False` Lily adds
 /// `data-lily-disabled="true"`, `aria-disabled="true"`, and a
 /// `lily-disconnected` class to the root and stops event handlers firing.
-/// Style the disconnected state however you like with CSS. Pipe it on after
-/// building a component.
+/// Style the disconnected state with CSS. Pipe on after building a component.
 ///
 /// ```gleam
 /// component.simple(
@@ -508,15 +444,15 @@ pub fn require_connection(
   add_decoration(component, Connection(connected))
 }
 
-/// The most common component type. It subscribes to a slice of the model and
-/// re-renders the whole component through `innerHTML` when that slice changes.
+/// The default component. Subscribes to a slice and re-renders on change,
+/// morphing onto the live DOM so existing nodes survive (focus, cursor,
+/// in-progress input, and nested reactive children all kept).
 ///
 /// `render` receives the slice value and a [`Slotter`](#Slotter), call
-/// `slot(child)` where a nested component should go, or ignore it with `_`.
+/// `slot(child)` for a nested component or ignore it with `_`.
 ///
-/// Avoid `simple` for components holding `<input>`, `<textarea>`, or
-/// `<select>`, the `innerHTML` replace destroys focus and in-progress input.
-/// Use [`live`](#live) there.
+/// Reach for [`live`](#live) only when a large subtree updates so often that
+/// the morph walk is measurably too costly.
 ///
 /// ```gleam
 /// component.simple(
@@ -527,25 +463,25 @@ pub fn require_connection(
 /// )
 /// ```
 ///
-/// Pipe through [`event.on()`](./event.html#on) and friends to attach DOM
-/// event handlers to the rendered subtree, registered once at
-/// [`mount`](#mount).
+/// Pipe through [`event.on()`](./event.html#on) and friends to attach DOM event
+/// handlers to the rendered subtree, registered once at [`mount`](#mount).
 pub fn simple(
   slice slice: fn(model) -> a,
   render render: fn(a, Slotter(model, message, html)) -> html,
 ) -> Component(model, message, html) {
-  new_component(Simple(
-    slice: fn(model) { to_dynamic(slice(model)) },
-    render: fn(data, slot) { render(from_dynamic(data), slot) },
-    compare_structural: False,
-  ))
+  new_component(
+    Simple(
+      slice: fn(model) { to_dynamic(slice(model)) },
+      render: fn(data, slot) { render(from_dynamic(data), slot) },
+    ),
+  )
 }
 
-/// Renders once and never updates. Good for headers, static text, or anything
-/// that doesn't depend on the model.
+/// Renders once and never updates. Good for headers, static text, anything not
+/// depending on the model.
 ///
-/// `content` receives a [`Slotter`](#Slotter), call `slot(child)` where a
-/// nested component should go, or ignore it with `_`.
+/// `content` receives a [`Slotter`](#Slotter), call `slot(child)` for a nested
+/// component or ignore it with `_`.
 ///
 /// ```gleam
 /// component.static(fn(_) { html.h1([], [html.text("My App")]) })
@@ -556,75 +492,11 @@ pub fn static(
   new_component(Static(content))
 }
 
-/// Switch a component's comparison from reference to structural equality. By
-/// default components use reference equality (`===`), which suits primitives
-/// and unchanged references. Reach for `structural()` when your slice returns
-/// new tuples, lists, or other constructed values each call.
-///
-/// `Static` and `Fragment` don't compare slices, so this returns them
-/// unchanged.
-///
-/// ```gleam
-/// component.simple(
-///   slice: fn(model) { #(model.x, model.y) },  // Returns new tuple each time
-///   render: fn(pos, _) { ... }
-/// )
-/// |> component.structural  // Enable deep equality check
-/// ```
-pub fn structural(
-  component: Component(model, message, html),
-) -> Component(model, message, html) {
-  let component_type = case component.component_type {
-    Simple(..) as t -> Simple(..t, compare_structural: True)
-    Live(..) as t -> Live(..t, compare_structural: True)
-    Each(..) as t -> Each(..t, compare_structural: True)
-    EachLive(..) as t -> EachLive(..t, compare_structural: True)
-    Switch(..) as t -> Switch(..t, compare_structural: True)
-    Static(..) as t | Fragment(..) as t -> t
-  }
-  Component(..component, component_type:)
-}
-
-/// Single-slot dynamic switching that preserves identity. `on` picks a
-/// discriminator from the model and `case_of` turns it into a Component. While
-/// the discriminator is unchanged the wrapper and child DOM are left alone, so
-/// focus, selection, and input survive. When it changes, the old child's
-/// handlers are unregistered and the new Component replaces the wrapper's
-/// innerHTML.
-///
-/// Compares by reference by default, pipe through [`structural`](#structural)
-/// when the slice builds new values each call. Bind events with
-/// [`event.on()`](./event.html#on) on the switch itself, bindings inside the
-/// built Component aren't collected and never fire.
-///
-/// ```gleam
-/// component.switch(
-///   on: fn(model: Model) { model.route },
-///   case_of: fn(route) {
-///     case route {
-///       Home -> home_page()
-///       Profile -> profile_page()
-///       Settings -> settings_page()
-///     }
-///   },
-/// )
-/// ```
-pub fn switch(
-  on slice: fn(model) -> a,
-  case_of build: fn(a) -> Component(model, message, html),
-) -> Component(model, message, html) {
-  new_component(Switch(
-    slice: fn(model) { to_dynamic(slice(model)) },
-    build: fn(data) { build(from_dynamic(data)) },
-    compare_structural: False,
-  ))
-}
-
 /// Decorate a component with enter and exit CSS classes timed to a duration.
 /// The component comes first so it chains like the other decorators. On mount
 /// the wrapper carries `enter` for `duration_milliseconds`, then drops it. On
-/// unmount (when an enclosing `each`, `each_live`, or `switch` removes it)
-/// `exit` is applied and DOM removal is deferred by the same duration, with
+/// unmount (an enclosing `each` or a `simple` morph removing it) `exit` is
+/// applied and DOM removal is deferred by the same duration, with
 /// `animationend` winning if the CSS fires it first.
 ///
 /// The CSS contract is keyframes-based.
@@ -636,28 +508,31 @@ pub fn switch(
 /// @keyframes dialog-exit  { from { opacity: 1 } to { opacity: 0 } }
 /// ```
 ///
-/// `forwards` on exit keeps the final state visible while the framework
-/// holds the element in the DOM, preventing a flicker before removal.
+/// `forwards` on exit keeps the final state visible while the framework holds
+/// the element in the DOM, preventing a flicker before removal.
 ///
-/// **Placement rule**: transitions fire only when the framework's removal path
-/// runs through them, which is `each`, `each_live`, and `switch` child
-/// removal. A transition inside a `simple` render won't run exits on parent
-/// re-render, since that innerHTML wipe is synchronous. Hoist it to an
-/// `each_live` item or `switch` child if you need exits.
+/// Placement rule, transitions fire when the framework's removal path runs
+/// through them, `each` child removal and a `simple` morph dropping the
+/// transitioned child (an open/close panel). The `simple` morph runs the exit
+/// animation before the node leaves, and re-opening cancels a mid-exit.
 ///
 /// ```gleam
-/// component.each_live(
-///   slice: fn(model) { model.toasts },
-///   key: fn(toast) { int.to_string(toast.id) },
-///   initial: fn(toast) {
-///     component.static(fn(_) { render_toast(toast) })
-///     |> component.transition(
-///       enter: "toast-enter",
-///       exit: "toast-exit",
-///       duration_milliseconds: 200,
-///     )
+/// component.simple(
+///   slice: fn(model) { model.open },
+///   render: fn(open, slot) {
+///     case open {
+///       True ->
+///         slot(
+///           component.static(fn(_) { render_panel() })
+///           |> component.transition(
+///             enter: "panel-enter",
+///             exit: "panel-exit",
+///             duration_milliseconds: 200,
+///           ),
+///         )
+///       False -> html.text("")
+///     }
 ///   },
-///   patch: fn(_) { [] },
 /// )
 /// ```
 pub fn transition(
@@ -674,86 +549,57 @@ pub fn transition(
 // =============================================================================
 
 /// What a [`Component`](#Component) renders as. One variant per rendering
-/// strategy, cross-cutting concerns live in [`Decoration`](#Decoration), not
-/// here.
+/// strategy, cross-cutting concerns live in [`Decoration`](#Decoration).
 @internal
 pub type ComponentType(model, message, html) {
-  /// Keyed list with innerHTML rendering for each child. Carries the primitive
-  /// slice, key, and render functions directly so the FFI can evaluate only
-  /// what it needs per item.
+  /// Keyed list, innerHTML per child. Carries the primitive slice, key, and
+  /// render functions directly so the FFI evaluates only what it needs per
+  /// item.
   Each(
     slice: fn(model) -> List(Dynamic),
     key: fn(Dynamic) -> String,
     render: fn(Dynamic) -> Component(model, message, html),
-    compare_structural: Bool,
   )
 
-  /// Keyed list with patch-based rendering for each child. Carries the
-  /// primitive slice, key, initial, and patch functions so the FFI calls
-  /// `initial` only for items whose key first appears, not for the whole
-  /// list.
-  EachLive(
-    slice: fn(model) -> List(Dynamic),
-    key: fn(Dynamic) -> String,
-    initial: fn(Dynamic) -> Component(model, message, html),
-    patch: fn(Dynamic) -> List(Patch),
-    compare_structural: Bool,
-  )
-
-  /// Container for multiple components (no wrapper element created)
+  /// Groups multiple components, no wrapper element
   Fragment(children: List(Component(model, message, html)))
 
-  /// Live component with patch-based updates for 60fps performance
+  /// Patch-based updates for a 60fps hot path
   Live(
     slice: fn(model) -> Dynamic,
     initial: fn(Slotter(model, message, html)) -> html,
     apply: fn(Dynamic) -> List(Patch),
-    compare_structural: Bool,
   )
 
-  /// Simple dynamic component that re-renders via innerHTML when slice changes
+  /// Morphs the subtree in place when the slice changes
   Simple(
     slice: fn(model) -> Dynamic,
     render: fn(Dynamic, Slotter(model, message, html)) -> html,
-    compare_structural: Bool,
   )
 
-  /// Static content that renders once with no subscription to model changes
+  /// Renders once, no subscription to model changes
   Static(content: fn(Slotter(model, message, html)) -> html)
-
-  /// Single-slot dynamic switching. The slice picks a discriminator and
-  /// `build` produces the Component to render. Identity is preserved when
-  /// the slice is unchanged, on change, the old subtree is torn down and
-  /// the new one rendered. Event bindings inside `build`'s result are not
-  /// collected by [`mount`](#mount), attach switch-related events to the
-  /// `Switch` itself or any ancestor.
-  Switch(
-    slice: fn(model) -> Dynamic,
-    build: fn(Dynamic) -> Component(model, message, html),
-    compare_structural: Bool,
-  )
 }
 
 /// A cross-cutting attribute layered onto a [`Component`](#Component) via the
-/// decoration list. Each is built by a constructor that appends it:
-/// [`transition`](#transition) adds a `Transition`, `event.on*` (through
-/// `attach_event`) adds a `Listener`, and [`require_connection`](#require_connection)
-/// adds a `Connection`. Applied innermost-first in list order.
+/// decoration list. Each appended by a constructor: [`transition`](#transition)
+/// adds `Transition`, `event.on*` (via `attach_event`) adds `Listener`, and
+/// [`require_connection`](#require_connection) adds `Connection`. Applied
+/// innermost-first in list order.
 @internal
 pub type Decoration(model) {
-  /// CSS enter/exit classes timed to a duration, applied to a wrapper element
-  /// around the component (see [`transition`](#transition)).
+  /// Duration-timed CSS enter/exit classes on a wrapper element (see
+  /// [`transition`](#transition)).
   Transition(enter: String, exit: String, duration_milliseconds: Int)
 
-  /// A single event binding, an opaque `fn(Dynamic) -> Nil` closure that
-  /// receives the runtime (as `Dynamic` so the field compiles on Erlang) and
-  /// registers its DOM listener when invoked at mount. On Erlang the closure
-  /// is never invoked (mount is JavaScript-only).
+  /// A single event binding, an opaque `fn(Dynamic) -> Nil` closure taking the
+  /// runtime (as `Dynamic` so the field compiles on Erlang) and registering its
+  /// DOM listener at mount. Never invoked on Erlang (mount is JavaScript-only).
   Listener(handler: fn(Dynamic) -> Nil)
 
   /// Gates the subtree on connection status. When `connected` returns `False`
-  /// the wrapper element is marked disabled (`data-lily-disabled`,
-  /// `aria-disabled`, `lily-disconnected`).
+  /// the wrapper is marked disabled (`data-lily-disabled`, `aria-disabled`,
+  /// `lily-disconnected`).
   Connection(connected: fn(model) -> Bool)
 }
 
@@ -762,13 +608,13 @@ pub type Decoration(model) {
 // =============================================================================
 
 @target(javascript)
-/// Attach an event binding to a component by appending a `Listener`
-/// decoration. Intended to be called from `lily/event`, not by users.
+/// Attach an event binding by appending a `Listener` decoration. Called from
+/// `lily/event`, not by users.
 ///
-/// The binding is wrapped in an opaque `fn(Dynamic) -> Nil` closure
-/// before being stored, since `Listener` holds opaque bindings to keep
-/// the [`Component`](#Component) type cross-target. The closure casts the
-/// supplied `Dynamic` back to a typed `Runtime` on invocation.
+/// The binding is wrapped in an opaque `fn(Dynamic) -> Nil` closure before
+/// storing, since `Listener` holds opaque bindings to keep
+/// [`Component`](#Component) cross-target. The closure casts the `Dynamic` back
+/// to a typed `Runtime` on invocation.
 @internal
 pub fn attach_event(
   component component: Component(model, message, html),
@@ -777,32 +623,29 @@ pub fn attach_event(
   let opaque_binding = fn(runtime_dynamic: Dynamic) {
     binding(from_dynamic(runtime_dynamic))
   }
-  // Listeners must register in the order they were attached, the
-  // first-attached handler fires first at dispatch. That ordering is what
-  // lets a more specific handler with `stop_propagation` (attached before a
-  // broader ancestor-selector handler) block the broader one, since all
-  // delegated listeners share one node and run in registration order.
+  // Listeners register in attach order, the first-attached fires first at
+  // dispatch. That lets a specific handler with `stop_propagation` (attached
+  // before a broader ancestor-selector handler) block the broader one, since
+  // all delegated listeners share one node and run in registration order.
   // `add_decoration` prepends, so `register_bindings` reverses at read time.
   add_decoration(component, Listener(opaque_binding))
 }
 
 @target(javascript)
-/// Walk the component tree, invoking every event binding declared via
-/// `event.on*` (each a `Listener` decoration) and recursing into Fragment
-/// children. Stops at Each/EachLive: their per-item render bodies are not
-/// inspected, so events declared inside item components are ignored by
-/// design (see the `each` / `each_live` docstrings).
+/// Walk the tree invoking every `event.on*` binding (each a `Listener`
+/// decoration) and recursing into Fragment children. Stops at Each, its
+/// per-item render bodies aren't inspected, so events inside item components
+/// are ignored by design (see the `each` docstring).
 ///
-/// Called from [`mount`](#mount) before the FFI render pass. Exposed as
-/// `@internal` so tests can register bindings without mounting (and thus
-/// without wiping the DOM container).
+/// Called from [`mount`](#mount) before the FFI render pass. `@internal` so
+/// tests can register bindings without mounting (and wiping the DOM container).
 @internal
 pub fn register_bindings(
   runtime: Runtime(model, message),
   component: Component(model, message, html),
 ) -> Nil {
   let runtime_dynamic = to_dynamic(runtime)
-  // Reverse to fire handlers in attach order (add_decoration prepends)
+  // Reverse to fire in attach order (add_decoration prepends)
   list.each(list.reverse(component.decorations), fn(decoration) {
     case decoration {
       Listener(handler:) -> handler(runtime_dynamic)
@@ -812,26 +655,22 @@ pub fn register_bindings(
   case component.component_type {
     Fragment(children:) ->
       list.each(children, fn(child) { register_bindings(runtime, child) })
-    Each(..) | EachLive(..) | Live(..) | Simple(..) | Static(..) | Switch(..) ->
-      Nil
+    Each(..) | Live(..) | Simple(..) | Static(..) -> Nil
   }
 }
 
-/// Read a component's recorded scope selector (see [`scoped`](#scoped)).
-/// Returns `None` when no scope was set. Consumed by `lily/event`'s binders
-/// to confine a listener to the component's own subtree.
+/// Read a component's recorded scope selector (see [`scoped`](#scoped)),
+/// `None` when unset. Consumed by `lily/event`'s binders to confine a listener
+/// to the component's own subtree.
 @internal
 pub fn scope(component: Component(model, message, html)) -> Option(String) {
   component.scope
 }
 
-/// Record a component's own CSS selector (usually `#<id>`) as its scope, so
-/// the scoped `event.on*` binders match only within its subtree. Pipe it on
-/// after giving the component an `id`, then pipe on `event.on` without a
-/// selector. Component-library builders scope their widget from the `id` they
-/// already render.
-///
-/// ## Example
+/// Record a component's own CSS selector (usually `#<id>`) as its scope, so the
+/// scoped `event.on*` binders match only within its subtree. Pipe on after
+/// giving the component an `id`, then pipe on `event.on` without a selector.
+/// Component-library builders scope their widget from the `id` they render.
 ///
 /// ```gleam
 /// component.simple(slice: ..., render: ...)
@@ -845,12 +684,11 @@ pub fn scoped(
   Component(..component, scope: option.Some(selector))
 }
 
-/// Pure walker used by [`render_to_string`](#render_to_string). Recurses
-/// into every variant, slots are filled inline by walking the child and
-/// wrapping the resulting string via `from_string` before handing it back
-/// to the user's render function. Decorations (event listeners, connection
-/// gating, and CSS transitions) only matter on a live DOM, so the walk
-/// delegates straight to the component type.
+/// Pure walker for [`render_to_string`](#render_to_string). Recurses into every
+/// variant, filling slots inline by walking the child and wrapping its string
+/// via `from_string` before handing it back to the render function. Decorations
+/// (listeners, connection gating, transitions) only matter on a live DOM, so
+/// the walk delegates straight to the component type.
 @internal
 pub fn walk_to_string(
   component: Component(model, message, html),
@@ -858,37 +696,27 @@ pub fn walk_to_string(
   to_html: fn(html) -> String,
   from_string: fn(String) -> html,
 ) -> String {
-  // Decorations (transitions, listeners, connection gating) only matter on
-  // a live DOM, so the string-render walk delegates straight to the
-  // component type.
+  // Decorations only matter on a live DOM, so delegate to the component type.
   case component.component_type {
     Static(content:) -> {
       let slotter = make_slotter(model, to_html, from_string)
       to_html(content(slotter))
     }
 
-    Simple(slice:, render:, compare_structural: _) -> {
+    Simple(slice:, render:) -> {
       let slotter = make_slotter(model, to_html, from_string)
       to_html(render(slice(model), slotter))
     }
 
-    Live(slice: _, initial:, apply: _, compare_structural: _) -> {
+    Live(slice: _, initial:, apply: _) -> {
       let slotter = make_slotter(model, to_html, from_string)
       to_html(initial(slotter))
     }
 
-    Each(slice:, key: _, render:, compare_structural: _) -> {
+    Each(slice:, key: _, render:) -> {
       slice(model)
       |> list.map(fn(item) {
         walk_to_string(render(item), model, to_html, from_string)
-      })
-      |> string.concat
-    }
-
-    EachLive(slice:, key: _, initial:, patch: _, compare_structural: _) -> {
-      slice(model)
-      |> list.map(fn(item) {
-        walk_to_string(initial(item), model, to_html, from_string)
       })
       |> string.concat
     }
@@ -897,9 +725,6 @@ pub fn walk_to_string(
       children
       |> list.map(walk_to_string(_, model, to_html, from_string))
       |> string.concat
-
-    Switch(slice:, build:, compare_structural: _) ->
-      walk_to_string(build(slice(model)), model, to_html, from_string)
   }
 }
 
@@ -911,7 +736,7 @@ fn add_decoration(
   component: Component(model, message, html),
   decoration: Decoration(model),
 ) -> Component(model, message, html) {
-  // O(1) prepend, consumers reverse to restore attach order
+  // O(1) prepend, consumers reverse to restore attach order.
   Component(..component, decorations: [decoration, ..component.decorations])
 }
 
@@ -938,9 +763,8 @@ fn new_component(
 
 @target(javascript)
 /// A self-contained event binding. Built by the `event.on*` functions, which
-/// capture the event constant, selector, options, and handler inside the
-/// closure. Invoked with the runtime during `mount` to register the
-/// underlying DOM listener.
+/// capture the event constant, selector, options, and handler in the closure.
+/// Invoked with the runtime during `mount` to register the DOM listener.
 type EventBinding(model, message) =
   fn(Runtime(model, message)) -> Nil
 
@@ -948,29 +772,21 @@ type EventBinding(model, message) =
 // PRIVATE FFI
 // =============================================================================
 
-/// Casts a Dynamic value back to the slice type. On both targets this is
-/// an identity function, the value is already the correct type at runtime
-/// (JavaScript has no runtime type tags, Erlang carries the original
-/// runtime value). Used to pass the already-extracted slice result to
-/// render/patch functions without calling the user's slice function a
-/// second time.
+/// Cast a Dynamic back to the slice type, identity passthrough on both targets.
 @external(erlang, "lily_reflection_ffi", "passthrough")
 @external(javascript, "./component.ffi.mjs", "identity")
 fn from_dynamic(value: Dynamic) -> a
 
-/// Type-erases a `List(item)` to `List(Dynamic)` without allocating. On
-/// both targets this is an identity function, the same list reference is
-/// returned. Used by [`each`](#each) and [`each_live`](#each_live) so the
-/// FFI handler can short-circuit when the user's slice returns the same
-/// list reference as last time.
+/// Type-erase a `List(item)` to `List(Dynamic)`, identity passthrough on both
+/// targets.
 @external(erlang, "lily_reflection_ffi", "passthrough")
 @external(javascript, "./component.ffi.mjs", "identity")
 fn list_dynamic(value: List(a)) -> List(Dynamic)
 
 @target(javascript)
-/// Renders a component tree to HTML and creates subscriptions for dynamic
-/// components. Called once at mount time, subsequent updates flow through
-/// the registered per-component handlers.
+/// Render a component tree to HTML and create subscriptions for dynamic
+/// components. Called once at mount, subsequent updates flow through the
+/// registered per-component handlers.
 @external(javascript, "./component.ffi.mjs", "renderTree")
 fn render_tree(
   _runtime: Runtime(model, message),
@@ -983,10 +799,8 @@ fn render_tree(
   Nil
 }
 
-/// Wraps any value as Dynamic for use as a comparison key. On both targets
-/// this is an identity function: JavaScript doesn't distinguish types at
-/// runtime, and Erlang carries the original runtime value through. Necessary
-/// because the slice type is not known at library compilation time.
+/// Wrap any value as Dynamic for use as a comparison key, identity passthrough
+/// on both targets.
 @external(erlang, "lily_reflection_ffi", "passthrough")
 @external(javascript, "./component.ffi.mjs", "identity")
 fn to_dynamic(value: a) -> Dynamic

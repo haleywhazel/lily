@@ -21,7 +21,7 @@ import lily/event
 import lily/store
 @target(javascript)
 import lily/test_support.{
-  type Message, type Model, AddTransitionItem, Increment, IncrementSecondary,
+  type Model, AddTransitionItem, Increment, IncrementSecondary,
   RemoveTransitionItem, SetTab, TabA, TabB,
 }
 @target(javascript)
@@ -44,9 +44,9 @@ fn mount(runtime, view) {
 
 @target(javascript)
 /// Converts the model's `Option(Int)` transition_item to a `List(Int)`
-/// for each_live's slice. Using Option in the model keeps the wire
+/// for each's slice. Using Option in the model keeps the wire
 /// format consistent across JS/Erlang (lists serialise differently);
-/// the slice constructs a list every call but each_live keys items by
+/// the slice constructs a list every call but each keys items by
 /// id, so reconciliation is stable.
 fn transition_items_list(model: Model) -> List(Int) {
   case model.transition_item {
@@ -161,6 +161,97 @@ pub fn component_simple_updates_on_model_change_test() {
 }
 
 // =============================================================================
+// MORPH (simple preserves nodes across re-render)
+// =============================================================================
+
+@target(javascript)
+pub fn component_simple_morph_keeps_focus_across_rerender_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let _r =
+    mount(runtime, fn(_model) {
+      component.simple(slice: fn(m: Model) { m.count }, render: fn(count, _) {
+        "<input id=\"field\"><span>" <> int.to_string(count) <> "</span>"
+      })
+    })
+  test_support.focus("#field")
+
+  // Re-render the parent by changing its slice; morph must leave the input node
+  // untouched so focus survives (innerHTML would drop it).
+  client.dispatch(runtime)(Increment)
+
+  test_support.active_element_id()
+  |> should.equal("field")
+}
+
+@target(javascript)
+pub fn component_simple_morph_preserves_nested_live_child_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  // A nested live child on a different slice (name) than the ancestor (count).
+  let child =
+    component.live(
+      slice: fn(m: Model) { m.name },
+      initial: fn(_) { "<input id=\"pill\">" },
+      patch: fn(_) { [] },
+    )
+  let _r =
+    mount(runtime, fn(_model) {
+      component.simple(
+        slice: fn(m: Model) { m.count },
+        render: fn(_count, slot) { "<div>" <> slot(child) <> "</div>" },
+      )
+    })
+  test_support.focus("#pill")
+
+  // Re-render the ancestor (count changed, the child's slice did not). Morph
+  // keeps the nested child's node, so focus inside it survives, this is the
+  // pill-slide case where innerHTML would recreate the node and reset it.
+  client.dispatch(runtime)(Increment)
+
+  test_support.active_element_id()
+  |> should.equal("pill")
+}
+
+@target(javascript)
+pub fn component_simple_morph_defers_exit_transition_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let _r =
+    mount(runtime, fn(_model) {
+      component.simple(
+        slice: fn(m: Model) { m.transition_item },
+        render: fn(item, slot) {
+          case item {
+            Some(_) ->
+              slot(
+                component.static(fn(_) { "<div id=\"panel\">p</div>" })
+                |> component.transition(
+                  enter: "in",
+                  exit: "out",
+                  duration_milliseconds: 200,
+                ),
+              )
+            None -> ""
+          }
+        },
+      )
+    })
+  client.dispatch(runtime)(AddTransitionItem(1))
+  test_support.inner_html("#app")
+  |> string.contains("panel")
+  |> should.be_true
+
+  // Closing removes the slot. Morph must defer the removal through the exit
+  // transition, so the panel is still in the DOM immediately after (mid-exit),
+  // not dropped synchronously.
+  client.dispatch(runtime)(RemoveTransitionItem(1))
+  test_support.inner_html("#app")
+  |> string.contains("panel")
+  |> should.be_true
+}
+
+// =============================================================================
 // LIVE
 // =============================================================================
 
@@ -249,7 +340,7 @@ pub fn component_live_refuses_unsafe_attribute_patch_test() {
 @target(javascript)
 pub fn live_root_keeps_nested_children_reactive_test() {
   // The generated app's nesting: a live root (tone) -> static body ->
-  // structural simple (navbar, constant slice) -> static (nav actions) ->
+  // simple (navbar, constant slice) -> static (nav actions) ->
   // simple reading a changing field (connection). The innermost simple must
   // update when its field changes even though no ancestor re-renders.
   test_support.reset_dom()
@@ -268,7 +359,6 @@ pub fn live_root_keeps_nested_children_reactive_test() {
     component.simple(slice: fn(_m: Model) { "const" }, render: fn(_, slot) {
       "<nav>" <> slot(nav_actions()) <> "</nav>"
     })
-    |> component.structural()
   }
   let body = fn() {
     component.static(fn(slot) { "<main>" <> slot(navbar()) <> "</main>" })
@@ -280,7 +370,6 @@ pub fn live_root_keeps_nested_children_reactive_test() {
         initial: fn(slot) { "<div class=\"root\">" <> slot(body()) <> "</div>" },
         patch: fn(_) { [] },
       )
-      |> component.structural()
     })
   test_support.inner_html("#app")
   |> string.contains("count:0")
@@ -390,11 +479,11 @@ pub fn component_require_connection_removes_disabled_when_connected_test() {
 }
 
 // =============================================================================
-// STRUCTURAL
+// STRUCTURAL COMPARISON
 // =============================================================================
 
 @target(javascript)
-pub fn component_structural_on_simple_test() {
+pub fn component_simple_tuple_slice_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _r =
@@ -406,38 +495,26 @@ pub fn component_structural_on_simple_test() {
           int.to_string(count) <> ":" <> name
         },
       )
-      |> component.structural
     })
   test_support.inner_html("#app")
   |> string.contains("0:")
   |> should.be_true
 }
 
-@target(javascript)
-pub fn component_structural_on_static_is_noop_test() {
-  let static_component = component.static(fn(_) { "hello" })
-  let _structural_component = component.structural(static_component)
-  test_support.reset_dom()
-  let runtime = test_support.new_runtime()
-  let _r = mount(runtime, fn(_model) { component.static(fn(_) { "hello" }) })
-  test_support.inner_html("#app")
-  |> should.equal("hello")
-}
-
 // =============================================================================
-// SWITCH
+// SIMPLE SWITCHING (migrated from the removed `switch` builder)
 // =============================================================================
 
 @target(javascript)
-pub fn switch_renders_initial_case_test() {
+pub fn simple_switch_renders_initial_case_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _r =
     mount(runtime, fn(_model) {
-      component.switch(on: fn(m: Model) { m.active_tab }, case_of: fn(tab) {
+      component.simple(slice: fn(m: Model) { m.active_tab }, render: fn(tab, _) {
         case tab {
-          TabA -> component.static(fn(_) { "<p>A</p>" })
-          TabB -> component.static(fn(_) { "<p>B</p>" })
+          TabA -> "<p>A</p>"
+          TabB -> "<p>B</p>"
         }
       })
     })
@@ -447,15 +524,15 @@ pub fn switch_renders_initial_case_test() {
 }
 
 @target(javascript)
-pub fn switch_replaces_on_slice_change_test() {
+pub fn simple_switch_replaces_on_slice_change_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _r =
     mount(runtime, fn(_model) {
-      component.switch(on: fn(m: Model) { m.active_tab }, case_of: fn(tab) {
+      component.simple(slice: fn(m: Model) { m.active_tab }, render: fn(tab, _) {
         case tab {
-          TabA -> component.static(fn(_) { "<p>A</p>" })
-          TabB -> component.static(fn(_) { "<p>B</p>" })
+          TabA -> "<p>A</p>"
+          TabB -> "<p>B</p>"
         }
       })
     })
@@ -470,19 +547,58 @@ pub fn switch_replaces_on_slice_change_test() {
 }
 
 @target(javascript)
-pub fn switch_preserves_identity_when_slice_unchanged_test() {
-  // When the switch's slice doesn't change but a different field does,
-  // the inner subscription updates without re-rendering the switch wrapper.
-  // Verify by checking the inner simple's content reflects the change.
+pub fn focus_on_mount_seeds_slotted_child_on_open_test() {
+  // Mirrors an overlay opening: a slotted child gated behind a slice, carrying
+  // focus_on_mount, must grab focus when it renders in (the select's flow).
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _r =
     mount(runtime, fn(_model) {
-      component.switch(on: fn(m: Model) { m.active_tab }, case_of: fn(_tab) {
-        component.simple(slice: fn(m: Model) { m.count }, render: fn(count, _) {
-          "<span class=\"counter\">" <> int.to_string(count) <> "</span>"
-        })
-      })
+      component.simple(
+        slice: fn(m: Model) { m.active_tab },
+        render: fn(tab, slot) {
+          case tab {
+            TabA -> "<p>closed</p>"
+            TabB ->
+              slot(
+                component.static(fn(_s) { "<button id=\"opt\">option</button>" })
+                |> event.focus_on_mount("#opt")
+                |> component.transition(
+                  enter: "in",
+                  exit: "out",
+                  duration_milliseconds: 100,
+                ),
+              )
+          }
+        },
+      )
+    })
+  client.send_message(runtime, SetTab(TabB))
+  test_support.active_element_id()
+  |> should.equal("opt")
+}
+
+@target(javascript)
+pub fn simple_switch_preserves_identity_when_slice_unchanged_test() {
+  // When the outer slice doesn't change but a different field does, the
+  // nested component's own subscription updates without the outer re-running.
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let _r =
+    mount(runtime, fn(_model) {
+      component.simple(
+        slice: fn(m: Model) { m.active_tab },
+        render: fn(_tab, slot) {
+          slot(
+            component.simple(
+              slice: fn(m: Model) { m.count },
+              render: fn(count, _) {
+                "<span class=\"counter\">" <> int.to_string(count) <> "</span>"
+              },
+            ),
+          )
+        },
+      )
     })
   client.send_message(runtime, Increment)
   client.send_message(runtime, Increment)
@@ -492,25 +608,29 @@ pub fn switch_preserves_identity_when_slice_unchanged_test() {
 }
 
 @target(javascript)
-pub fn switch_cleans_up_old_child_handlers_test() {
-  // After switching from A (a `simple` subscribing to count) to B (static),
-  // dispatching messages that would have changed A's slice must not error.
-  // We can't directly observe the dead handler not firing, but we can
-  // confirm B remains rendered and the runtime keeps responding.
+pub fn simple_switch_cleans_up_old_child_handlers_test() {
+  // After switching from A (a nested `simple` subscribing to count) to B
+  // (plain text), dispatching messages that would have changed A's slice
+  // must not error, and B remains rendered.
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _r =
     mount(runtime, fn(_model) {
-      component.switch(on: fn(m: Model) { m.active_tab }, case_of: fn(tab) {
-        case tab {
-          TabA ->
-            component.simple(
-              slice: fn(m: Model) { m.count },
-              render: fn(count, _) { int.to_string(count) },
-            )
-          TabB -> component.static(fn(_) { "static-b" })
-        }
-      })
+      component.simple(
+        slice: fn(m: Model) { m.active_tab },
+        render: fn(tab, slot) {
+          case tab {
+            TabA ->
+              slot(
+                component.simple(
+                  slice: fn(m: Model) { m.count },
+                  render: fn(count, _) { int.to_string(count) },
+                ),
+              )
+            TabB -> "static-b"
+          }
+        },
+      )
     })
   client.send_message(runtime, SetTab(TabB))
   client.send_message(runtime, Increment)
@@ -521,33 +641,33 @@ pub fn switch_cleans_up_old_child_handlers_test() {
 }
 
 @target(javascript)
-pub fn switch_with_structural_compares_by_value_test() {
-  // Two consecutive renders that produce equal tuples should not trigger
-  // a re-render under structural comparison. We instrument by mutating
-  // the wrapper after the first render and confirming the mutation
-  // survives the second render.
+pub fn simple_switch_with_structural_compares_by_value_test() {
+  // Two consecutive renders that produce equal tuples should not trigger a
+  // re-render under structural comparison. Instrument by mutating the wrapper
+  // after the first render and confirming the mutation survives the second.
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _r =
     mount(runtime, fn(_model) {
-      component.switch(
-        on: fn(m: Model) { #(m.active_tab, m.secondary_count > 100) },
-        case_of: fn(_pair) {
-          component.simple(
-            slice: fn(m: Model) { m.count },
-            render: fn(count, _) { int.to_string(count) },
+      component.simple(
+        slice: fn(m: Model) { #(m.active_tab, m.secondary_count > 100) },
+        render: fn(_pair, slot) {
+          slot(
+            component.simple(
+              slice: fn(m: Model) { m.count },
+              render: fn(count, _) { int.to_string(count) },
+            ),
           )
         },
       )
-      |> component.structural
     })
-  // Add a marker to the switch's wrapper that would be wiped by a re-render.
+  // Add a marker to the wrapper that would be wiped by a re-render.
   test_support.set_inner_html(
     "[data-lily-component=\"c0\"]",
     "<span id=\"marker\">survived</span>",
   )
-  // Both messages change `count` and `secondary_count`, but the switch's
-  // tuple #(TabA, False) is identical, so no re-render of the wrapper.
+  // Both messages change `count` and `secondary_count`, but the outer slice
+  // tuple #(TabA, False) is identical, so the outer never re-runs.
   client.send_message(runtime, Increment)
   client.send_message(runtime, IncrementSecondary)
   test_support.inner_html("#app")
@@ -556,19 +676,22 @@ pub fn switch_with_structural_compares_by_value_test() {
 }
 
 @target(javascript)
-pub fn switch_inside_fragment_test() {
+pub fn simple_switch_inside_fragment_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _r =
     mount(runtime, fn(_model) {
       component.fragment([
         component.static(fn(_) { "<header>top</header>" }),
-        component.switch(on: fn(m: Model) { m.active_tab }, case_of: fn(tab) {
-          case tab {
-            TabA -> component.static(fn(_) { "<p>A</p>" })
-            TabB -> component.static(fn(_) { "<p>B</p>" })
-          }
-        }),
+        component.simple(
+          slice: fn(m: Model) { m.active_tab },
+          render: fn(tab, _) {
+            case tab {
+              TabA -> "<p>A</p>"
+              TabB -> "<p>B</p>"
+            }
+          },
+        ),
         component.static(fn(_) { "<footer>bottom</footer>" }),
       ])
     })
@@ -583,14 +706,15 @@ pub fn switch_inside_fragment_test() {
 }
 
 @target(javascript)
-pub fn switch_inside_require_connection_test() {
+pub fn simple_switch_inside_require_connection_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _r =
     mount(runtime, fn(_model) {
-      component.switch(on: fn(m: Model) { m.active_tab }, case_of: fn(_tab) {
-        component.static(fn(_) { "inner" })
-      })
+      component.simple(
+        slice: fn(m: Model) { m.active_tab },
+        render: fn(_tab, _) { "inner" },
+      )
       |> component.require_connection(fn(m: Model) { m.connected })
     })
   // Default initial_model has connected: False, so the connection wrapper
@@ -598,55 +722,6 @@ pub fn switch_inside_require_connection_test() {
   // than a fixed component id, so the assertion survives id-allocation order.
   test_support.has_attribute("[data-lily-disabled]", "data-lily-disabled")
   |> should.be_true
-}
-
-@target(javascript)
-pub fn switch_events_inside_build_are_ignored_test() {
-  // Bindings inside `build`'s returned Component are not collected at
-  // mount, by design. The event on a button rendered inside the switch
-  // does not fire.
-  test_support.reset_dom()
-  let runtime = test_support.new_runtime()
-  let _r =
-    mount(runtime, fn(_model) {
-      component.switch(on: fn(m: Model) { m.active_tab }, case_of: fn(_tab) {
-        component.static(fn(_) { "<button id=\"ignored\">+</button>" })
-        |> event.on_global(
-          event: event.click,
-          selector: "#ignored",
-          handler: fn(_) { Increment },
-          options: event.options(),
-        )
-      })
-    })
-  test_support.click("#ignored")
-  client.get_current_model(runtime).count
-  |> should.equal(0)
-}
-
-@target(javascript)
-pub fn switch_events_on_switch_itself_fire_test() {
-  // Pairs with the previous test: when the event is on the switch (not
-  // inside `build`), it gets registered and fires.
-  test_support.reset_dom()
-  let runtime = test_support.new_runtime()
-  let _r =
-    mount(runtime, fn(_model) {
-      component.switch(on: fn(m: Model) { m.active_tab }, case_of: fn(_tab) {
-        component.static(fn(_) {
-          "<button id=\"fires\" data-message=\"increment\">+</button>"
-        })
-      })
-      |> event.on_global_decoded(
-        event: event.click,
-        selector: "#fires",
-        decoder: fn(_) { Ok(Increment) },
-        options: event.options(),
-      )
-    })
-  test_support.click("#fires")
-  client.get_current_model(runtime).count
-  |> should.equal(1)
 }
 
 // =============================================================================
@@ -763,18 +838,18 @@ pub fn event_on_slot_child_of_live_test() {
 }
 
 @target(javascript)
-pub fn event_inside_each_live_initial_ignored_test() {
-  // Bindings declared inside an each_live's `initial` function are not
+pub fn event_inside_each_render_ignored_test() {
+  // Bindings declared inside an each's `render` function are not
   // collected. Clicking the inner button does not dispatch.
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   client.send_message(runtime, AddTransitionItem(1))
   let _r =
     mount(runtime, fn(_model) {
-      component.each_live(
+      component.each(
         slice: fn(m: Model) { transition_items_list(m) },
         key: fn(id: Int) { int.to_string(id) },
-        initial: fn(_id) {
+        render: fn(_id) {
           component.static(fn(_) { "<button id=\"inner\">+</button>" })
           |> event.on_global(
             event: event.click,
@@ -783,7 +858,6 @@ pub fn event_inside_each_live_initial_ignored_test() {
             options: event.options(),
           )
         },
-        patch: fn(_) { [] },
       )
     })
   test_support.click("#inner")
@@ -903,10 +977,10 @@ pub fn transition_enter_class_applied_on_mount_test() {
   client.send_message(runtime, AddTransitionItem(1))
   let _r =
     mount(runtime, fn(_model) {
-      component.each_live(
+      component.each(
         slice: fn(m: Model) { transition_items_list(m) },
         key: fn(id: Int) { int.to_string(id) },
-        initial: fn(id) {
+        render: fn(id) {
           component.static(fn(_) {
             "<span>item " <> int.to_string(id) <> "</span>"
           })
@@ -916,7 +990,6 @@ pub fn transition_enter_class_applied_on_mount_test() {
             duration_milliseconds: 10,
           )
         },
-        patch: fn(_) { [] },
       )
     })
   test_support.inner_html("#app")
@@ -934,10 +1007,10 @@ pub fn transition_exit_defers_removal_test() -> promise.Promise(Nil) {
   client.send_message(runtime, AddTransitionItem(1))
   let _r =
     mount(runtime, fn(_model) {
-      component.each_live(
+      component.each(
         slice: fn(m: Model) { transition_items_list(m) },
         key: fn(id: Int) { int.to_string(id) },
-        initial: fn(id) {
+        render: fn(id) {
           component.static(fn(_) {
             "<span class=\"item-" <> int.to_string(id) <> "\"></span>"
           })
@@ -947,7 +1020,6 @@ pub fn transition_exit_defers_removal_test() -> promise.Promise(Nil) {
             duration_milliseconds: 20,
           )
         },
-        patch: fn(_) { [] },
       )
     })
   client.send_message(runtime, RemoveTransitionItem(1))
@@ -977,10 +1049,10 @@ pub fn transition_re_add_mid_exit_cancels_test() -> promise.Promise(Nil) {
   client.send_message(runtime, AddTransitionItem(1))
   let _r =
     mount(runtime, fn(_model) {
-      component.each_live(
+      component.each(
         slice: fn(m: Model) { transition_items_list(m) },
         key: fn(id: Int) { int.to_string(id) },
-        initial: fn(id) {
+        render: fn(id) {
           component.static(fn(_) {
             "<span class=\"keep-" <> int.to_string(id) <> "\"></span>"
           })
@@ -990,7 +1062,6 @@ pub fn transition_re_add_mid_exit_cancels_test() -> promise.Promise(Nil) {
             duration_milliseconds: 50,
           )
         },
-        patch: fn(_) { [] },
       )
     })
   client.send_message(runtime, RemoveTransitionItem(1))
@@ -1018,18 +1089,18 @@ pub fn transition_re_add_mid_exit_cancels_test() -> promise.Promise(Nil) {
 }
 
 @target(javascript)
-pub fn transition_inside_each_live_keeps_item_attribute_test() {
-  // Sanity check: the Transition wrapper sits inside the each_live key
+pub fn transition_inside_each_keeps_item_attribute_test() {
+  // Sanity check: the Transition wrapper sits inside the each key
   // wrapper, both attributes are present together.
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   client.send_message(runtime, AddTransitionItem(42))
   let _r =
     mount(runtime, fn(_model) {
-      component.each_live(
+      component.each(
         slice: fn(m: Model) { transition_items_list(m) },
         key: fn(id: Int) { int.to_string(id) },
-        initial: fn(id) {
+        render: fn(id) {
           component.static(fn(_) {
             "<span>item " <> int.to_string(id) <> "</span>"
           })
@@ -1039,7 +1110,6 @@ pub fn transition_inside_each_live_keeps_item_attribute_test() {
             duration_milliseconds: 10,
           )
         },
-        patch: fn(_) { [] },
       )
     })
   let html = test_support.inner_html("#app")

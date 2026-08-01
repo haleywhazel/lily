@@ -102,9 +102,9 @@ import lily/transport.{type Target}
 // PUBLIC TYPES
 // =============================================================================
 
-/// Wrap client-only model fields that shouldn't sync to the server. The
-/// server holds `Local` fields at their initial values and the client
-/// preserves them when applying a server snapshot on reconnect.
+/// Wrap client-only model fields that shouldn't sync to the server. The server
+/// holds them at their initial values and the client preserves them when
+/// applying a snapshot on reconnect.
 ///
 /// ```gleam
 /// pub type Model {
@@ -115,20 +115,18 @@ pub type Local(a) {
   Local(a)
 }
 
-/// The store with your application state and update logic. The same store
-/// runs on both the client (via [`client.start`](./client.html#start))
-/// and the server (via [`server.start`](./server.html#start)). Construct via
-/// [`new`](#new), fields are not exposed to keep the internal layout free
-/// to evolve.
+/// Your application state and update logic. Runs on both the client
+/// ([`client.start`](./client.html#start)) and the server
+/// ([`server.start`](./server.html#start)). Construct via [`new`](#new),
+/// fields are opaque so the layout can evolve.
 pub opaque type Store(model, message) {
   Store(model: model, update: fn(model, message) -> model)
 }
 
-/// Wiring configuration for multi-store Lily apps. A `Wiring(model, message)`
-/// value tells the client how to dispatch messages to the session store or to
-/// a topic store, and how to merge incoming snapshots back into the outer
-/// model. Build with [`wiring`](#wiring), then pipe through
-/// [`session`](#session) and [`topic`](#topic).
+/// Wiring configuration for multi-store Lily apps. Tells the client how to
+/// dispatch messages to the session or a topic store, and how to merge incoming
+/// snapshots back into the outer model. Build with [`wiring`](#wiring), then
+/// pipe through [`session`](#session) and [`topic`](#topic).
 pub opaque type Wiring(model, message) {
   Wiring(
     session: Option(TargetConfig(model, message)),
@@ -141,9 +139,8 @@ pub opaque type Wiring(model, message) {
 // PUBLIC FUNCTIONS
 // =============================================================================
 
-/// Create a new store, seeded with an `initial_model` (similar to Lustre's
-/// `init`) and an update function that transforms the model based on a given
-/// `message`.
+/// Create a store, seeded with an `initial_model` (like Lustre's `init`) and
+/// an update function that transforms the model for a given `message`.
 ///
 /// ```gleam
 /// let app_store =
@@ -157,10 +154,9 @@ pub fn new(
   Store(model: model, update: update)
 }
 
-/// Register the session store entry in the wiring. The `extract` function
-/// identifies session messages, `update` applies them to the session
-/// sub-model, `field_get` and `field_set` map between the outer model and
-/// the session sub-model.
+/// Register the session store entry in the wiring. `extract` identifies session
+/// messages, `update` applies them to the session sub-model, `field_get`/
+/// `field_set` map between the outer model and the session sub-model.
 ///
 /// ```gleam
 /// store.wiring()
@@ -187,9 +183,8 @@ pub fn session(
   Wiring(..wiring, session: option.Some(config))
 }
 
-/// Register a topic store entry in the wiring. The `id` is the topic
-/// identifier used in `client.subscribe`, the other parameters are the same
-/// as for [`session`](#session).
+/// Register a topic store entry in the wiring. `id` is the topic identifier
+/// used in `client.subscribe`, other parameters match [`session`](#session).
 ///
 /// ```gleam
 /// store.wiring()
@@ -219,15 +214,15 @@ pub fn topic(
 }
 
 /// Register a parametric topic family in the wiring. Where [`topic`](#topic)
-/// binds one id to one model slice, `topic_kind` binds a whole family of
-/// dynamic ids sharing `prefix` (`"room:1"`, `"room:2"`, and so on) to a
-/// keyed slice, so a client can be subscribed to many instances at once.
+/// binds one id to one slice, `topic_kind` binds a family of dynamic ids
+/// sharing `prefix` (`"room:1"`, `"room:2"`, ...) to a keyed slice, so a client
+/// can subscribe to many instances at once.
 ///
-/// `extract` returns the instance key together with the sub-message, and the
-/// full topic id on the wire is `prefix <> key`. `field_get` and `field_set`
-/// read and write one instance's sub-model by key, so back them with a keyed
-/// collection like `Dict(String, _)`. This single entry routes outgoing
-/// messages, incoming updates, and snapshot merges to the right key.
+/// `extract` returns the instance key plus the sub-message, and the wire id is
+/// `prefix <> key`. `field_get`/`field_set` read and write one instance's
+/// sub-model by key, so back them with a keyed collection like
+/// `Dict(String, _)`. This one entry routes outgoing messages, incoming
+/// updates, and snapshot merges to the right key.
 ///
 /// ```gleam
 /// store.wiring()
@@ -266,9 +261,9 @@ pub fn unwrap_local(local: Local(a)) -> a {
   value
 }
 
-/// Create an empty wiring configuration. Pipe through [`session`](#session),
-/// [`topic`](#topic), and [`topic_kind`](#topic_kind) to register stores.
-/// Pass the result to [`client.start`](./client.html#start) and
+/// Create an empty wiring. Pipe through [`session`](#session),
+/// [`topic`](#topic), and [`topic_kind`](#topic_kind) to register stores, then
+/// pass to [`client.start`](./client.html#start) and
 /// [`server.new`](./server.html#new).
 ///
 /// ```gleam
@@ -284,10 +279,9 @@ pub fn wiring() -> Wiring(model, message) {
 // INTERNAL FUNCTIONS
 // =============================================================================
 
-/// Apply a message to the store, returning the updated store. Used
-/// internally for batch rendering: multiple messages are applied before a
-/// single render frame so rapid bursts of updates are combined into one
-/// DOM update.
+/// Apply a message to the store, returning the updated store. Used for batch
+/// rendering, several messages apply before one render frame so rapid bursts
+/// coalesce into a single DOM update.
 @internal
 pub fn apply(
   store: Store(model, message),
@@ -315,8 +309,8 @@ pub fn apply_message(
   }
 }
 
-/// Read the current model out of a [`Store`](#Store). Used by sibling Lily
-/// modules and by tests that need to inspect the store's contents.
+/// Read the current model out of a [`Store`](#Store). Used by sibling modules
+/// and tests that inspect the store's contents.
 @internal
 pub fn get_model(store: Store(model, message)) -> model {
   store.model
@@ -352,11 +346,10 @@ pub fn merge_snapshot(
   }
 }
 
-/// Determine which target a message should be routed to. Returns `Session`
-/// when no topic extract function accepts the message, this is the safe
-/// fallback for unrecognised messages. Session wins if both the session
-/// and a topic extract accept the same message, topic `extract` functions
-/// must be mutually exclusive.
+/// Determine which target a message routes to. Returns `Session` when no topic
+/// extract accepts it, the safe fallback for unrecognised messages. Session
+/// wins if both a session and a topic extract accept the same message, so
+/// topic `extract` functions must be mutually exclusive.
 @internal
 pub fn route_message(wiring: Wiring(model, message), message: message) -> Target {
   case wiring.session {
@@ -369,8 +362,8 @@ pub fn route_message(wiring: Wiring(model, message), message: message) -> Target
   }
 }
 
-/// Return the apply-message function for the session store entry, if any.
-/// Used by `server.gleam` to build the session-message handler at start time.
+/// The apply-message function for the session store entry, if any. Used by
+/// `server.gleam` to build the session-message handler at start time.
 @internal
 pub fn session_apply(
   wiring: Wiring(model, message),
@@ -378,8 +371,8 @@ pub fn session_apply(
   option.map(wiring.session, fn(config) { config.apply })
 }
 
-/// Return the apply-message function for a named topic entry, if any.
-/// Used by `topic.gleam` to build the topic-store handler in `with_store`.
+/// The apply-message function for a named topic entry, if any. Used by
+/// `topic.gleam` to build the topic-store handler in `with_store`.
 @internal
 pub fn topic_apply(
   wiring: Wiring(model, message),
@@ -396,9 +389,9 @@ pub fn topic_apply(
 // =============================================================================
 
 /// Config for a parametric topic family (see [`topic_kind`](#topic_kind)).
-/// Unlike `TargetConfig`, the apply and merge are keyed by an instance id
-/// derived from the message (`topic_id_of`) or the target id (`merge_snapshot`
-/// takes the key), so one config serves every instance sharing `prefix`.
+/// Unlike `TargetConfig`, apply and merge are keyed by an instance id from the
+/// message (`topic_id_of`) or the target id (`merge_snapshot` takes the key),
+/// so one config serves every instance sharing `prefix`.
 type KindConfig(model, message) {
   KindConfig(
     prefix: String,
@@ -436,9 +429,9 @@ fn apply_to_topics(
   }
 }
 
-/// Find the exact topic entry whose extract accepts this message. Topic
-/// extracts are mutually exclusive (per the `route_message` contract), so the
-/// first match wins and there is no need to scan past it.
+/// Find the exact topic entry whose extract accepts this message. Extracts are
+/// mutually exclusive (per the `route_message` contract), so the first match
+/// wins.
 fn find_topic_entry(
   wiring: Wiring(model, message),
   message: message,
@@ -492,8 +485,8 @@ fn make_target_config(
   )
 }
 
-/// Find the kind whose prefix matches `id`, choosing the longest prefix when
-/// several match so a more specific family wins.
+/// Find the kind whose prefix matches `id`, longest prefix wins when several
+/// match so the more specific family is chosen.
 fn matching_kind(
   wiring: Wiring(model, message),
   id: String,
@@ -512,10 +505,9 @@ fn matching_kind(
   })
 }
 
-/// Route a non-session message: an exact topic entry first, otherwise a
-/// parametric kind (whose concrete id is `prefix <> key` from the message).
-/// Falls back to `Session` when nothing matches, the safe default for
-/// unrecognised messages.
+/// Route a non-session message: exact topic entry first, else a parametric kind
+/// (concrete id `prefix <> key` from the message). Falls back to `Session` when
+/// nothing matches, the safe default for unrecognised messages.
 fn topic_target(wiring: Wiring(model, message), message: message) -> Target {
   case find_topic_entry(wiring, message) {
     Ok(#(id, _)) -> transport.Topic(id)

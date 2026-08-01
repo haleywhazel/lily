@@ -139,9 +139,9 @@ pub opaque type Builder(model, message) {
 }
 
 /// Handle to a running Lily server, backed by an
-/// [`actor_cell`](./internal/actor_cell.html) (an OTP actor on Erlang, a
-/// `Reference` cell on JavaScript). Also carries `serialiser` and
-/// `initial_model` for zero-copy access by `topic.new`.
+/// [`actor_cell`](./internal/actor_cell.html) (OTP actor on Erlang, `Reference`
+/// cell on JavaScript). Also carries `serialiser` and `initial_model` for
+/// zero-copy access by `topic.new`.
 pub opaque type Server(model, message) {
   Server(
     handle: ServerHandle(model, message),
@@ -155,8 +155,8 @@ pub opaque type Server(model, message) {
 // INTERNAL TYPES
 // =============================================================================
 
-/// Callbacks registered by a topic actor so the server can route frames to it.
-/// Created inside `topic.gleam`. Stored in the server's topic registry.
+/// Callbacks a topic actor registers so the server can route frames to it.
+/// Created in `topic.gleam`, stored in the server's topic registry.
 @internal
 pub type ServerTopicEntry(model, message) {
   ServerTopicEntry(
@@ -172,8 +172,8 @@ pub type ServerTopicEntry(model, message) {
 // PUBLIC FUNCTIONS
 // =============================================================================
 
-/// Register a client connection. The `send` callback is how the server pushes
-/// frames back to this specific client.
+/// Register a client connection. The `send` callback pushes frames back to
+/// this specific client.
 ///
 /// ```gleam
 /// server.connect(server, client_id: id, send: process.send(outgoing_subject, _))
@@ -194,14 +194,12 @@ pub fn disconnect(
   actor_cell.send(server.handle, ClientDisconnected(client_id:))
 }
 
-/// Apply `message` to the session store of one connected client and send a
-/// `SessionUpdate` frame back to that client. Use for server-initiated
-/// per-client updates, e.g. pushing a fresh slice after authentication, server
-/// timers that affect one user, async DB results.
+/// Apply `message` to one connected client's session store and send a
+/// `SessionUpdate` frame back to it. Use for server-initiated per-client
+/// updates, e.g. a fresh slice after auth, per-user timers, async DB results.
 ///
-/// No-op if no client with `client_id` is currently connected. Safe to call
-/// from any process, including spawned tasks, so spawn the slow work and
-/// call `dispatch_to` when the result is ready.
+/// No-op if no client with `client_id` is connected. Safe to call from any
+/// process, so spawn the slow work and call `dispatch_to` when it's ready.
 ///
 /// ```gleam
 /// server.on_connect(server, fn(client_id) {
@@ -216,11 +214,10 @@ pub fn dispatch_to(
   actor_cell.send(server.handle, DispatchToClient(client_id:, message:))
 }
 
-/// Apply `message` to every connected client's session store and send each
-/// of them a `SessionUpdate` frame. Use for server-wide announcements that
-/// also mutate session state, such as forcing a feature-flag refresh. For
-/// fire-and-forget broadcasts without session mutation, use a topic
-/// instead.
+/// Apply `message` to every connected client's session store and send each a
+/// `SessionUpdate` frame. Use for server-wide announcements that also mutate
+/// session state, like a forced feature-flag refresh. For fire-and-forget
+/// broadcasts without session mutation, use a topic.
 ///
 /// ```gleam
 /// server.dispatch_to_all(server, message: SystemBannerUpdated(banner))
@@ -232,9 +229,9 @@ pub fn dispatch_to_all(
   actor_cell.send(server.handle, DispatchToAllClients(message:))
 }
 
-/// Generate a cryptographically random 32-character hex client identifier.
-/// Pair with [`connect`](#connect) so every connection carries a stable,
-/// server-issued id.
+/// Generate a cryptographically random 32-character hex client id. Pair with
+/// [`connect`](#connect) so every connection carries a stable, server-issued
+/// id.
 ///
 /// ```gleam
 /// let client_id = server.generate_client_id()
@@ -244,10 +241,10 @@ pub fn generate_client_id() -> String {
   ffi_generate_client_id()
 }
 
-/// Process an incoming frame from a client. Decodes the frame and routes
-/// it: `SessionMessage` to the session store, `TopicMessage`,
-/// `Subscribe`, and `Unsubscribe` to the topic actor, `Resync` to a
-/// per-target snapshot fan-out.
+/// Process an incoming frame from a client. Decodes and routes it:
+/// `SessionMessage` to the session store, `TopicMessage`/`Subscribe`/
+/// `Unsubscribe` to the topic actor, `Resync` to a per-target snapshot
+/// fan-out.
 pub fn incoming(
   server: Server(model, message),
   client_id client_id: String,
@@ -256,10 +253,9 @@ pub fn incoming(
   actor_cell.send(server.handle, Incoming(client_id:, bytes:))
 }
 
-/// Set the maximum number of live topic actors the server keeps at once. This
-/// bounds client-driven topic creation through parametric kinds. The default
-/// is generous enough that most servers never reach it. Raise it if your app
-/// legitimately needs more concurrent topics.
+/// Set the maximum number of live topic actors at once, bounding client-driven
+/// topic creation through parametric kinds. The default is generous, raise it
+/// if your app legitimately needs more concurrent topics.
 ///
 /// ```gleam
 /// server.new(initial:, serialiser:, wiring:)
@@ -272,9 +268,9 @@ pub fn max_topics(
   Builder(..builder, max_topics: maximum)
 }
 
-/// Start building a server. Provide the shared initial model (used as
-/// the zero-state for per-connection session stores and for topic
-/// snapshot construction) and the serialiser.
+/// Start building a server. Provide the shared initial model (the zero-state
+/// for per-connection session stores and for topic snapshots) and the
+/// serialiser.
 ///
 /// ```gleam
 /// server.new(
@@ -296,10 +292,9 @@ pub fn new(
   )
 }
 
-/// Register a hook that runs after a client successfully connects, receiving
-/// the client id assigned by the server. Use for presence tracking, audit
-/// logging, or seeding the client's session via
-/// [`dispatch_to`](#dispatch_to).
+/// Register a hook that runs after a client connects, receiving the
+/// server-assigned client id. Use for presence, audit logging, or seeding the
+/// session via [`dispatch_to`](#dispatch_to).
 ///
 /// ```gleam
 /// server.on_connect(server, fn(client_id) {
@@ -313,8 +308,8 @@ pub fn on_connect(
   actor_cell.send(server.handle, SetConnectHook(hook:))
 }
 
-/// Register a hook that runs after a client disconnects, receiving the client
-/// id that just left. Use for presence cleanup or audit logging.
+/// Register a hook that runs after a client disconnects, receiving the id that
+/// just left. Use for presence cleanup or audit logging.
 ///
 /// ```gleam
 /// server.on_disconnect(server, fn(client_id) {
@@ -329,8 +324,8 @@ pub fn on_disconnect(
 }
 
 /// Register a hook that runs after each session message is applied. Receives
-/// the decoded message, the full outer model after the message has been
-/// applied to this client's session store, and the originating client id.
+/// the decoded message, the full outer model after it's applied to this
+/// client's session store, and the originating client id.
 ///
 /// ```gleam
 /// server.on_message(server, fn(message, model, client_id) {
@@ -349,9 +344,9 @@ pub fn on_message(
 
 /// Register a hook that runs for each client-incoming topic message. Receives
 /// the decoded message, the topic id, and the originating client id. Fires
-/// before the topic actor processes the message, regardless of whether the
-/// topic is stateful, ephemeral, or unknown. Does not fire for
-/// server-initiated `topic.dispatch` / `topic.broadcast` calls.
+/// before the topic actor processes it, whether the topic is stateful,
+/// ephemeral, or unknown. Does not fire for server-initiated
+/// `topic.dispatch`/`topic.broadcast`.
 ///
 /// ```gleam
 /// server.on_topic_message(server, fn(message, topic_id, _client_id) {
@@ -365,9 +360,8 @@ pub fn on_topic_message(
   actor_cell.send(server.handle, SetTopicMessageHook(hook:))
 }
 
-/// Start the configured server.
-///
-/// Topics are added then afterwards via `topic.new(server, ...)`.
+/// Start the configured server. Add topics afterwards via
+/// `topic.new(server, ...)`.
 ///
 /// ```gleam
 /// let assert Ok(server) =
@@ -408,11 +402,10 @@ pub fn start(
   })
 }
 
-/// Stop a running server. Every registered topic actor is asked to stop
-/// first, each subscriber receives a final `Acknowledge(Topic(id), seq)`
-/// so client slices reset cleanly. The underlying server actor then
-/// terminates (Erlang) or its `Reference` state cell is cleared
-/// (JavaScript). Connected session clients receive no extra frame.
+/// Stop a running server. Every topic actor is asked to stop first, sending
+/// each subscriber a final `Acknowledge(Topic(id), seq)` so slices reset
+/// cleanly. The server actor then terminates (Erlang) or its `Reference` cell
+/// is cleared (JavaScript). Session clients receive no extra frame.
 pub fn stop(server: Server(model, message)) -> Nil {
   actor_cell.send(server.handle, Stop)
 }
@@ -421,8 +414,8 @@ pub fn stop(server: Server(model, message)) -> Nil {
 // INTERNAL FUNCTIONS
 // =============================================================================
 
-/// Subscribe a client to a topic by routing through the server (so the server
-/// can look up the client's send function).
+/// Subscribe a client to a topic via the server, so it can look up the
+/// client's send function.
 @internal
 pub fn do_subscribe(
   server: Server(model, message),
@@ -432,10 +425,9 @@ pub fn do_subscribe(
   actor_cell.send(server.handle, DoSubscribe(client_id:, topic_id:))
 }
 
-/// Return the configuration values `topic.gleam` needs to build a topic actor:
-/// the initial model (used to construct full-outer-model snapshots), the
-/// serialiser (used to encode topic frames), and the wiring (used to look up
-/// the apply function for a topic's id).
+/// Config values `topic.gleam` needs to build a topic actor: the initial model
+/// (for full-outer-model snapshots), the serialiser (to encode topic frames),
+/// and the wiring (to look up the apply function for a topic id).
 @internal
 pub fn internals(
   server: Server(model, message),
@@ -458,12 +450,11 @@ pub fn register_topic(
   )
 }
 
-/// Register a parametric topic kind. When a client subscribes to a topic
-/// id that starts with `prefix` and no fixed topic with that id exists,
-/// `create` is called with the full topic id and must return a
-/// `ServerTopicEntry` on success or `None` to reject. The entry is
-/// inserted directly into the server state by `find_or_create_topic`, no
-/// server callback is needed.
+/// Register a parametric topic kind. When a client subscribes to an id
+/// starting with `prefix` and no fixed topic with that id exists, `create` is
+/// called with the full id and returns a `ServerTopicEntry` on success or
+/// `None` to reject. `find_or_create_topic` inserts the entry directly, no
+/// server callback needed.
 @internal
 pub fn register_topic_kind(
   server: Server(model, message),
@@ -555,8 +546,8 @@ fn find_or_create_topic(
 ) -> #(ServerState(model, message), Option(ServerTopicEntry(model, message))) {
   case dict.get(state.topics, topic_id) {
     Ok(entry) -> #(state, option.Some(entry))
-    // Parametric topic ids come from the client, so refuse creation past the
-    // cap to stop one client spawning topics without bound.
+    // parametric ids come from the client, so refuse past the cap to stop one
+    // client spawning topics without bound
     Error(_) ->
       case dict.size(state.topics) >= state.max_topics {
         True -> #(state, option.None)
@@ -682,7 +673,7 @@ fn handle_incoming_logic(
     Ok(transport.Resync(cursors:)) ->
       handle_resync_logic(state, client_id, cursors)
 
-    // Server-to-client variants, never legitimately arrive on the server.
+    // server-to-client variants, never legitimately arrive here
     Ok(transport.Acknowledge(_, _))
     | Ok(transport.Connected(_))
     | Ok(transport.Push(_, _))
@@ -723,9 +714,8 @@ fn handle_register_topic_logic(
     Ok(_) -> True
     Error(_) -> False
   }
-  // Both directions matter, `id="room:1"` collides with kind prefix
-  // `"room:"`, and a fixed `id="room"` would shadow that prefix's first
-  // character.
+  // both directions matter, `id="room:1"` collides with kind prefix `"room:"`,
+  // and a fixed `id="room"` would shadow that prefix
   let kind_collision =
     list.any(state.topic_kinds, fn(kind) {
       string.starts_with(id, kind.prefix) || string.starts_with(kind.prefix, id)
@@ -791,8 +781,8 @@ fn handle_session_message_logic(
         option.Some(apply) -> rescue(fn() { apply(connection.model, message) })
       }
       case applied {
-        // A crash means the frame decoded to a value the update function
-        // cannot match. Drop it without acking, keeping the actor alive.
+        // a crash means the frame decoded to a value update can't match, drop
+        // it without acking to keep the actor alive
         Error(reason) -> {
           logging.log(
             logging.Warning,
@@ -861,10 +851,9 @@ fn handle_set_topic_message_hook_logic(
   ServerState(..state, on_topic_message_hook: hook)
 }
 
-/// Stop every registered topic actor (which sends a final
-/// `Acknowledge(Topic(id), seq)` to each subscriber) before the server itself
-/// goes away. Called from both the Erlang `Stop` arm and the JavaScript
-/// `stop()` method.
+/// Stop every topic actor (each sends a final `Acknowledge(Topic(id), seq)` to
+/// its subscribers) before the server goes away. Called from both the Erlang
+/// `Stop` arm and the JavaScript `stop()` method.
 fn handle_stop_logic(state: ServerState(model, message)) -> Nil {
   dict.each(state.topics, fn(_id, entry) { entry.stop() })
 }
@@ -1002,9 +991,9 @@ fn ffi_generate_client_id() -> String {
 }
 
 /// Run `operation`, turning a runtime crash into `Error(description)`. Types
-/// are erased on Erlang, so a hostile frame can decode to a value the update
-/// function cannot match. Catching it keeps one bad frame from dropping the
-/// shared actor and every connection on it.
+/// are erased on Erlang, so a hostile frame can decode to a value update can't
+/// match. Catching it keeps one bad frame from dropping the shared actor and
+/// every connection on it.
 @external(erlang, "lily_server_ffi", "rescue")
 @external(javascript, "./server.ffi.mjs", "rescue")
 @internal

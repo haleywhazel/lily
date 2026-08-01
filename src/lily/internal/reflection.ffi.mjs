@@ -1,13 +1,12 @@
 /**
  * REFLECTION FFI (JAVASCRIPT)
  *
- * Inspects Gleam runtime values and produces target-neutral Reflected trees;
- * also reconstructs values from those trees using a constructor registry.
+ * Inspects Gleam runtime values into target-neutral Reflected trees, and
+ * reconstructs values from those trees via a constructor registry.
  *
- * The constructor registry is populated by transport.ffi.mjs (via
- * registerModule, called from the user's shared types FFI shim). At reflect
- * time we also opportunistically cache constructors we encounter, so values
- * that round-trip through reflect/construct on the same client always work.
+ * The registry is populated by transport.ffi.mjs (via registerModule, from the
+ * user's shared types FFI shim). At reflect time we also cache constructors we
+ * encounter, so values that round-trip on the same client always work.
  */
 
 // =============================================================================
@@ -48,11 +47,10 @@ export function reflect(value) {
       : new ReflectedFloat(value);
   }
 
-  // Gleam list. Match both branches explicitly: Empty is a class with no
-  // head/tail properties, so the "head in value" check below would miss
-  // it and fall through to CustomType, encoding as `{"_":"Empty"}`. The
-  // Erlang side encodes `[]` as an array, so the cross-target wire
-  // format diverges without this check.
+  // Gleam list, match both branches explicitly. Empty is a class with no
+  // head/tail, so a "head in value" check would miss it and fall through to
+  // CustomType, encoding as `{"_":"Empty"}`. Erlang encodes `[]` as an array,
+  // so the cross-target wire format diverges without this.
   if (value instanceof Empty || value instanceof NonEmpty) {
     const items = [];
     let current = value;
@@ -132,8 +130,8 @@ export function construct(reflected) {
   }
 }
 
-/** Identity passthrough: returns the input unchanged. Used to reinterpret
- *  Dynamic as a concrete type after reflection has reconstructed the value. */
+/** Identity passthrough. Reinterprets Dynamic as a concrete type after
+ *  reflection has reconstructed the value. */
 export function passthrough(value) {
   return value;
 }

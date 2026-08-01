@@ -1,18 +1,15 @@
 /**
  * LOGGING (JAVASCRIPT)
  *
- * Writes log lines to the console in the same format used by the `logging`
- * hex package on Erlang: a four-character level code (`INFO`, `EROR`, etc.),
- * a space, then the message. Lines are routed to the console method matching
- * their severity so DevTools applies its own colouring.
+ * Writes console lines matching the `logging` hex package format on Erlang, a
+ * four-character level code (`INFO`, `EROR`, etc.), a space, then the message.
+ * Lines route to the console method matching their severity so DevTools
+ * colours them. Works in browsers, Node, Bun, and Deno.
  *
- * Works identically in browsers, Node, Bun, and Deno.
+ * currentLevel gates messages below it, default 6 (Info). setLevel() updates
+ * it, useful on JS servers with no DevTools.
  *
- * A module-level currentLevel threshold gates messages below it. Default is
- * 6 (Info). setLevel() updates it, useful on JS servers where DevTools is
- * not available.
- *
- * Severity values (lower = more severe):
+ * Severity (lower = more severe):
  *   0 Emergency, 1 Alert, 2 Critical, 3 Error,
  *   4 Warning, 5 Notice, 6 Info, 7 Debug
  */
@@ -30,9 +27,9 @@ const coloured =
   !envvarEnabled("NO_COLOR") &&
   !envvarEnabled("NO_COLOUR");
 
-// Indexed by severity (0..7). One array of pre-rendered tags (with optional
-// ANSI colours), one of console methods. Indexed lookup is cheaper than the
-// previous string-keyed dictionaries and removes a hop through level codes.
+// Indexed by severity (0..7), one array of pre-rendered tags (with optional
+// ANSI colours), one of console methods. Indexed lookup is cheaper than a
+// string-keyed dictionary.
 const TAGS_BY_SEVERITY = coloured
   ? [
       "\x1b[1;41mEMRG\x1b[0m",

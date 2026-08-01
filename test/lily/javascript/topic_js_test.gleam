@@ -10,8 +10,6 @@ import gleeunit/should
 @target(javascript)
 import lily/server
 @target(javascript)
-import lily/store
-@target(javascript)
 import lily/test_support.{type Message, type Model, Decrement, Increment}
 @target(javascript)
 import lily/topic

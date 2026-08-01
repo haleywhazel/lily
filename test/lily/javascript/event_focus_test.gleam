@@ -54,29 +54,6 @@ pub fn event_focus_group_arrow_moves_focus_test() {
 }
 
 @target(javascript)
-pub fn event_focus_group_wraps_past_the_ends_test() {
-  test_support.reset_dom()
-  let runtime = test_support.new_runtime()
-  mount_focus_group_dom()
-  test_support.mount_event(runtime, fn(c) {
-    event.arrow_group(
-      c,
-      items: "#g button",
-      orientation: event.Vertical,
-      wrap: True,
-    )
-  })
-  test_support.focus("#i3")
-  test_support.key_event("#g", "keydown", "ArrowDown")
-  test_support.active_element_id()
-  |> should.equal("i1")
-  test_support.key_event("#g", "keydown", "ArrowUp")
-  test_support.active_element_id()
-  |> should.equal("i3")
-  event.release_arrow_group(runtime, "#g button")
-}
-
-@target(javascript)
 pub fn event_focus_group_clamps_without_wrap_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
@@ -120,6 +97,26 @@ pub fn event_focus_group_home_end_jump_test() {
 }
 
 @target(javascript)
+pub fn event_focus_group_release_stops_navigation_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  mount_focus_group_dom()
+  test_support.mount_event(runtime, fn(c) {
+    event.arrow_group(
+      c,
+      items: "#g button",
+      orientation: event.Vertical,
+      wrap: True,
+    )
+  })
+  event.release_arrow_group(runtime, "#g button")
+  test_support.focus("#i1")
+  test_support.key_event("#g", "keydown", "ArrowDown")
+  test_support.active_element_id()
+  |> should.equal("i1")
+}
+
+@target(javascript)
 pub fn event_focus_group_respects_orientation_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
@@ -141,7 +138,7 @@ pub fn event_focus_group_respects_orientation_test() {
 }
 
 @target(javascript)
-pub fn event_focus_group_release_stops_navigation_test() {
+pub fn event_focus_group_typeahead_jumps_by_label_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   mount_focus_group_dom()
@@ -153,11 +150,35 @@ pub fn event_focus_group_release_stops_navigation_test() {
       wrap: True,
     )
   })
-  event.release_arrow_group(runtime, "#g button")
   test_support.focus("#i1")
+  // A printable key jumps to the next item whose label starts with it.
+  test_support.key_event("#g", "keydown", "3")
+  test_support.active_element_id()
+  |> should.equal("i3")
+  event.release_arrow_group(runtime, "#g button")
+}
+
+@target(javascript)
+pub fn event_focus_group_wraps_past_the_ends_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  mount_focus_group_dom()
+  test_support.mount_event(runtime, fn(c) {
+    event.arrow_group(
+      c,
+      items: "#g button",
+      orientation: event.Vertical,
+      wrap: True,
+    )
+  })
+  test_support.focus("#i3")
   test_support.key_event("#g", "keydown", "ArrowDown")
   test_support.active_element_id()
   |> should.equal("i1")
+  test_support.key_event("#g", "keydown", "ArrowUp")
+  test_support.active_element_id()
+  |> should.equal("i3")
+  event.release_arrow_group(runtime, "#g button")
 }
 
 @target(javascript)
@@ -181,6 +202,44 @@ pub fn event_arrow_group_scopes_items_to_component_test() {
   test_support.active_element_id()
   |> should.equal("i2")
   event.release_arrow_group(runtime, "#g button")
+}
+
+// =============================================================================
+// FOCUS ON MOUNT
+// =============================================================================
+
+@target(javascript)
+pub fn event_focus_on_mount_seeds_focus_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  mount_focus_group_dom()
+  // The decoration fires the seed as the component's bindings register, so the
+  // named target is focused with no observer or open-state involved.
+  test_support.mount_event(runtime, fn(c) { event.focus_on_mount(c, "#i2") })
+  test_support.active_element_id()
+  |> should.equal("i2")
+}
+
+// =============================================================================
+// DETAILS POPUP
+// =============================================================================
+
+@target(javascript)
+pub fn watch_details_open_escape_closes_test() {
+  test_support.reset_dom()
+  event.watch_details_open()
+  test_support.set_inner_html(
+    "#app",
+    "<details id=\"d\" data-lily-focus-on-open=\"true\" open>"
+      <> "<summary id=\"sm\">s</summary>"
+      <> "<button id=\"o\">o</button>"
+      <> "</details>",
+  )
+  test_support.focus("#o")
+  // Escape while focus is inside an open details closes it.
+  test_support.key_event("#o", "keydown", "Escape")
+  test_support.has_attribute("#d", "open")
+  |> should.be_false
 }
 
 // =============================================================================

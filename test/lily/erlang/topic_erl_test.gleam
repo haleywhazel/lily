@@ -10,8 +10,6 @@ import gleeunit/should
 @target(erlang)
 import lily/server
 @target(erlang)
-import lily/store
-@target(erlang)
 import lily/test_support.{type Message, type Model, Decrement, Increment}
 @target(erlang)
 import lily/topic

@@ -2,7 +2,7 @@
  * ACTOR CELL FFI
  *
  * The JavaScript-only mutable box an actor_cell keeps its state in. On Erlang
- * the cell is an OTP process; on JavaScript there is no actor, so the Cell
+ * the cell is an OTP process. On JavaScript there is no actor, so the Cell
  * hosts its state here, reachable again from any async callback.
  */
 

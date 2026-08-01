@@ -500,13 +500,11 @@ fn popups_list() -> component.Component(
   shared.Message,
   Element(shared.Message),
 ) {
-  component.each_live(
+  component.each(
     slice: fn(model: shared.Model) { model.session.popups },
     key: fn(popup: shared.Popup) { int.to_string(popup.id) },
-    initial: render_popup,
-    patch: fn(_popup: shared.Popup) { [] },
+    render: render_popup,
   )
-  |> component.structural
 }
 
 fn render_popup(
@@ -556,7 +554,6 @@ fn room_tabs() -> component.Component(
       }
     },
   )
-  |> component.structural
 }
 
 fn room_tab(room_id: String, active: String) -> Element(shared.Message) {
@@ -611,7 +608,6 @@ fn room_history() -> component.Component(
       }
     },
   )
-  |> component.structural
 }
 
 fn render_chat_entry(entry: shared.ChatEntry) -> Element(shared.Message) {
@@ -655,7 +651,6 @@ fn room_composer() -> component.Component(
       }
     },
   )
-  |> component.structural
   |> event.on_global(
     event: event.input,
     selector: "#room-input",

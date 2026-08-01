@@ -84,8 +84,8 @@ import logging as erlang_logging
 // PUBLIC TYPES
 // =============================================================================
 
-/// Log severity. Matches the eight levels used by Erlang's `logger` and the
-/// `logging` hex package.
+/// Log severity. The eight levels of Erlang's `logger` and the `logging` hex
+/// package.
 pub type Level {
   Alert
   Critical
@@ -97,13 +97,12 @@ pub type Level {
   Warning
 }
 
-/// A single HTTP request to log. `request_id` is an optional correlation id
-/// that, when set, is echoed into the line as `#<id>`. Construct a
-/// `RequestLog(...)` directly and emit it with [`request()`](#request).
+/// A single HTTP request to log. `request_id` is an optional correlation id,
+/// echoed into the line as `#<id>` when set. Construct directly and emit with
+/// [`request()`](#request).
 ///
-/// Request and response bodies are deliberately absent. Logging them risks
-/// leaking passwords, tokens, and other GDPR-protected data, so the transport
-/// should never put them here.
+/// Bodies are deliberately absent, logging them risks leaking passwords,
+/// tokens, and other GDPR-protected data.
 pub type RequestLog {
   RequestLog(
     method: String,
@@ -118,9 +117,9 @@ pub type RequestLog {
 // PUBLIC FUNCTIONS
 // =============================================================================
 
-/// Inspect `value` with `string.inspect` and log the result at the given level.
-/// The inspection is skipped when the level is suppressed, so passing a large
-/// model at `Debug` is cheap in production.
+/// Inspect `value` with `string.inspect` and log it at the given level. The
+/// inspection is skipped when the level is suppressed, so a large model at
+/// `Debug` is cheap in production.
 pub fn auto_log(level: Level, value: a) -> Nil {
   case is_enabled(level) {
     True -> do_log(level, string.inspect(value))
@@ -128,16 +127,15 @@ pub fn auto_log(level: Level, value: a) -> Nil {
   }
 }
 
-/// Configure the default logger. On Erlang, this installs the `logging`
-/// package's pretty formatter and sets the level to `Info`. On JavaScript,
-/// this is a no-op, the console is always ready.
+/// Configure the default logger. On Erlang, installs the `logging` package's
+/// pretty formatter and sets the level to `Info`. On JavaScript, a no-op (the
+/// console is always ready).
 pub fn configure() -> Nil {
   do_configure()
 }
 
-/// Returns `True` if a message at `level` would be emitted by the current
-/// logger configuration. Useful for guarding expensive payload construction
-/// outside [`auto_log`](#auto_log).
+/// `True` if a message at `level` would be emitted under the current config.
+/// Guards expensive payload construction outside [`auto_log`](#auto_log).
 ///
 /// ```gleam
 /// case logging.is_enabled(logging.Debug) {
@@ -154,11 +152,10 @@ pub fn log(level: Level, message: String) -> Nil {
   do_log(level, message)
 }
 
-/// Emit a compact request log line through the same sink as the other
-/// helpers, so it inherits the level tag and colour. The level comes from the
-/// status (5xx is `Error`, 4xx is `Warning`, everything else `Info`), so a
-/// failing route stands out. Suppressed levels short-circuit before the line
-/// is built.
+/// Emit a compact request log line through the same sink as the other helpers,
+/// inheriting the level tag and colour. The level comes from the status (5xx
+/// `Error`, 4xx `Warning`, else `Info`). Suppressed levels short-circuit before
+/// the line is built.
 ///
 /// ```gleam
 /// logging.RequestLog(
@@ -179,12 +176,10 @@ pub fn request(entry: RequestLog) -> Nil {
   }
 }
 
-/// Set the minimum level of log messages to emit. Messages below this level
-/// are suppressed.
+/// Set the minimum level to emit. Messages below it are suppressed.
 ///
-/// On Erlang, delegates to `logger:set_primary_config`. On JavaScript,
-/// maintains a module-level threshold, useful on Node/Bun/Deno servers where
-/// DevTools is not available.
+/// On Erlang, delegates to `logger:set_primary_config`. On JavaScript, keeps a
+/// module-level threshold, useful on Node/Bun/Deno servers with no DevTools.
 pub fn set_level(level: Level) -> Nil {
   do_set_level(level)
 }

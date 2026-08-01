@@ -1,11 +1,9 @@
 /**
  * CLIENT RUNTIME
  *
- * This .mjs file handles the main runtime (apart from transport). It's the
- * browser-side entry point for Lily apps. Runtimes are closure-scoped, so in
- * the file you'll see that createRuntime creates a lot of functions which are
- * then re-exported. Most of the logic is within that function, with the
- * re-exporting not being very interesting.
+ * The main runtime apart from transport, the browser-side entry point for Lily
+ * apps. Runtimes are closure-scoped, so createRuntime defines a lot of methods
+ * that get re-exported as thin wrappers. Most logic lives in that function.
  */
 
 // =============================================================================
@@ -28,7 +26,7 @@ import { Local as StoreLocal } from "./store.mjs";
 // EXPORT FUNCTIONS
 // =============================================================================
 
-/** Apply patches to a specific element */
+/** Apply patches to an element */
 export function applyPatchesToElement(rootElement, patches) {
   for (const patch of patches) {
     const element =
@@ -54,7 +52,7 @@ export function applyPatchesToElement(rootElement, patches) {
   }
 }
 
-/** Create a specific Runtime */
+/** Create a Runtime */
 export function createRuntime(store, apply) {
   let currentStore = store;
   const applyMessage = apply;
@@ -86,31 +84,27 @@ export function createRuntime(store, apply) {
   // Per-target sequence tracking (in-memory, keyed by target key string)
   const sequences = new Map();
 
-  // Per-mount-selector tracking so multi-mount works. Each mount call
-  // routes its newly-allocated component IDs into the segment for its
-  // selector, remounting the same selector tears down the prior segment
-  // before the new render runs. Mounting a different selector appends.
+  // Per-selector tracking so multi-mount works. Each mount routes its new
+  // component IDs into its selector's segment, remounting the same selector
+  // tears down the prior segment first. A different selector appends.
   const mountSegments = new Map();
   let currentMountSegment = null;
 
-  // Stack of active id-capture frames. Each frame collects the component IDs
-  // registered while it is open, so renderChildAndCaptureIds can learn what a
-  // child render added without snapshotting and diffing the whole registry.
-  // A new ID is pushed onto every open frame, so an outer capture still sees
-  // IDs registered by a nested capture (the old set-diff had the same reach).
+  // Stack of id-capture frames. Each collects the component IDs registered
+  // while open, so renderChildAndCaptureIds learns what a child render added
+  // without diffing the whole registry. A new ID pushes onto every open frame,
+  // so an outer capture still sees IDs from a nested one.
   const idCaptureStack = [];
 
-  // Pending transition exits, keyed by element. Lets the each/each_live
-  // reconciler cancel an in-flight exit when the same key reappears
-  // before the duration elapses.
+  // Pending transition exits, keyed by element. Lets the each reconciler
+  // cancel an in-flight exit when the same key reappears before the duration
+  // elapses.
   const pendingExits = new Map();
 
-  // Bindings collected during render that need to fire after the
-  // innerHTML pass. Pushed to by renderDecorated (in component.ffi.mjs);
-  // drained by renderTree. The `collectingBindings` flag is toggled
-  // off by renderEach / renderEachLive / renderSwitch around their
-  // per-item / per-case child renders, so events declared inside those
-  // bodies are ignored by design.
+  // Bindings collected during render to fire after the innerHTML pass. Pushed
+  // by renderDecorated (component.ffi.mjs), drained by renderTree.
+  // `collectingBindings` is toggled off by renderEach around per-item child
+  // renders, so events declared in those bodies are ignored by design.
   let pendingBindings = [];
   let collectingBindings = true;
   // Stashed at mount so renderDecorated can pass it to the binding
@@ -210,9 +204,8 @@ export function createRuntime(store, apply) {
     },
     registerComponent(id, handler) {
       componentRegistry.set(id, handler);
-      // Record into the active mount segment so this mount knows which
-      // IDs belong to it, used to tear down on re-mount of the same
-      // selector.
+      // Record into the active mount segment so re-mount of the same selector
+      // can tear these IDs down.
       if (currentMountSegment) currentMountSegment.add(id);
       // Feed every open capture frame so renderChildAndCaptureIds gets the
       // new IDs without diffing the registry.
@@ -244,10 +237,9 @@ export function createRuntime(store, apply) {
       currentMountSegment = fresh;
     },
     endMountSegment() {
-      // Returns the IDs that were registered during this mount so the
-      // caller can trigger their handlers once with the initial model.
-      // Clearing the tracker stops subsequent renders from leaking into
-      // this segment.
+      // The IDs registered during this mount, so the caller can fire their
+      // handlers once with the initial model. Clearing the tracker stops later
+      // renders leaking into this segment.
       const ids = currentMountSegment
         ? Array.from(currentMountSegment)
         : [];
@@ -297,7 +289,6 @@ export function createRuntime(store, apply) {
       if (onMessageHook) onMessageHook(message);
       if (userMessageHook) userMessageHook(message, currentStore.model);
 
-      // Persist session changes if configured
       if (sessionConfig) {
         persistSessionChanges(sessionConfig.get(currentStore.model));
       }
@@ -321,10 +312,9 @@ export function createRuntime(store, apply) {
       clientIdSetter = set;
     },
     handleClientId(clientId) {
-      // Connected is the server-acknowledged signal that the client has an
-      // identity. The first one fires user.on_connect, subsequent ones
-      // (after a reconnect) don't, since the user already saw on_connect
-      // and any reconnect lifecycle is delivered via on_reconnect.
+      // Server-acknowledged signal that the client has an identity. The first
+      // fires user.on_connect, later ones (after reconnect) don't, that
+      // lifecycle is delivered via on_reconnect instead.
       if (!connectedAtLeastOnce) {
         connectedAtLeastOnce = true;
         if (onConnectHook) onConnectHook(clientId);
@@ -337,9 +327,9 @@ export function createRuntime(store, apply) {
       versionMismatchHook = hook;
     },
     handleVersion(hash) {
-      // Remembers the first hash it sees as the baseline, every later one
-      // (sent again on reconnect) is compared against it. A restart between
-      // connections changes the hash, which is what surfaces a new deploy.
+      // First hash seen is the baseline, every later one (sent again on
+      // reconnect) is compared against it. A restart changes the hash, which
+      // is what surfaces a new deploy.
       if (baselineVersion === null) {
         baselineVersion = hash;
         return;
@@ -348,10 +338,9 @@ export function createRuntime(store, apply) {
       if (mismatch && versionMismatchHook) versionMismatchHook();
     },
     fireReconnectHook() {
-      // Transport on_reconnect fires on every WebSocket open, including the
-      // first. Only fire the user hook on subsequent opens, not the first
-      // (the first one is delivered via on_connect once the server
-      // acknowledges with a Connected frame).
+      // Transport on_reconnect fires on every WebSocket open including the
+      // first. Only fire the user hook on later opens, the first arrives via
+      // on_connect once the server acknowledges with a Connected frame.
       if (connectedAtLeastOnce && onReconnectHook) onReconnectHook();
     },
     fireDisconnectHook() {
@@ -589,13 +578,13 @@ export function installLinkInterception(runtime, within, optOut) {
     )
       return;
 
-    // Accepted: warm navigation, no page reload.
+    // Accepted, warm navigation with no page reload.
     event.preventDefault();
     runtime.navigate(anchor.pathname + anchor.search + anchor.hash);
   });
 }
 
-// A full page navigation: leave the app entirely and let the server handle it.
+// A full page navigation, leave the app entirely and let the server handle it.
 export function load(_runtime, path) {
   if (typeof window !== "undefined") window.location.assign(path);
 }
@@ -773,11 +762,11 @@ export function storeSendFrame(runtime, fn) {
 // =============================================================================
 
 /**
- * Reconnects on close. Every rebuild reloads the page, stashing the live model
- * first so recoverAfterReload can restore it on the other side. A storm guard
- * suppresses a reload that lands within a short window of the previous one, so
- * a misbehaving signal can never spin the page into a reload loop that would
- * hang or crash the browser. Normal edits are seconds apart and unaffected.
+ * Reconnects on close. Each rebuild reloads the page, stashing the live model
+ * first so recoverAfterReload can restore it. A storm guard suppresses a
+ * reload landing within a short window of the previous one, so a misbehaving
+ * signal can't spin the page into a reload loop. Normal edits are seconds
+ * apart and unaffected.
  */
 function connectDevReload(runtime, url, reconnectMs, guardMs) {
   const target = url || devReloadUrl();
@@ -844,12 +833,11 @@ function stashModelForReload(model) {
 }
 
 /**
- * Guardrail for live-patch attributes. Patch values commonly derive from the
+ * Guardrail for live-patch attributes. Patch values often derive from the
  * server-driven model, which can carry other clients' input, so an on-handler
- * name or a script-scheme URL would be a scripting vector. Returns true for
- * those and lets everything else through. Embedded control characters and
- * whitespace are stripped first so an obfuscated scheme can't slip past,
- * matching how browsers normalise a URL scheme.
+ * name or script-scheme URL is a scripting vector. Returns true for those.
+ * Control characters and whitespace are stripped first so an obfuscated scheme
+ * can't slip past, matching how browsers normalise a URL scheme.
  */
 function isUnsafeAttribute(name, value) {
   if (name.toLowerCase().startsWith("on")) return true;
@@ -900,7 +888,7 @@ const PRIMITIVE_TYPES = new Set(["string", "number", "boolean"]);
 // sessionStorage key stashModelForReload writes and recoverAfterReload reads.
 const RELOAD_STASH_KEY = "lily_dev_reload_state";
 
-// Storm guard: reloads landing within the caller's guard window of the last
+// Storm guard. Reloads landing within the caller's guard window of the last
 // one are suppressed, breaking any accidental reload loop before it can hang
 // the page. The window itself comes from enable_hot_reload's config.
 const RELOAD_GUARD_KEY = "lily_dev_last_reload";

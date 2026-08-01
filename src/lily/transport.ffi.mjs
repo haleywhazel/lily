@@ -6,10 +6,10 @@
  * reflection FFIs, this file no longer carries a codec of its own.
  *
  * Both transports persist offline queues to sessionStorage and flush them on
- * reconnection before sending Resync. sessionStorage (not localStorage) so the
- * queue is scoped per tab: localStorage is shared across every tab on the
- * origin, so two tabs would clobber each other's unsent frames on the one key
- * (overwrite on persist, and removeItem on drain wiping the other tab's frames).
+ * reconnection before sending Resync. sessionStorage (not localStorage) scopes
+ * the queue per tab. localStorage is shared across every tab on the origin, so
+ * two tabs would clobber each other's unsent frames on the one key (overwrite
+ * on persist, and removeItem on drain wiping the other tab's frames).
  */
 
 // =============================================================================
@@ -41,9 +41,9 @@ export function registerModule(moduleNamespace) {
 /**
  * Establish HTTP/SSE transport connection with offline queueing.
  *
- * Server to client: SSE text frames (EventSource).
- * Client to server: binary POST (application/octet-stream).
- * Offline queue: base64-encoded frames persisted to sessionStorage.
+ * Server to client is SSE text frames (EventSource). Client to server is
+ * binary POST (application/octet-stream). The offline queue holds
+ * base64-encoded frames persisted to sessionStorage.
  */
 export function httpConnect(postUrl, eventsUrl, flushBatchSize, handler) {
   const queue = createOfflineQueue(STORAGE_KEY_HTTP_PENDING);

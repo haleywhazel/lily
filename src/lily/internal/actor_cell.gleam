@@ -23,9 +23,9 @@ import gleam/result
 // PUBLIC TYPES
 // =============================================================================
 
-/// The outcome of reducing one event against the cell's state. `Continue`
-/// carries the next state, `Reply` also answers a synchronous [`call`](#call),
-/// and `Halt` stops the cell (any cleanup runs inside the reducer first).
+/// Outcome of reducing one event. `Continue` carries the next state, `Reply`
+/// also answers a synchronous [`call`](#call), `Halt` stops the cell (cleanup
+/// runs inside the reducer first).
 pub type Reduction(state, reply) {
   Continue(state)
   Reply(state, reply)
@@ -53,9 +53,9 @@ pub opaque type Cell(state, event, reply) {
 // =============================================================================
 
 @target(erlang)
-/// Synchronously send `event` and return the reducer's `Reply` value, falling
-/// back to `default` when the cell has stopped or the event does not reply.
-/// Erlang blocks on the actor, JavaScript applies the reducer in place.
+/// Synchronously send `event`, returning the reducer's `Reply` value or
+/// `default` when the cell has stopped or the event does not reply. Erlang
+/// blocks on the actor, JavaScript applies the reducer in place.
 @internal
 pub fn call(
   cell: Cell(state, event, reply),
@@ -93,7 +93,7 @@ pub fn call(
 }
 
 @target(erlang)
-/// Asynchronously send `event`. The reducer should return `Continue` or `Halt`.
+/// Asynchronously send `event`. The reducer returns `Continue` or `Halt`.
 @internal
 pub fn send(cell: Cell(state, event, reply), event: event) -> Nil {
   actor.send(cell.subject, Cast(event:))
@@ -146,8 +146,8 @@ type Envelope(event, reply) {
   Sync(event: event, reply_to: Subject(reply))
 }
 
-// The JavaScript-only mutable box the Cell keeps its state in, since there is
-// no actor to hold it.
+// JavaScript-only mutable box holding the Cell's state, since there is no
+// actor to hold it.
 @target(javascript)
 type Reference(value)
 

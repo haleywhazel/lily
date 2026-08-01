@@ -13,8 +13,6 @@ import lily/component
 @target(javascript)
 import lily/event
 @target(javascript)
-import lily/store
-@target(javascript)
 import lily/test_support.{type Message, type Model, Increment, SetName}
 
 // A slotted child that carries a typed message in its data-message via the

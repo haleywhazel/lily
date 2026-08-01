@@ -141,10 +141,9 @@ pub opaque type Connector {
   Connector(connect: fn(Handler) -> Transport)
 }
 
-/// Callbacks the runtime provides to the transport. The transport calls
-/// `on_receive` when a message arrives from the server, `on_reconnect` when
-/// the connection is established or restored, and `on_disconnect` when the
-/// connection is lost.
+/// Callbacks the runtime provides to the transport. `on_receive` fires on a
+/// message from the server, `on_reconnect` when the connection is established
+/// or restored, `on_disconnect` when it is lost.
 @internal
 pub type Handler {
   Handler(
@@ -155,101 +154,93 @@ pub type Handler {
 }
 
 @target(javascript)
-/// Configuration for an HTTP/SSE connection. Requires both a POST URL for
-/// client-to-server messages and an SSE events URL for server-to-client.
+/// HTTP/SSE connection config. A POST URL for client-to-server messages and an
+/// SSE events URL for server-to-client.
 pub opaque type HttpConfig {
   HttpConfig(post_url: String, events_url: String, flush_batch_size: Int)
 }
 
-/// Wire-format envelope used between client and server. Sequence numbers
-/// are assigned by the server and tracked separately per [`Target`](#Target),
-/// so each store stays in sync independently.
+/// Wire-format envelope between client and server. Sequence numbers are
+/// server-assigned and tracked separately per [`Target`](#Target), so each
+/// store stays in sync independently.
 ///
-/// Sequence numbers are ordering metadata, not a security control. The client
-/// records whatever sequence a frame carries without a monotonicity check, so
-/// they give no replay or reorder protection on their own. The server is the
-/// trust anchor (it assigns ids and sequences and ignores server-to-client
-/// frames arriving from a client), and confidentiality and integrity rest on
-/// the transport. Run over secure connections in production. The built-in
-/// connectors already select `wss` automatically on an HTTPS page.
+/// Sequences are ordering metadata, not a security control. The client records
+/// whatever sequence a frame carries with no monotonicity check, so they give
+/// no replay or reorder protection alone. The server is the trust anchor (it
+/// assigns ids and sequences and ignores server-to-client frames from a
+/// client), and confidentiality and integrity rest on the transport. Run over
+/// secure connections in production. Built-in connectors select `wss`
+/// automatically on an HTTPS page.
 @internal
 pub type Protocol(model, message) {
-  /// Sent by the server after applying a `SessionMessage` or `TopicMessage`
-  /// and assigning it a sequence number for the relevant target. Also sent
-  /// to a topic's subscribers when the topic is stopped.
+  /// Server, after applying a `SessionMessage` or `TopicMessage` and assigning
+  /// it a sequence for the target. Also sent to a topic's subscribers when the
+  /// topic is stopped.
   Acknowledge(target: Target, sequence: Int)
 
-  /// Sent by the server immediately after a client connects, carrying the
-  /// server-assigned `client_id`. Use
-  /// [`client.client_id`](./client.html#client_id) to inject it into your
-  /// model so every session carries its authoritative identity.
+  /// Server, right after a client connects, carrying the server-assigned
+  /// `client_id`. Use [`client.client_id`](./client.html#client_id) to inject
+  /// it into your model so every session carries its identity.
   Connected(client_id: String)
 
-  /// Sent by the server directly to subscribers of a topic. Carries no
-  /// sequence number and is never replayed on resync. Ephemeral by design.
+  /// Server, directly to a topic's subscribers. No sequence, never replayed on
+  /// resync. Ephemeral by design.
   Push(topic_id: String, payload: message)
 
-  /// Sent by the server when a `Subscribe` is denied: missing topic or
-  /// kind, invalid topic id, or `can_subscribe` returned `False`.
+  /// Server, when a `Subscribe` is denied: missing topic or kind, invalid
+  /// topic id, or `can_subscribe` returned `False`.
   Rejected(topic_id: String, reason: String)
 
-  /// Sent by the client to request the current state of every known target
-  /// after a full reconnect. The server responds with a `Snapshot` per
-  /// target regardless of how far behind the client is, so the wire form
-  /// is just the list of targets the client wants resynced.
+  /// Client, requesting the current state of every known target after a full
+  /// reconnect. The server responds with a `Snapshot` per target regardless of
+  /// how far behind, so the wire form is just the target list.
   Resync(cursors: List(Target))
 
-  /// Carries an update from the client to be applied to the session store
-  /// of the originating connection.
+  /// Client update to apply to the originating connection's session store.
   SessionMessage(payload: message)
 
-  /// Carries an applied session-store update from the server to a single
-  /// targeted client, sent by [`server.dispatch_to`](./server.html#dispatch_to)
-  /// or [`server.dispatch_to_all`](./server.html#dispatch_to_all).
-  /// Sequence is the client's session sequence after applying.
+  /// Server, an applied session-store update to a single targeted client, sent
+  /// by [`server.dispatch_to`](./server.html#dispatch_to) or
+  /// [`server.dispatch_to_all`](./server.html#dispatch_to_all). Sequence is
+  /// the client's session sequence after applying.
   SessionUpdate(sequence: Int, payload: message)
 
-  /// Sent by the server in response to `Resync` (per target) and to a
-  /// `Subscribe` (for the subscribed topic).
+  /// Server, in response to `Resync` (per target) and `Subscribe` (the
+  /// subscribed topic).
   Snapshot(target: Target, sequence: Int, state: model)
 
-  /// Sent by the client to join a topic. The server replies with
-  /// `Snapshot(Topic(id), ...)` on success or `Rejected(id, reason)` on
-  /// failure.
+  /// Client, to join a topic. Server replies `Snapshot(Topic(id), ...)` on
+  /// success or `Rejected(id, reason)` on failure.
   Subscribe(topic_id: String)
 
-  /// Carries an update from the client to be applied to a shared topic
-  /// store. The server fans out the result as `TopicUpdate` to every other
-  /// subscriber and `Acknowledge` to the originator.
+  /// Client update to apply to a shared topic store. Server fans the result
+  /// out as `TopicUpdate` to every other subscriber and `Acknowledge` to the
+  /// originator.
   TopicMessage(topic_id: String, payload: message)
 
-  /// Carries an applied topic-store update from the server to every
-  /// subscriber other than the originator. Sequence is the topic's
-  /// sequence after applying.
+  /// Server, an applied topic-store update to every subscriber but the
+  /// originator. Sequence is the topic's sequence after applying.
   TopicUpdate(topic_id: String, sequence: Int, payload: message)
 
-  /// Sent by the client to leave a topic. Fire-and-forget, the server
-  /// removes the subscriber and sends no confirmation frame back.
+  /// Client, to leave a topic. Fire-and-forget, no confirmation frame back.
   Unsubscribe(topic_id: String)
 
-  /// Sent by the server on connect and reconnect, carrying a build
-  /// identifier. The client remembers the first one it sees and compares
-  /// every later one against it, so a value that changes between
-  /// connections (a deploy landed) can be surfaced to the user. See
+  /// Server, on connect and reconnect, carrying a build identifier. The client
+  /// remembers the first and compares later ones, so a change (a deploy
+  /// landed) can be surfaced to the user. See
   /// [`client.on_version_mismatch`](./client.html#on_version_mismatch).
   Version(hash: String)
 }
 
-/// Serialises and deserialises `Protocol` values to and from bytes. The
-/// `Auto` variant uses positional encoding and works for any Gleam custom
-/// type without configuration, its `format` field selects JSON or MessagePack
-/// at runtime. `CustomJson` and `CustomBinary` carry user-supplied codecs and
-/// have a fixed format.
+/// Serialises `Protocol` values to and from bytes. `Auto` uses positional
+/// encoding, works for any Gleam custom type without config, its `format`
+/// field selecting JSON or MessagePack at runtime. `CustomJson` and
+/// `CustomBinary` carry user-supplied codecs at a fixed format.
 ///
 /// Construct via [`automatic`](#automatic), [`custom_json`](#custom_json), or
-/// [`custom_binary`](#custom_binary). Toggle the auto format using
-/// [`use_json`](#use_json) and [`use_message_pack`](#use_message_pack), these
-/// are no-ops on custom serialisers.
+/// [`custom_binary`](#custom_binary). Toggle the auto format via
+/// [`use_json`](#use_json) and [`use_message_pack`](#use_message_pack), no-ops
+/// on custom serialisers.
 pub opaque type Serialiser(model, message) {
   Auto(format: AutoFormat, codec: BinaryCodec(model, message))
   CustomJson(
@@ -261,8 +252,8 @@ pub opaque type Serialiser(model, message) {
   CustomBinary(codec: BinaryCodec(model, message))
 }
 
-/// `Target` identifies which store a frame applies to, the per-connection
-/// session store or a named shared topic store.
+/// Which store a frame applies to, the per-connection session store or a named
+/// shared topic store.
 @internal
 pub type Target {
   Session
@@ -270,17 +261,16 @@ pub type Target {
 }
 
 /// Transport handle returned by a [`Connector`](#Connector). Carries `send`
-/// to transmit bytes and `close` to terminate the connection. Constructed
-/// inside the transport module by [`websocket_connect`](#websocket_connect)
-/// and [`http_connect`](#http_connect), not user-facing.
+/// and `close`. Constructed by [`websocket_connect`](#websocket_connect) and
+/// [`http_connect`](#http_connect), not user-facing.
 @internal
 pub opaque type Transport {
   Transport(send: fn(BitArray) -> Nil, close: fn() -> Nil)
 }
 
 @target(javascript)
-/// Configuration for a WebSocket connection. Use the builder functions to
-/// customise reconnection behaviour.
+/// WebSocket connection config. Use the builder functions to customise
+/// reconnection.
 pub opaque type WebSocketConfig {
   WebSocketConfig(
     url: String,
@@ -295,9 +285,8 @@ pub opaque type WebSocketConfig {
 // PRIVATE TYPES
 // =============================================================================
 
-/// Format selector for the [`Auto`](#Serialiser) variant of
-/// [`Serialiser`](#Serialiser). Toggled by [`use_json`](#use_json) and
-/// [`use_message_pack`](#use_message_pack).
+/// Format selector for the [`Auto`](#Serialiser) variant. Toggled by
+/// [`use_json`](#use_json) and [`use_message_pack`](#use_message_pack).
 type AutoFormat {
   AutoJson
   AutoMessagePack
@@ -313,8 +302,8 @@ type BinaryCodec(model, message) {
   )
 }
 
-/// One field of a `Protocol` envelope, the single source of truth both the
-/// JSON and MessagePack encoders map over.
+/// One field of a `Protocol` envelope, the source of truth both the JSON and
+/// MessagePack encoders map over.
 type Field(model, message) {
   FieldInt(name: String, value: Int)
   FieldMessage(name: String, value: message)
@@ -347,37 +336,34 @@ type WsHandle
 /// transport.automatic() |> transport.use_message_pack()
 /// ```
 ///
-/// On JavaScript, constructors must be registered before connecting,
-/// otherwise the decoder can't reconstruct types that only arrive from the
-/// server or other clients. Use an FFI shim in your shared types module
-/// that calls `registerModule` from `transport.ffi.mjs`, once per file for
-/// multiple modules. See the module documentation for the full pattern.
+/// On JavaScript, register constructors before connecting, else the decoder
+/// can't reconstruct types that only arrive from the server or other clients.
+/// Use an FFI shim in your shared types module calling `registerModule` from
+/// `transport.ffi.mjs`, once per file. See the module docs for the full
+/// pattern.
 ///
 /// ## Supported value shapes
 ///
 /// Every Gleam value the model and message types are likely to hold:
 ///
-/// - **Primitives:** `Int`, `Float`, `String`, `Bool`, `Nil`.
-/// - **Custom types:** records and variants, encoded as a tagged map
-///   whose `_` field carries the PascalCase constructor name.
-/// - **Lists:** encoded as arrays.
-/// - **Tuples:** `#(a, b)` encoded as tag-less maps with positional
-///   keys (`{"0":a,"1":b}`), told apart from custom types by the
-///   absence of `_`.
-/// - **`gleam/dict.Dict`:** encoded as `{"_":"$dict","0":[[k,v],...]}`.
-/// - **`gleam/set.Set`:** encoded as `{"_":"$set","0":[v,...]}`.
+/// - Primitives, `Int`, `Float`, `String`, `Bool`, `Nil`.
+/// - Custom types, records and variants, a tagged map whose `_` field carries
+///   the PascalCase constructor name.
+/// - Lists, as arrays.
+/// - Tuples, `#(a, b)` as tag-less maps with positional keys
+///   (`{"0":a,"1":b}`), told from custom types by the absent `_`.
+/// - `gleam/dict.Dict`, as `{"_":"$dict","0":[[k,v],...]}`.
+/// - `gleam/set.Set`, as `{"_":"$set","0":[v,...]}`.
 ///
 /// ## Not supported: `BitArray`
 ///
-/// `BitArray` fields in synced types are not auto-encoded. The Erlang runtime
-/// represents both `String` and `BitArray` as native binaries, so the
-/// reflection layer can't tell them apart at runtime, a byte sequence like
-/// `<<104,101,108,108,111>>` is both a valid `String` and a valid `BitArray`.
-/// Encoding the wrong one would silently corrupt data.
+/// `BitArray` fields in synced types are not auto-encoded. Erlang represents
+/// both `String` and `BitArray` as native binaries, so reflection can't tell
+/// them apart, a byte sequence like `<<104,101,108,108,111>>` is both a valid
+/// `String` and a valid `BitArray`. Encoding the wrong one corrupts data.
 ///
-/// If your model needs raw bytes, wrap them in a marker CustomType and encode
-/// them yourself with [`custom_binary`](#custom_binary) or
-/// [`custom_json`](#custom_json):
+/// For raw bytes, wrap them in a marker CustomType and encode yourself with
+/// [`custom_binary`](#custom_binary) or [`custom_json`](#custom_json):
 ///
 /// ```gleam
 /// pub type Bytes {
@@ -394,18 +380,16 @@ pub fn automatic() -> Serialiser(model, message) {
   )
 }
 
-/// Close the transport connection. After calling this, the transport should
-/// clean up resources and stop attempting to reconnect.
+/// Close the transport connection. Cleans up resources and stops reconnecting.
 @internal
 pub fn close(transport: Transport) -> Nil {
   transport.close()
 }
 
-/// Create a serialiser from explicit binary encode/decode functions. Use
-/// this to provide a custom binary codec (MessagePack, CBOR, or any binary
-/// format). The format is fixed to binary, the [`use_json`](#use_json) and
-/// [`use_message_pack`](#use_message_pack) toggles are no-ops on this
-/// serialiser.
+/// Create a serialiser from explicit binary encode/decode functions, for a
+/// custom binary codec (MessagePack, CBOR, any binary format). Format fixed to
+/// binary, the [`use_json`](#use_json) and
+/// [`use_message_pack`](#use_message_pack) toggles are no-ops here.
 pub fn custom_binary(
   encode_message encode_message: fn(message) -> BitArray,
   decode_message decode_message: fn(BitArray) -> Result(message, Nil),
@@ -421,11 +405,10 @@ pub fn custom_binary(
   ))
 }
 
-/// Create a serialiser from explicit JSON encode/decode functions. Useful
-/// when the auto format is not suitable (third-party APIs, human-readable
-/// JSON, backwards compatibility). The format is fixed to JSON, the
-/// [`use_json`](#use_json) and [`use_message_pack`](#use_message_pack)
-/// toggles are no-ops on this serialiser.
+/// Create a serialiser from explicit JSON encode/decode functions, when the
+/// auto format is not suitable (third-party APIs, human-readable JSON,
+/// backwards compatibility). Format fixed to JSON, the [`use_json`](#use_json)
+/// and [`use_message_pack`](#use_message_pack) toggles are no-ops here.
 pub fn custom_json(
   encode_message encode_message: fn(message) -> Json,
   decode_message decode_message: decode.Decoder(message),
@@ -455,10 +438,10 @@ pub fn decode(
   }
 }
 
-/// Encodes a `Protocol` into bytes. Uses MessagePack for a binary serialiser
+/// Encode a `Protocol` into bytes. MessagePack for a binary serialiser
 /// (`custom_binary`, or [`automatic`](#automatic) after
-/// [`use_message_pack`](#use_message_pack)), and JSON otherwise. An
-/// [`automatic`](#automatic) serialiser defaults to JSON.
+/// [`use_message_pack`](#use_message_pack)), JSON otherwise.
+/// [`automatic`](#automatic) defaults to JSON.
 pub fn encode(
   protocol: Protocol(model, message),
   serialiser serialiser: Serialiser(model, message),
@@ -477,15 +460,13 @@ pub fn encode(
 /// Encode a model as an inline hydration payload for pre-rendered HTML.
 /// Returns `<script type="application/json" id="lily-snapshot">...</script>`
 /// wrapping a JSON `Snapshot(Session, 0, model)` frame.
-/// [`client.hydrate`](./client.html#hydrate) reads it on mount and uses the
-/// embedded model as the initial state, saving a round-trip on first paint.
-/// The snapshot is a fixed initial state baked into the page, not per-request
-/// data.
+/// [`client.hydrate`](./client.html#hydrate) reads it on mount as the initial
+/// state, saving a round-trip on first paint. A fixed initial state baked into
+/// the page, not per-request data.
 ///
-/// Always JSON regardless of the serialiser's format toggle, since binary
-/// MessagePack isn't safe to inline in HTML. A `CustomBinary` serialiser
-/// produces a base16-encoded payload, so prefer `automatic` or `custom_json`
-/// here.
+/// Always JSON regardless of the format toggle, since binary MessagePack isn't
+/// safe to inline in HTML. A `CustomBinary` serialiser produces a
+/// base16-encoded payload, so prefer `automatic` or `custom_json` here.
 ///
 /// ```gleam
 /// let body = "<!DOCTYPE html><html><body>"
@@ -497,13 +478,13 @@ pub fn encode(
 ///   <> "</body></html>"
 /// ```
 ///
-/// This isn't proper SSR, it only renders the initial snapshot.
+/// Not proper SSR, only the initial snapshot.
 pub fn encode_initial_snapshot(
   serialiser serialiser: Serialiser(model, message),
   model model: model,
 ) -> String {
   let frame = Snapshot(target: Session, sequence: 0, state: model)
-  // Force JSON for the inline payload.
+  // Force JSON for the inline payload
   let json_serialiser = case serialiser {
     Auto(_, codec) -> Auto(AutoJson, codec)
     CustomJson(_, _, _, _) -> serialiser
@@ -517,18 +498,16 @@ pub fn encode_initial_snapshot(
 }
 
 @target(javascript)
-/// Set the maximum number of queued messages POSTed in parallel when the
-/// HTTP/SSE connection reconnects. Reducing this limits concurrent POST
-/// requests during a reconnect burst, increasing it flushes the queue faster.
-/// Default is 10.
+/// Max queued messages POSTed in parallel on HTTP/SSE reconnect. Lower limits
+/// concurrent POSTs during a reconnect burst, higher flushes faster. Default
+/// 10.
 pub fn flush_batch_size(config: HttpConfig, size: Int) -> HttpConfig {
   HttpConfig(..config, flush_batch_size: size)
 }
 
 @target(javascript)
-/// Create a new HTTP/SSE transport configuration. The `post_url` is used for
-/// sending messages to the server, and the `events_url` is used for receiving
-/// Server-Sent Events.
+/// Create an HTTP/SSE transport configuration. `post_url` sends messages to
+/// the server, `events_url` receives Server-Sent Events.
 ///
 /// ```gleam
 /// transport.http(
@@ -544,8 +523,8 @@ pub fn http(
 }
 
 @target(javascript)
-/// Returns a connector function that establishes an HTTP/SSE connection. Pass
-/// the result to `client.connect`.
+/// Returns a connector establishing an HTTP/SSE connection. Pass to
+/// `client.connect`.
 ///
 /// ```gleam
 /// client.connect(runtime,
@@ -573,16 +552,15 @@ pub fn http_connect(config: HttpConfig) -> Connector {
 
 /// Wrap a `connect` function as a [`Connector`](#Connector). Used by
 /// [`websocket_connect`](#websocket_connect), [`http_connect`](#http_connect),
-/// and tests that fake the transport.
+/// and transport fakes in tests.
 @internal
 pub fn make_connector(connect: fn(Handler) -> Transport) -> Connector {
   Connector(connect:)
 }
 
-/// Set the maximum nesting depth the MessagePack decoder will parse. This
-/// bounds stack use on hostile deeply-nested frames. The default is generous,
-/// so raise it only if your model legitimately nests beyond it. No-op on a
-/// `custom_json` serialiser, which does not use the MessagePack decoder.
+/// Max nesting depth the MessagePack decoder will parse, bounding stack use on
+/// hostile deeply-nested frames. Default is generous, raise it only if your
+/// model legitimately nests beyond it. No-op on `custom_json`.
 ///
 /// ```gleam
 /// transport.automatic()
@@ -601,9 +579,9 @@ pub fn max_decode_depth(
   }
 }
 
-/// Create a new [`Transport`](#Transport) with the given send and close
-/// functions. Used by transport implementations (WebSocket, HTTP) to
-/// construct the Transport handle they return from their connector.
+/// Create a [`Transport`](#Transport) from send and close functions. Used by
+/// transport implementations (WebSocket, HTTP) to build the handle they return
+/// from their connector.
 @internal
 pub fn new(
   send send: fn(BitArray) -> Nil,
@@ -613,8 +591,8 @@ pub fn new(
 }
 
 @target(javascript)
-/// Set the base delay in milliseconds for WebSocket reconnection attempts. The
-/// actual delay doubles on each failed attempt until reaching the maximum.
+/// Base delay in milliseconds for WebSocket reconnection. Doubles on each
+/// failed attempt up to the maximum.
 pub fn reconnect_base_milliseconds(
   config: WebSocketConfig,
   milliseconds: Int,
@@ -623,10 +601,10 @@ pub fn reconnect_base_milliseconds(
 }
 
 @target(javascript)
-/// Set the jitter ratio applied to each WebSocket reconnection delay. A ratio
-/// of `0.25` produces plus or minus 25% randomisation, which spreads reconnects across
-/// clients after a mass disconnect so the server doesn't get stampeded. Must
-/// be between 0.0 (no jitter) and 1.0 (full randomisation). Default is 0.25.
+/// Jitter ratio applied to each WebSocket reconnection delay. `0.25` gives
+/// plus or minus 25% randomisation, spreading reconnects after a mass
+/// disconnect so the server isn't stampeded. Between 0.0 (none) and 1.0
+/// (full). Default 0.25.
 pub fn reconnect_jitter_ratio(
   config: WebSocketConfig,
   ratio: Float,
@@ -635,8 +613,7 @@ pub fn reconnect_jitter_ratio(
 }
 
 @target(javascript)
-/// Set the maximum delay in milliseconds between WebSocket reconnection
-/// attempts.
+/// Max delay in milliseconds between WebSocket reconnection attempts.
 pub fn reconnect_max_milliseconds(
   config: WebSocketConfig,
   milliseconds: Int,
@@ -645,10 +622,10 @@ pub fn reconnect_max_milliseconds(
 }
 
 @target(javascript)
-/// Set the backoff multiplier for WebSocket reconnection attempts. The delay
-/// after each failed attempt is multiplied by this value, up to the maximum
-/// set by [`reconnect_max_milliseconds`](#reconnect_max_milliseconds). Default
-/// is 2.0 (standard exponential backoff).
+/// Backoff multiplier for WebSocket reconnection. Delay after each failed
+/// attempt is multiplied by this, up to
+/// [`reconnect_max_milliseconds`](#reconnect_max_milliseconds). Default 2.0
+/// (standard exponential backoff).
 pub fn reconnect_multiplier(
   config: WebSocketConfig,
   multiplier: Float,
@@ -656,14 +633,14 @@ pub fn reconnect_multiplier(
   WebSocketConfig(..config, reconnect_multiplier: multiplier)
 }
 
-/// Run a connector by passing it the runtime's handler. Used by
+/// Run a connector with the runtime's handler. Used by
 /// [`client.connect`](./client.html#connect).
 @internal
 pub fn run_connector(connector: Connector, handler: Handler) -> Transport {
   connector.connect(handler)
 }
 
-/// Send bytes through the transport. The bytes should be a serialised
+/// Send bytes through the transport, a serialised
 /// [`Protocol`](#Protocol) message.
 @internal
 pub fn send(transport: Transport, bytes: BitArray) -> Nil {
@@ -694,9 +671,8 @@ pub fn target_key(target: Target) -> String {
 }
 
 @target(javascript)
-/// Derive a WebSocket URL from the browser's current location. Automatically
-/// uses `wss:` for HTTPS pages and `ws:` for HTTP. The `path` argument
-/// specifies the WebSocket endpoint path.
+/// Derive a WebSocket URL from the browser's current location, using `wss:`
+/// for HTTPS pages and `ws:` for HTTP. `path` is the endpoint path.
 ///
 /// ```gleam
 /// // On https://example.com:3000/app
@@ -708,8 +684,7 @@ pub fn url_from_current_location(path path: String) -> String {
 }
 
 /// Switch the serialiser to JSON encoding. Only meaningful on
-/// [`automatic`](#automatic) serialisers, no-op on `custom_json` or
-/// `custom_binary`.
+/// [`automatic`](#automatic), no-op on `custom_json` or `custom_binary`.
 pub fn use_json(
   serialiser: Serialiser(model, message),
 ) -> Serialiser(model, message) {
@@ -719,9 +694,8 @@ pub fn use_json(
   }
 }
 
-/// Switch the serialiser back to MessagePack encoding after
-/// [`use_json`](#use_json) was called. Only meaningful on
-/// [`automatic`](#automatic) serialisers, no-op on `custom_json` or
+/// Switch the serialiser back to MessagePack after [`use_json`](#use_json).
+/// Only meaningful on [`automatic`](#automatic), no-op on `custom_json` or
 /// `custom_binary`.
 pub fn use_message_pack(
   serialiser: Serialiser(model, message),
@@ -733,9 +707,8 @@ pub fn use_message_pack(
 }
 
 @target(javascript)
-/// Create a new WebSocket configuration with the given URL. Default reconnect
-/// settings are 1000ms base delay and 30000ms maximum delay (exponential
-/// backoff).
+/// Create a WebSocket configuration for the given URL. Defaults 1000ms base
+/// delay, 30000ms maximum (exponential backoff).
 pub fn websocket(url url: String) -> WebSocketConfig {
   WebSocketConfig(
     url: url,
@@ -747,8 +720,8 @@ pub fn websocket(url url: String) -> WebSocketConfig {
 }
 
 @target(javascript)
-/// Returns a connector function that establishes a WebSocket connection. Pass
-/// the result to `client.connect`.
+/// Returns a connector establishing a WebSocket connection. Pass to
+/// `client.connect`.
 ///
 /// ```gleam
 /// client.connect(runtime,
@@ -779,15 +752,14 @@ pub fn websocket_connect(config: WebSocketConfig) -> Connector {
 // PRIVATE FUNCTIONS
 // =============================================================================
 
-/// Decoder for `Acknowledge`
 fn acknowledge_decoder() -> decode.Decoder(Protocol(model, message)) {
   use target <- decode.field("target", target_decoder())
   use sequence <- decode.field("sequence", decode.int)
   decode.success(Acknowledge(target:, sequence:))
 }
 
-// Build the auto codec, capturing `max_decode_depth` so both the envelope and
-// the payload parse honour the configured cap.
+// Capture `max_decode_depth` so envelope and payload parse both honour the
+// cap.
 fn auto_binary_codec(max_decode_depth: Int) -> BinaryCodec(model, message) {
   BinaryCodec(
     encode_message: ffi_auto_encode_message_pack,
@@ -802,7 +774,6 @@ fn auto_binary_codec(max_decode_depth: Int) -> BinaryCodec(model, message) {
   )
 }
 
-/// Decoder for `Connected`
 fn connected_decoder() -> decode.Decoder(Protocol(model, message)) {
   use client_id <- decode.field("client_id", decode.string)
   decode.success(Connected(client_id:))
@@ -1004,8 +975,8 @@ fn decode_message_pack_envelope(
   }
 }
 
-/// Decode MessagePack-encoded bytes back to a Protocol using the provided
-/// codec for payload/state values.
+/// Decode MessagePack bytes to a Protocol, the codec handling payload/state
+/// values.
 fn decode_message_pack_protocol(
   bytes: BitArray,
   codec: BinaryCodec(model, message),
@@ -1070,9 +1041,9 @@ fn encode_json(
   |> bit_array.from_string
 }
 
-/// Encode a Protocol value to MessagePack bytes. Pure Gleam, single source
-/// of truth for both targets. The payload/state slots embed bytes produced
-/// by the configured codec (auto or user-supplied).
+/// Encode a Protocol to MessagePack bytes. Pure Gleam, source of truth for
+/// both targets. Payload/state slots embed bytes from the configured codec
+/// (auto or user-supplied).
 fn encode_message_pack_protocol(
   protocol: Protocol(model, message),
   codec: BinaryCodec(model, message),
@@ -1154,7 +1125,6 @@ fn ffi_auto_encode_message_pack(value: a) -> BitArray {
   auto_codec.encode_message_pack(value)
 }
 
-/// Decoder for `Protocol`
 fn protocol_decoder(
   decode_message: decode.Decoder(message),
   decode_model: decode.Decoder(model),
@@ -1178,8 +1148,8 @@ fn protocol_decoder(
   }
 }
 
-/// The wire tag and ordered fields for each `Protocol` variant. Field order
-/// must match the historical encoders exactly so the wire format is unchanged.
+/// Wire tag and ordered fields for each `Protocol` variant. Field order must
+/// match the historical encoders exactly to keep the wire format unchanged.
 fn protocol_fields(
   protocol: Protocol(model, message),
 ) -> #(String, List(Field(model, message))) {
@@ -1229,7 +1199,6 @@ fn protocol_fields(
   }
 }
 
-/// Decoder for `Push`
 fn push_decoder(
   decode_message: decode.Decoder(message),
 ) -> decode.Decoder(Protocol(model, message)) {
@@ -1238,20 +1207,17 @@ fn push_decoder(
   decode.success(Push(topic_id:, payload:))
 }
 
-/// Decoder for `Rejected`
 fn rejected_decoder() -> decode.Decoder(Protocol(model, message)) {
   use topic_id <- decode.field("topic_id", decode.string)
   use reason <- decode.field("reason", decode.string)
   decode.success(Rejected(topic_id:, reason:))
 }
 
-/// Decoder for `Resync`
 fn resync_decoder() -> decode.Decoder(Protocol(model, message)) {
   use cursors <- decode.field("cursors", decode.list(target_decoder()))
   decode.success(Resync(cursors:))
 }
 
-/// Decoder for `SessionMessage`
 fn session_message_decoder(
   decode_message: decode.Decoder(message),
 ) -> decode.Decoder(Protocol(model, message)) {
@@ -1259,7 +1225,6 @@ fn session_message_decoder(
   decode.success(SessionMessage(payload:))
 }
 
-/// Decoder for `SessionUpdate`
 fn session_update_decoder(
   decode_message: decode.Decoder(message),
 ) -> decode.Decoder(Protocol(model, message)) {
@@ -1268,7 +1233,6 @@ fn session_update_decoder(
   decode.success(SessionUpdate(sequence:, payload:))
 }
 
-/// Decoder for `Snapshot`
 fn snapshot_decoder(
   decode_model: decode.Decoder(model),
 ) -> decode.Decoder(Protocol(model, message)) {
@@ -1278,13 +1242,11 @@ fn snapshot_decoder(
   decode.success(Snapshot(target:, sequence:, state:))
 }
 
-/// Decoder for `Subscribe`
 fn subscribe_decoder() -> decode.Decoder(Protocol(model, message)) {
   use topic_id <- decode.field("topic_id", decode.string)
   decode.success(Subscribe(topic_id:))
 }
 
-/// Decoder for `Target`
 fn target_decoder() -> decode.Decoder(Target) {
   use kind <- decode.field("kind", decode.string)
   case kind {
@@ -1297,7 +1259,6 @@ fn target_decoder() -> decode.Decoder(Target) {
   }
 }
 
-/// Decoder for `TopicMessage`
 fn topic_message_decoder(
   decode_message: decode.Decoder(message),
 ) -> decode.Decoder(Protocol(model, message)) {
@@ -1306,7 +1267,6 @@ fn topic_message_decoder(
   decode.success(TopicMessage(topic_id:, payload:))
 }
 
-/// Decoder for `TopicUpdate`
 fn topic_update_decoder(
   decode_message: decode.Decoder(message),
 ) -> decode.Decoder(Protocol(model, message)) {
@@ -1316,7 +1276,6 @@ fn topic_update_decoder(
   decode.success(TopicUpdate(topic_id:, sequence:, payload:))
 }
 
-/// Decoder for `Unsubscribe`
 fn unsubscribe_decoder() -> decode.Decoder(Protocol(model, message)) {
   use topic_id <- decode.field("topic_id", decode.string)
   decode.success(Unsubscribe(topic_id:))
@@ -1350,7 +1309,6 @@ fn value_string(value: Value) -> Result(String, Nil) {
   }
 }
 
-/// Decoder for `Version`
 fn version_decoder() -> decode.Decoder(Protocol(model, message)) {
   use hash <- decode.field("hash", decode.string)
   decode.success(Version(hash:))

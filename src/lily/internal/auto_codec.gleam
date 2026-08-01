@@ -37,23 +37,23 @@ import lily/internal/reflection.{
 // INTERNAL FUNCTIONS
 // =============================================================================
 
-/// Decode a JSON `Dynamic` (from `json.parse`) back to a Gleam value. Comes out
-/// as `Dynamic` because the call site in transport.gleam pins the concrete type.
+/// Decode a JSON `Dynamic` (from `json.parse`) back to a Gleam value. Returns
+/// `Dynamic` because the transport.gleam call site pins the concrete type.
 @internal
 pub fn decode_json(value: Dynamic) -> Result(Dynamic, Nil) {
   use reflected <- result.try(json_to_reflected(value))
   reflection.construct(reflected)
 }
 
-/// Decode MessagePack bytes back to a Gleam value, capping nesting at
+/// Decode MessagePack bytes to a Gleam value, capping nesting at
 /// [`message_pack.default_max_depth`](./message_pack.html#default_max_depth).
 @internal
 pub fn decode_message_pack(bytes: BitArray) -> Result(Dynamic, Nil) {
   decode_message_pack_bounded(bytes, message_pack.default_max_depth)
 }
 
-/// Like [`decode_message_pack`](#decode_message_pack) but with a caller-chosen
-/// nesting cap, used by the server to bound decoding of untrusted frames.
+/// [`decode_message_pack`](#decode_message_pack) with a caller-chosen nesting
+/// cap, used by the server to bound decoding of untrusted frames.
 @internal
 pub fn decode_message_pack_bounded(
   bytes: BitArray,
@@ -239,8 +239,8 @@ fn json_scalar_to_reflected(value: Dynamic) -> Result(Reflected, Nil) {
               case run_decoder(value, decode.float) {
                 Ok(float_value) -> Ok(ReflectedFloat(float_value))
                 Error(_) ->
-                  // Everything concrete failed, so a bare JSON null is all
-                  // that is left. Anything else is genuinely undecodable.
+                  // Every concrete type failed, so only a bare JSON null is
+                  // left. Anything else is undecodable.
                   case run_decoder(value, decode.optional(decode.bool)) {
                     Ok(option.None) -> Ok(ReflectedNil)
                     _ -> Error(Nil)
@@ -260,10 +260,10 @@ fn json_set_to_reflected(
   Ok(ReflectedSet(members: reflected))
 }
 
-// The mirror of reflected_to_json. Classifies a parsed JSON `Dynamic` into a
-// Reflected node so reflection.construct can rebuild the value, the same way
-// message_pack_value_to_reflected feeds the MessagePack path. Objects are
-// tried before lists before scalars, and a bare null lands last as Nil.
+// Mirror of reflected_to_json. Classifies a parsed JSON `Dynamic` into a
+// Reflected node for reflection.construct, like message_pack_value_to_reflected
+// on the MessagePack path. Objects before lists before scalars, bare null last
+// as Nil.
 fn json_to_reflected(value: Dynamic) -> Result(Reflected, Nil) {
   case run_decoder(value, decode.dict(decode.string, decode.dynamic)) {
     Ok(fields) -> json_object_to_reflected(fields)
@@ -279,9 +279,9 @@ fn json_to_reflected(value: Dynamic) -> Result(Reflected, Nil) {
 }
 
 fn map_to_reflected(entries: List(#(Value, Value))) -> Result(Reflected, Nil) {
-  // Three shapes reach here. A `_`-tagged custom type (the normal case), a
-  // tag-less map with numeric keys (a raw tuple), or the `$dict`/`$set`
-  // sentinels for collections.
+  // Three shapes reach here. A `_`-tagged custom type (normal case), a
+  // tag-less numeric-keyed map (raw tuple), or the `$dict`/`$set` collection
+  // sentinels.
   case extract_constructor_name(entries) {
     Ok("$dict") -> decode_dict(entries)
     Ok("$set") -> decode_set(entries)
@@ -307,8 +307,8 @@ fn message_pack_value_to_reflected(value: Value) -> Result(Reflected, Nil) {
     ValueInteger(n) -> Ok(ReflectedInteger(n))
     ValueFloat(f) -> Ok(ReflectedFloat(f))
     ValueString(s) -> Ok(ReflectedString(s))
-    // The auto-format never produces top-level bin, but the protocol
-    // envelope wraps payload bytes that way, treat it as a nested decode.
+    // Auto-format never emits top-level bin, but the protocol envelope wraps
+    // payload bytes that way, so treat it as a nested decode.
     ValueBytes(bytes) ->
       case message_pack.decode(bytes) {
         Error(_) -> Error(Nil)
@@ -372,8 +372,8 @@ fn reflected_to_message_pack(reflected: Reflected) -> BitArray {
       list.map(items, reflected_to_message_pack)
       |> message_pack.encode_array
     ReflectedTuple(fields:) -> {
-      // Tag-less map with positional keys. No `_` tells the decoder this is a
-      // tuple, not a named constructor.
+      // Tag-less positional-keyed map. No `_` marks it a tuple, not a named
+      // constructor.
       let field_entries =
         list.index_map(fields, fn(field, index) {
           #(
@@ -411,7 +411,7 @@ fn reflected_to_message_pack(reflected: Reflected) -> BitArray {
     }
     ReflectedConstructor(name:, fields:) -> {
       // Positional fields first, name tag last, byte-for-byte what the old FFI
-      // codecs emitted. Zero-field constructors are just the tag.
+      // codecs emitted. Zero-field constructor is just the tag.
       let tag_entry = #(
         message_pack.encode_string("_"),
         message_pack.encode_string(name),

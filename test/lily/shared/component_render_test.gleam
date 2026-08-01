@@ -65,19 +65,6 @@ pub fn render_fragment_concatenates_children_test() {
 }
 
 // =============================================================================
-// SWITCH
-// =============================================================================
-
-pub fn render_switch_uses_built_component_test() {
-  render(fn(_) {
-    component.switch(on: fn(model: Model) { model.count }, case_of: fn(_) {
-      component.static(fn(_) { "<switched/>" })
-    })
-  })
-  |> should.equal("<switched/>")
-}
-
-// =============================================================================
 // EACH
 // =============================================================================
 
@@ -96,7 +83,7 @@ pub fn render_each_renders_per_item_test() {
 }
 
 // =============================================================================
-// LIVE / EACH_LIVE (initial baseline only, patches are ignored)
+// LIVE (initial baseline only, patches are ignored)
 // =============================================================================
 
 pub fn render_live_uses_initial_test() {
@@ -108,18 +95,6 @@ pub fn render_live_uses_initial_test() {
     )
   })
   |> should.equal("<gauge>0</gauge>")
-}
-
-pub fn render_each_live_uses_initial_per_item_test() {
-  render(fn(_) {
-    component.each_live(
-      slice: fn(_) { ["a", "b"] },
-      key: fn(s) { s },
-      initial: fn(s) { component.static(fn(_) { "<x>" <> s <> "</x>" }) },
-      patch: fn(_) { [] },
-    )
-  })
-  |> should.equal("<x>a</x><x>b</x>")
 }
 
 // =============================================================================

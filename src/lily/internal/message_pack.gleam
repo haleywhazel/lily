@@ -22,8 +22,8 @@ import gleam/list
 // INTERNAL TYPES
 // =============================================================================
 
-/// Decoded MessagePack value. The result of parsing a byte stream, the
-/// auto-decoder turns this into a Gleam value via reflection.
+/// Decoded MessagePack value. The auto-decoder turns this into a Gleam value
+/// via reflection.
 @internal
 pub type Value {
   ValueNil
@@ -40,23 +40,21 @@ pub type Value {
 // INTERNAL FUNCTIONS
 // =============================================================================
 
-/// Encode a list of `(key, value)` entries as a MessagePack map. Keys must be
-/// pre-encoded BitArrays, this lets callers cheaply use string keys without
-/// re-wrapping.
+/// Encode `(key, value)` entries as a MessagePack map. Keys must be pre-encoded
+/// BitArrays so callers can reuse string keys without re-wrapping.
 @internal
 pub fn encode_map(entries: List(#(BitArray, BitArray))) -> BitArray {
-  // Flatten to [key0, value0, key1, value1, ...] and concat once. Folding with
-  // `bit_array.concat` instead would recopy the whole accumulator per entry,
-  // making a map with n entries quadratic.
+  // Flatten to [key0, value0, ...] and concat once. Folding with
+  // `bit_array.concat` would recopy the accumulator per entry, going quadratic.
   let body = list.flat_map(entries, fn(entry) { [entry.0, entry.1] })
   bit_array.concat([map_header(list.length(entries)), ..body])
 }
 
-/// Encode a list of MessagePack-encoded items as a MessagePack array.
+/// Encode MessagePack-encoded items as a MessagePack array.
 @internal
 pub fn encode_array(items: List(BitArray)) -> BitArray {
-  // Single concat over header and items. See `encode_map` for why folding
-  // would be quadratic.
+  // Single concat over header and items. See `encode_map` for why folding is
+  // quadratic.
   bit_array.concat([array_header(list.length(items)), ..items])
 }
 
@@ -69,15 +67,14 @@ pub fn encode_int(value: Int) -> BitArray {
     n if n >= 0 && n <= 0xffff -> <<0xcd, n:16-big>>
     n if n >= 0 && n <= 0xffffffff -> <<0xce, n:32-big>>
     n if n >= 0 -> <<0xcf, n:64-big>>
-    // Two's complement for signed values, the destination width truncates
-    // to the low N bits, so adding 2^N before encoding is what we want.
+    // Two's complement. The destination width truncates to the low N bits, so
+    // adding 2^N before encoding gives the right bytes.
     n if n >= -32 -> <<{ 0x100 + n }:8>>
     n if n >= -128 -> <<0xd0, { 0x100 + n }:8>>
     n if n >= -32_768 -> <<0xd1, { 0x10000 + n }:16-big>>
     n if n >= -2_147_483_648 -> <<0xd2, { 0x100000000 + n }:32-big>>
-    // 64-bit values beyond JS Int range fall through to a saturated
-    // representation, integer payloads at this magnitude are not part of
-    // Lily's wire format in practice.
+    // 64-bit values beyond JS Int range saturate. Payloads this large aren't
+    // part of Lily's wire format in practice.
     n -> <<0xd3, n:64-big>>
   }
 }
@@ -127,15 +124,15 @@ pub fn encode_nil() -> BitArray {
   <<0xc0>>
 }
 
-/// Default nesting cap for [`decode`](#decode). A hostile frame can nest
-/// arrays and maps without bound, so without a cap the recursive decode would
-/// exhaust the stack. Real Lily models stay far below this.
+/// Default nesting cap for [`decode`](#decode). Without it a hostile frame
+/// nesting arrays and maps unboundedly would exhaust the stack. Real Lily
+/// models stay far below this.
 @internal
 pub const default_max_depth = 128
 
 /// Decode a MessagePack value at the start of `bytes`, capping nesting at
-/// [`default_max_depth`](#default_max_depth). Returns the parsed
-/// [`Value`](#Value) and the remaining bytes after it.
+/// [`default_max_depth`](#default_max_depth). Returns the
+/// [`Value`](#Value) and the bytes after it.
 @internal
 pub fn decode(bytes: BitArray) -> Result(#(Value, BitArray), Nil) {
   decode_bounded(bytes, default_max_depth)
@@ -150,9 +147,9 @@ pub fn decode_bounded(
   decode_at(bytes, 0, max_depth)
 }
 
-/// Find the value for a string key in a decoded map's entry list. Shared by
-/// the transport envelope decoder and the auto codec, both of which read
-/// string-keyed MessagePack maps.
+/// Find the value for a string key in a decoded map's entries. Shared by the
+/// transport envelope decoder and the auto codec, both reading string-keyed
+/// MessagePack maps.
 @internal
 pub fn lookup_string_key(
   entries: List(#(Value, Value)),

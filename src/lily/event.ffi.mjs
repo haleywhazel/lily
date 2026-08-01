@@ -24,10 +24,7 @@ import { NonEmpty, Empty } from "../gleam.mjs";
 // EXPORT FUNCTIONS
 // =============================================================================
 
-/**
- * Identity, used by Gleam-side unsafe_cast for phantom-typed Event
- * payloads.
- */
+/** Identity, backs Gleam-side unsafe_cast for phantom-typed Event payloads. */
 export function identity(value) {
   return value;
 }
@@ -50,10 +47,7 @@ export function releaseFocusTrap() {
   popFocusTrap();
 }
 
-/**
- * Attaches a click event handler with data-message attribute delegation and
- * options.
- */
+/** Click handler with data-message delegation and options. */
 export function setupClickEventWithOptions(selector, options, handler) {
   const [debounceMs, throttleMs, once, stopPropagation, preventDefault] =
     options;
@@ -83,14 +77,12 @@ export function setupClickEventWithOptions(selector, options, handler) {
 }
 
 /**
- * Attaches a coordinate event with x,y position, the concrete target's
- * data-* attributes, and options. The selector is the match gate (the event
- * must happen within it), the ElementData is read from event.target, the
- * concrete element that fired, so a scoped listener on `#<id>` still
- * distinguishes the sub-element the user acted on. preventDefault is hoisted
- * outside debounce/throttle so drop targets stay receptive even when the
- * inner handler is suppressed. Uses event delegation via document so it works
- * on dynamically-rendered lists.
+ * Coordinate event with x,y plus the concrete target's data-* attributes and
+ * options. The selector is the match gate, the ElementData is read from
+ * event.target (the element that fired), so a scoped listener on `#<id>` still
+ * distinguishes the sub-element acted on. preventDefault is hoisted outside
+ * debounce/throttle so drop targets stay receptive. Delegates via document so
+ * it works on dynamically-rendered lists.
  */
 export function setupCoordinateElementEventWithOptions(
   selector,
@@ -128,10 +120,7 @@ export function setupCoordinateElementEventWithOptions(
   );
 }
 
-/**
- * Attaches a coordinate event (mouse/touch/pointer) with x,y position and
- * options.
- */
+/** Coordinate event (mouse/touch/pointer) with x,y position and options. */
 export function setupCoordinateEventWithOptions(
   selector,
   eventName,
@@ -164,10 +153,9 @@ export function setupCoordinateEventWithOptions(
 }
 
 /**
- * Attaches an element-delegated event that provides the matched element's
- * data-* attributes to the handler, with options. Non-bubbling events
- * (mouseenter, mouseleave, focus, blur) are mapped to their bubbling
- * equivalents with a relatedTarget guard to preserve semantics.
+ * Element-delegated event passing the matched element's data-* attributes,
+ * with options. Non-bubbling events (mouseenter, mouseleave, focus, blur) map
+ * to their bubbling equivalents with a relatedTarget guard.
  */
 export function setupElementEventWithOptions(
   selector,
@@ -218,10 +206,9 @@ export function setupFocus(selector) {
 }
 
 /**
- * Register a set of elements as an arrow-navigable grid of `columns` columns
- * (roving tabindex in two dimensions). Left/right move by one cell, up/down by
- * a full row. Shares the focus-group registry and keydown handler, so
- * releaseFocusGroup removes it too.
+ * Register elements as an arrow-navigable grid of `columns` columns (roving
+ * tabindex in 2D). Left/right move one cell, up/down a full row. Shares the
+ * focus-group registry and keydown handler, so releaseFocusGroup removes it.
  */
 export function setupFocusGrid(items, columns, wrap) {
   focusGroups.set(items, { columns, wrap });
@@ -288,10 +275,7 @@ export function setupFormChangeEventWithOptions(selector, options, handler) {
   );
 }
 
-/**
- * Attaches a keyboard event that passes key name and modifier flags, with
- * options.
- */
+/** Keyboard event passing key name and modifier flags, with options. */
 export function setupKeyFullEventWithOptions(
   selector,
   eventName,
@@ -544,12 +528,11 @@ export function watchFocusTraps() {
 
 /**
  * Install a document-level Escape-to-dismiss handler. Idempotent. On Escape,
- * the topmost (last in document order) element carrying
- * `data-lily-escape-dismiss` is consulted, its attribute value is a CSS
- * selector, and the element it points at is clicked. This drives dismissal
- * through the ordinary data-message delegation, exactly like a focus trap's
- * dismiss, but without trapping focus, so non-modal overlays (popover, menu,
- * select, date picker) can close on Escape while staying non-modal.
+ * the topmost element carrying `data-lily-escape-dismiss` is consulted, its
+ * attribute value is a CSS selector, and the element it points at is clicked.
+ * Dismissal flows through the ordinary data-message delegation without trapping
+ * focus, so non-modal overlays (popover, menu, select, date picker) can close
+ * on Escape while staying non-modal.
  */
 export function watchEscapeDismiss() {
   if (escapeDismissHandler !== null) return;
@@ -564,9 +547,8 @@ export function watchEscapeDismiss() {
     const target = document.querySelector(selector);
     if (target && typeof target.click === "function") {
       // Consume the key and click the dismiss target, so dismissal flows
-      // through the ordinary data-message delegation (the trigger carries the
-      // overlay's on_toggle message). Mirrors a focus trap's Escape dismiss,
-      // without trapping focus.
+      // through the ordinary data-message delegation. Mirrors a focus trap's
+      // Escape dismiss, without trapping focus.
       event.preventDefault();
       target.click();
     }
@@ -577,10 +559,10 @@ export function watchEscapeDismiss() {
 
 /**
  * Install a document-level drag-and-drop handler for file dropzones.
- * Idempotent. A dropzone opts in with `data-lily-file-drop="<input selector>"`;
+ * Idempotent. A dropzone opts in with `data-lily-file-drop="<input selector>"`,
  * dropping files onto it assigns them to that input and fires a `change` event,
- * so drops flow through the same path as picking files. While a drag is over the
- * zone it carries a `data-lily-file-dragover` attribute for styling.
+ * so drops flow through the same path as picking files. While a drag is over
+ * the zone it carries a `data-lily-file-dragover` attribute for styling.
  */
 export function watchFileDrops() {
   if (fileDropsInstalled) return;
@@ -611,6 +593,79 @@ export function watchFileDrops() {
     input.files = event.dataTransfer.files;
     input.dispatchEvent(new Event("change", { bubbles: true }));
   });
+}
+
+/**
+ * Manage native <details> popups carrying `data-lily-focus-on-open`. Opening
+ * seeds focus on the selected option (arrow group and typeahead then work with
+ * no manual tab in), Escape closes it back to the summary, and focus leaving it
+ * closes it so it never blocks the next tab stop. Closing via `open = false`
+ * never steals the incoming focus. toggle and focusout do not bubble, so both
+ * listen in the capture phase.
+ */
+export function watchDetailsOpen() {
+  if (detailsOpenHandler !== null) return;
+  detailsOpenHandler = (event) => {
+    const details = event.target;
+    if (!details.matches || !details.matches("[data-lily-focus-on-open]")) return;
+    if (!details.open) return;
+    const target =
+      details.querySelector('[aria-selected="true"]') || firstFocusable(details);
+    if (target) target.focus();
+  };
+  document.addEventListener("toggle", detailsOpenHandler, true);
+
+  document.addEventListener(
+    "keydown",
+    (event) => {
+      if (event.key !== "Escape") return;
+      const details = event.target.closest?.(
+        "[data-lily-focus-on-open][open]",
+      );
+      if (!details) return;
+      event.preventDefault();
+      details.open = false;
+      details.querySelector("summary")?.focus();
+    },
+    true,
+  );
+
+  document.addEventListener(
+    "focusout",
+    (event) => {
+      const details = event.target.closest?.(
+        "[data-lily-focus-on-open][open]",
+      );
+      if (!details) return;
+      if (event.relatedTarget && details.contains(event.relatedTarget)) return;
+      details.open = false;
+    },
+    true,
+  );
+}
+
+/**
+ * Install a document-level handler that dismisses a model-controlled popup when
+ * focus leaves it. A panel opts in with `data-lily-focusout-dismiss="<trigger
+ * selector>"`. The dismiss is deferred a frame and only fires if the trigger is
+ * still `aria-expanded="true"`, so picking an option (which closes via its own
+ * message) does not race into a reopen. Clicking the trigger does not steal the
+ * incoming focus, so the tab moves on. focusout does not bubble, capture it.
+ */
+export function watchFocusoutDismiss() {
+  if (focusoutDismissHandler !== null) return;
+  focusoutDismissHandler = (event) => {
+    const panel = event.target.closest?.("[data-lily-focusout-dismiss]");
+    if (!panel) return;
+    if (event.relatedTarget && panel.contains(event.relatedTarget)) return;
+    const selector = panel.getAttribute("data-lily-focusout-dismiss") || "";
+    const trigger = selector && document.querySelector(selector);
+    if (!trigger) return;
+    requestAnimationFrame(() => {
+      if (trigger.getAttribute("aria-expanded") === "true") trigger.click();
+    });
+  };
+  document.addEventListener("focusout", focusoutDismissHandler, true);
 }
 
 
@@ -822,10 +877,9 @@ function formDataToList(form) {
   return list;
 }
 
-/** Arrow-key direction for an orientation: +1 (next), -1 (prev), or 0. */
 /**
- * Arrow-key step for a grid focus group: left/right move by one, up/down by a
- * full row (`columns`). Returns 0 for keys that should not move focus.
+ * Arrow-key step for a grid focus group. Left/right move by one, up/down by a
+ * full row (`columns`). Returns 0 for keys that shouldn't move focus.
  */
 function gridStep(key, columns) {
   if (key === "ArrowRight") return 1;
@@ -845,11 +899,52 @@ function groupStep(key, orientation) {
   return 0;
 }
 
+// Printable keys build up a prefix within the debounce window, cleared on pause.
+let typeaheadBuffer = "";
+let typeaheadClearTimer = null;
+
 /**
- * Move focus among a group's items when an Arrow/Home/End key is pressed
- * while focus sits on one of them. Items are re-queried per keypress so
- * dynamically-rendered groups are handled. Focus moves via element.focus(),
- * which works even on the tabindex="-1" items of a roving-tabindex render.
+ * Focus the next group item whose label matches the typed buffer. A repeat of
+ * one key cycles same-initial items, a growing prefix narrows. Returns the
+ * matched index or -1.
+ */
+function typeaheadMatch(items, current, key) {
+  if (typeaheadClearTimer !== null) clearTimeout(typeaheadClearTimer);
+  typeaheadClearTimer = setTimeout(() => {
+    typeaheadBuffer = "";
+    typeaheadClearTimer = null;
+  }, 500);
+
+  const repeat = typeaheadBuffer === key;
+  typeaheadBuffer = repeat ? key : typeaheadBuffer + key;
+  const prefix = typeaheadBuffer.toLowerCase();
+
+  // Single char looks past the current item to cycle, a prefix re-checks it.
+  const start = typeaheadBuffer.length === 1 ? current + 1 : current;
+  for (let offset = 0; offset < items.length; offset++) {
+    const index = (start + offset) % items.length;
+    const label = (items[index].textContent || "").trim().toLowerCase();
+    if (label.startsWith(prefix)) return index;
+  }
+  return -1;
+}
+
+/** A printable single character with no command modifier, i.e. typeahead. */
+function isTypeaheadKey(event) {
+  return (
+    event.key.length === 1 &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    !event.altKey
+  );
+}
+
+/**
+ * Move focus among a group's items when an Arrow/Home/End key is pressed, or
+ * jump by typeahead when a printable key is pressed, while focus sits on one of
+ * them. Items are re-queried per keypress so dynamically-rendered groups are
+ * handled. Focus moves via element.focus(), which works even on the
+ * tabindex="-1" items of a roving-tabindex render.
  */
 function handleGroupKeydown(event) {
   const active = document.activeElement;
@@ -859,6 +954,15 @@ function handleGroupKeydown(event) {
     const items = Array.from(document.querySelectorAll(selector));
     const current = items.indexOf(active);
     if (current === -1) continue;
+
+    if (isTypeaheadKey(event)) {
+      const match = typeaheadMatch(items, current, event.key);
+      if (match !== -1) {
+        event.preventDefault();
+        items[match].focus();
+      }
+      return;
+    }
 
     let next;
     if (event.key === "Home") {
@@ -891,10 +995,10 @@ function handleGroupKeydown(event) {
  */
 function handleTrapKeydown(event, trap) {
   if (trap.releaseOn(event.key)) {
-    // Escape is a stack: a non-modal overlay opened on top (popover, menu, ...)
-    // handles Escape first via watchEscapeDismiss and marks it handled. Only
-    // dismiss this trapped modal once nothing shallower has claimed the key, so
-    // one Escape closes exactly one overlay.
+    // Escape is a stack. A non-modal overlay opened on top (popover, menu,
+    // ...) handles Escape first via watchEscapeDismiss and marks it handled.
+    // Only dismiss this trapped modal once nothing shallower has claimed the
+    // key, so one Escape closes exactly one overlay.
     if (event.defaultPrevented) return;
     event.preventDefault();
     popFocusTrap();
@@ -954,7 +1058,7 @@ function installTrapKeydownHandler() {
 
 /**
  * Returns true when the event happened inside an element matching the
- * selector, treating "document" and "window" as "anywhere on the page".
+ * selector, treating 'document' and 'window' as 'anywhere on the page'.
  */
 function matchesSelectorScope(event, selector) {
   if (selector === "document" || selector === "window") return true;
@@ -983,13 +1087,12 @@ function preventDefaultFirst(listener) {
 /**
  * Register a delegated listener, replacing any prior one with the same key.
  *
- * `key` identifies the binding by its event semantics and selector (not the
- * closure), so re-registering the same logical binding, which happens every
- * time a component re-renders and its bindings drain again, swaps the stale
- * listener for the fresh one instead of stacking a second. This keeps exactly
- * one live listener per (event, selector): co-located events survive
- * navigation without accumulating duplicate dispatches. Distinct events or
- * selectors get distinct keys and coexist.
+ * `key` identifies the binding by its event semantics and selector, not the
+ * closure, so re-registering the same logical binding (which happens every
+ * time a component re-renders and drains its bindings) swaps the stale
+ * listener for the fresh one instead of stacking. Exactly one live listener
+ * per (event, selector), so co-located events survive navigation without
+ * duplicate dispatches. Distinct events or selectors coexist.
  */
 function registerDelegatedListener(key, target, domEvent, capture, listener) {
   const existing = delegatedListeners.get(key);
@@ -1089,13 +1192,21 @@ let groupKeydownHandler = null;
 let trapKeydownHandler = null;
 
 // Document-level Escape-to-dismiss handler installed by watchEscapeDismiss.
-// Unlike a focus trap it holds no state beyond the listener itself: on every
+// Unlike a focus trap it holds no state beyond the listener itself. On every
 // Escape it consults the live DOM for the topmost element opting into
 // dismissal, so it needs no observer or registry.
 let escapeDismissHandler = null;
 
 // Guards the idempotent install of the file-drop handlers (watchFileDrops).
 let fileDropsInstalled = false;
+
+// Document-level toggle handler installed by watchDetailsOpen. Seeds focus into
+// a <details data-lily-focus-on-open> as it opens, holds no state.
+let detailsOpenHandler = null;
+
+// Document-level focusout handler installed by watchFocusoutDismiss. Closes a
+// model-controlled popup when focus leaves it, holds no state.
+let focusoutDismissHandler = null;
 
 // Declarative focus traps. The observer installed by watchFocusTraps
 // confines focus to any element carrying `data-lily-focus-trap` while it is

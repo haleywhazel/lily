@@ -130,10 +130,9 @@ pub type Ephemeral
 /// Phantom kind marker for stateful topics (store + sequence + snapshot).
 pub type Stateful
 
-/// Opaque handle to a running topic. The `kind` phantom parameter is
-/// `Ephemeral` after `topic.new` and `Stateful` after `topic.with_store`,
-/// enforced at compile time so `topic.dispatch` cannot be called on an
-/// ephemeral topic.
+/// Opaque handle to a running topic. The `kind` phantom is `Ephemeral` after
+/// `topic.new` and `Stateful` after `topic.with_store`, enforced at compile
+/// time so `topic.dispatch` cannot be called on an ephemeral topic.
 pub opaque type Topic(model, message, kind) {
   Topic(
     id: String,
@@ -146,8 +145,7 @@ pub opaque type Topic(model, message, kind) {
 // PUBLIC FUNCTIONS
 // =============================================================================
 
-/// Send a `Push` frame to every subscriber of this topic. Available on both
-/// ephemeral and stateful topics.
+/// Send a `Push` frame to every subscriber. Ephemeral and stateful topics.
 ///
 /// ```gleam
 /// topic.broadcast(typing_topic, UserIsTyping(client_id))
@@ -177,10 +175,8 @@ pub fn broadcast_from(
 }
 
 /// Apply a message to the topic's store and emit
-/// `TopicUpdate(id, seq, payload)` to every subscriber. Only callable on
-/// stateful topics (created via `with_store`).
-///
-/// Ephemeral topics fail at compile time.
+/// `TopicUpdate(id, seq, payload)` to every subscriber. Stateful topics only
+/// (`with_store`), ephemeral topics fail at compile time.
 ///
 /// ```gleam
 /// topic.dispatch(chat_topic, Chat(NewChatMessage(body)))
@@ -191,16 +187,15 @@ pub fn dispatch(topic: Topic(model, message, Stateful), message: message) -> Nil
 
 /// Register a parametric topic kind. When a client subscribes to
 /// `prefix <> suffix` and no fixed topic with that id exists, the server
-/// parses the suffix via `parse_id` and calls `configure(parsed, topic)` to
-/// configure a pre-started `Topic` lazily.
+/// parses the suffix via `parse_id` and calls `configure(parsed, topic)` on a
+/// pre-started `Topic`.
 ///
-/// Call `with_store`, `with_can_subscribe`, and so on inside `configure` and
-/// return the result. Don't call `topic.new`, the actor is already started.
+/// Call `with_store`, `with_can_subscribe`, etc. inside `configure` and return
+/// the result. Don't call `topic.new`, the actor is already started.
 ///
-/// A stateful kind (one that calls `with_store`) reads its store from the
+/// A stateful kind reads its store from the
 /// [`store.topic_kind`](./store.html#topic_kind) wiring entry sharing this
-/// `prefix`, keyed by instance, so every id in the family updates and
-/// snapshots into its own slot.
+/// `prefix`, keyed by instance, so every id in the family gets its own slot.
 ///
 /// ```gleam
 /// let assert Ok(_) =
@@ -243,9 +238,8 @@ pub fn kind(
   server.register_topic_kind(server, prefix, create)
 }
 
-/// Register a topic on the given server. Returns an ephemeral handle
-/// (broadcast-only) by default, pipe through `with_store` to make it
-/// stateful.
+/// Register a topic on the server. Returns an ephemeral (broadcast-only)
+/// handle, pipe through `with_store` to make it stateful.
 ///
 /// ```gleam
 /// let assert Ok(typing) = topic.new(server, id: "typing")
@@ -262,11 +256,10 @@ pub fn new(
   Ok(Topic(id:, handle:, server:))
 }
 
-/// Stop the topic actor and remove it from the server registry.
-/// Subscribers stop receiving updates, their last slice value is left as-is,
-/// not reset. Further subscribes to this id either error (fixed topic) or
-/// trigger lazy reinstantiation (parametric kind, if registered), in which
-/// case the fresh topic pushes a snapshot on subscribe that replaces it.
+/// Stop the topic actor and remove it from the server registry. Subscribers
+/// stop receiving updates, last slice value left as-is. Further subscribes to
+/// this id either error (fixed topic) or lazily reinstantiate (parametric
+/// kind), the fresh topic then pushing a replacing snapshot on subscribe.
 ///
 /// ```gleam
 /// topic.stop(chat_topic)
@@ -276,7 +269,7 @@ pub fn stop(topic: Topic(model, message, kind)) -> Nil {
   server.unregister_topic(topic.server, topic.id)
 }
 
-/// Add a subscriber (server-initiated), the client-side counterpart is
+/// Add a subscriber (server-initiated). Client counterpart is
 /// `client.subscribe`.
 ///
 /// ```gleam
@@ -296,8 +289,8 @@ pub fn unsubscribe(topic: Topic(model, message, kind), client_id: String) -> Nil
 }
 
 /// Set an authorisation predicate for client-initiated subscribes.
-/// Server-side `topic.subscribe` is unaffected (it's trusted). On `False`,
-/// the server replies with `Rejected(topic_id, "denied")`.
+/// Server-side `topic.subscribe` is trusted and unaffected. On `False`, the
+/// server replies with `Rejected(topic_id, "denied")`.
 ///
 /// ```gleam
 /// topic.with_can_subscribe(chat_topic, fn(client_id, _topic_id) {
@@ -312,9 +305,9 @@ pub fn with_can_subscribe(
   topic
 }
 
-/// Set a join hook. Returned messages are broadcast (ephemeral topics) or
-/// dispatched (stateful topics) immediately after the new subscriber receives
-/// its `Snapshot`, so the joiner sees them too.
+/// Set a join hook. Returned messages are broadcast (ephemeral) or dispatched
+/// (stateful) right after the joiner receives its `Snapshot`, so it sees them
+/// too.
 ///
 /// ```gleam
 /// topic.with_on_subscribe(chat_topic, fn(client_id) {
@@ -343,9 +336,9 @@ pub fn with_on_unsubscribe(
   topic
 }
 
-/// Upgrade an ephemeral topic to stateful by attaching a store. The update
-/// logic and initial state are read from the `store.Wiring` that was passed
-/// to `server.new`, specifically the `store.topic(id: topic.id, ...)` entry.
+/// Upgrade an ephemeral topic to stateful by attaching a store. Update logic
+/// and initial state come from the `store.topic(id: topic.id, ...)` entry in
+/// the `store.Wiring` passed to `server.new`.
 ///
 /// ```gleam
 /// topic.new(server, id: "chat")
@@ -436,24 +429,22 @@ fn handle_dispatch_logic(
   from: Option(String),
   message: message,
 ) -> TopicActorState(model, message) {
-  // A client may only write to a topic it is subscribed to, since subscribing
-  // already cleared `can_subscribe`. Server dispatches carry `from = None` and
-  // are trusted. An unsubscribed client's message is dropped silently.
+  // A client may only write to a topic it subscribes to (subscribing already
+  // cleared `can_subscribe`). Server dispatches carry `from = None` and are
+  // trusted. Unsubscribed client messages dropped silently.
   let authorised = case from {
     option.Some(client_id) -> dict.has_key(state.subscribers, client_id)
     option.None -> True
   }
   use <- bool.guard(when: !authorised, return: state)
   case state.store {
-    // Ephemeral topic with no store to apply to, so relay the client's message
-    // straight to the other subscribers as a Push (no sequence, no replay).
-    // The originator is skipped, it already applied the message optimistically.
-    // This makes client-to-client signalling fan out without an
-    // `on_topic_message` hook.
+    // No store, so relay the message to other subscribers as a Push (no
+    // sequence, no replay). Originator skipped, it already applied
+    // optimistically. Fans out client-to-client signalling without a hook.
     option.None -> handle_broadcast_logic(state, message, from)
     option.Some(store) ->
-      // A subscribed client can still send a payload the update function
-      // cannot match, so a crash here drops the frame, not the topic actor.
+      // A subscribed client can send a payload the update function cannot
+      // match, so a crash here drops the frame, not the actor.
       case server.rescue(fn() { store.apply_message(store.current, message) }) {
         Error(reason) -> {
           logging.log(
@@ -487,7 +478,7 @@ fn handle_dispatch_logic(
                   ),
                   serialiser: state.serialiser,
                 )
-              // Originator gets the ack, everyone else gets the update.
+              // Originator gets the ack, everyone else the update.
               dict.each(state.subscribers, fn(id, send) {
                 case from {
                   option.Some(sender) if sender == id -> send(ack_frame)

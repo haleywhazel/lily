@@ -10,9 +10,7 @@ import gleeunit/should
 @target(javascript)
 import lily/client
 @target(javascript)
-import lily/store
-@target(javascript)
-import lily/test_support.{type Message, type Model}
+import lily/test_support
 @target(javascript)
 import lily/transport
 

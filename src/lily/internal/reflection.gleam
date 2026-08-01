@@ -22,20 +22,18 @@ import gleam/dynamic.{type Dynamic}
 
 /// A Gleam value flattened into a target-neutral representation.
 ///
-/// `ReflectedConstructor` carries the constructor's PascalCase name plus its
-/// positional fields. Zero-field constructors compile to atoms on Erlang and
-/// to instances of an empty class on JavaScript, both round-trip through
+/// `ReflectedConstructor` carries the constructor's PascalCase name plus
+/// positional fields. Zero-field constructors (atoms on Erlang, empty-class
+/// instances on JavaScript) round-trip through
 /// `ReflectedConstructor(name, [])`.
 ///
-/// `ReflectedTuple` is for raw Gleam tuples like `#(a, b)`, which have no
-/// constructor name and so encode as a tag-less map with positional keys.
+/// `ReflectedTuple` is for raw tuples like `#(a, b)`, which have no constructor
+/// name and encode as a tag-less positional-keyed map.
 ///
-/// `ReflectedDict` and `ReflectedSet` cover `gleam/dict` and `gleam/set`.
-/// Their natural runtime shapes (a JS class, an Erlang tagged map, etc.)
-/// don't fit ReflectedConstructor cleanly, so they get their own
-/// variants. On the wire they look like a CustomType with the reserved
-/// sentinel names `$dict` / `$set` so the format stays consistent with
-/// the JSON path.
+/// `ReflectedDict` and `ReflectedSet` cover `gleam/dict` and `gleam/set`, whose
+/// runtime shapes don't fit ReflectedConstructor cleanly. On the wire they look
+/// like a CustomType with reserved sentinel names `$dict` / `$set` to stay
+/// consistent with the JSON path.
 @internal
 pub type Reflected {
   ReflectedNil
@@ -61,18 +59,18 @@ pub type Reflected {
 pub fn reflect(value: a) -> Reflected
 
 /// Rebuild a Gleam value from a [`Reflected`](#Reflected) tree. On JavaScript
-/// every constructor name in the tree must be in the registry, or this returns
-/// `Error(Nil)`. The result is `Dynamic` because the call site supplies the
-/// final type through the `decode.Decoder` plumbing in transport.gleam.
+/// every constructor name must be in the registry or this returns `Error(Nil)`.
+/// Returns `Dynamic` because the call site supplies the type via the
+/// `decode.Decoder` plumbing in transport.gleam.
 @external(erlang, "lily_reflection_ffi", "construct")
 @external(javascript, "./reflection.ffi.mjs", "construct")
 @internal
 pub fn construct(reflected: Reflected) -> Result(Dynamic, Nil)
 
-/// Reinterpret a `Dynamic` as the call site's expected type. Erlang and JS
-/// values carry no static type at runtime, so recasting is sound when the
-/// value was just rebuilt by [`construct`](#construct) and matches the shape
-/// of `a` by construction. Shared by transport and event decoding.
+/// Reinterpret a `Dynamic` as the call site's expected type. Runtime values
+/// carry no static type, so recasting is sound when the value was just rebuilt
+/// by [`construct`](#construct) and matches `a` by construction. Shared by
+/// transport and event decoding.
 @external(erlang, "lily_reflection_ffi", "passthrough")
 @external(javascript, "./reflection.ffi.mjs", "passthrough")
 @internal
