@@ -51,6 +51,14 @@ export function httpConnect(postUrl, eventsUrl, flushBatchSize, handler) {
   let isConnected = false;
   let isFlushing = false;
 
+  function postFrame(frame) {
+    return fetch(postUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: frame,
+    });
+  }
+
   async function flushPending() {
     if (isFlushing) return;
     queue.loadIfEmpty();
@@ -62,18 +70,16 @@ export function httpConnect(postUrl, eventsUrl, flushBatchSize, handler) {
     for (let i = 0; i < queue.size; i += flushBatchSize) {
       if (!isConnected) break;
       const batch = queue.slice(i, i + flushBatchSize);
-      const results = await Promise.allSettled(
-        batch.map(function (frame) {
-          return fetch(postUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/octet-stream" },
-            body: frame,
-          });
-        }),
-      );
-      const sent = results.filter(function (result) {
-        return result.status === "fulfilled";
-      }).length;
+      const results = await Promise.allSettled(batch.map(postFrame));
+      // Count only the leading run of fulfilled frames.
+      //
+      // drainSent removes from the front, so a middle rejection must stop the
+      // count or we would drop an unsent frame and re-send an
+      // already-delivered one
+      let sent = 0;
+      while (sent < results.length && results[sent].status === "fulfilled") {
+        sent++;
+      }
       totalSent += sent;
       if (sent < batch.length) break;
     }
@@ -110,11 +116,7 @@ export function httpConnect(postUrl, eventsUrl, flushBatchSize, handler) {
     send(bytes) {
       const frame = bytes.rawBuffer;
       if (isConnected) {
-        fetch(postUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/octet-stream" },
-          body: frame,
-        })
+        postFrame(frame)
           .then(function () {})
           .catch(function (error) {
             console.error("Failed to POST message:", error);

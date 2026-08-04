@@ -299,14 +299,12 @@ pub fn apply_message(
   model: model,
   message: message,
 ) -> model {
-  case wiring.session {
-    option.Some(config) ->
-      case config.is_for_target(message) {
-        True -> config.apply(model, message)
-        False -> apply_to_topics(wiring, model, message)
-      }
-    option.None -> apply_to_topics(wiring, model, message)
-  }
+  on_session_else_topic(
+    wiring,
+    message,
+    fn(config) { config.apply(model, message) },
+    fn() { apply_to_topics(wiring, model, message) },
+  )
 }
 
 /// Read the current model out of a [`Store`](#Store). Used by sibling modules
@@ -351,15 +349,16 @@ pub fn merge_snapshot(
 /// wins if both a session and a topic extract accept the same message, so
 /// topic `extract` functions must be mutually exclusive.
 @internal
-pub fn route_message(wiring: Wiring(model, message), message: message) -> Target {
-  case wiring.session {
-    option.Some(config) ->
-      case config.is_for_target(message) {
-        True -> transport.Session
-        False -> topic_target(wiring, message)
-      }
-    option.None -> topic_target(wiring, message)
-  }
+pub fn route_message(
+  wiring: Wiring(model, message),
+  message: message,
+) -> Target {
+  on_session_else_topic(
+    wiring,
+    message,
+    fn(_config) { transport.Session },
+    fn() { topic_target(wiring, message) },
+  )
 }
 
 /// The apply-message function for the session store entry, if any. Used by
@@ -402,6 +401,15 @@ type KindConfig(model, message) {
   )
 }
 
+/// Outcome of routing a non-session message, either a fixed topic entry, a
+/// parametric kind, or nothing. Shared by `apply_to_topics` and `topic_target`
+/// via `match_topic_route`.
+type RouteMatch(model, message) {
+  MatchedTopic(id: String, config: TargetConfig(model, message))
+  MatchedKind(config: KindConfig(model, message))
+  MatchedNone
+}
+
 type TargetConfig(model, message) {
   TargetConfig(
     is_for_target: fn(message) -> Bool,
@@ -419,13 +427,10 @@ fn apply_to_topics(
   model: model,
   message: message,
 ) -> model {
-  case find_topic_entry(wiring, message) {
-    Ok(#(_id, config)) -> config.apply(model, message)
-    Error(_) ->
-      case list.find(wiring.kinds, fn(kind) { kind.is_for_target(message) }) {
-        Ok(kind) -> kind.apply(model, message)
-        Error(_) -> model
-      }
+  case match_topic_route(wiring, message) {
+    MatchedTopic(_id, config) -> config.apply(model, message)
+    MatchedKind(kind) -> kind.apply(model, message)
+    MatchedNone -> model
   }
 }
 
@@ -485,40 +490,77 @@ fn make_target_config(
   )
 }
 
+/// Route a non-session message to its topic target using the shared rule, the
+/// exact topic entry first and then a parametric kind. Both `apply_to_topics`
+/// and `topic_target` go through this so the routing lives in one place.
+fn match_topic_route(
+  wiring: Wiring(model, message),
+  message: message,
+) -> RouteMatch(model, message) {
+  case find_topic_entry(wiring, message) {
+    Ok(#(id, config)) -> MatchedTopic(id:, config:)
+    Error(_) ->
+      case list.find(wiring.kinds, fn(kind) { kind.is_for_target(message) }) {
+        Ok(kind) -> MatchedKind(config: kind)
+        Error(_) -> MatchedNone
+      }
+  }
+}
+
 /// Find the kind whose prefix matches `id`, longest prefix wins when several
-/// match so the more specific family is chosen.
+/// match so the more specific family is chosen. A single fold keeps the best
+/// match and its prefix length so neither the intermediate list nor the
+/// incumbent's length are recomputed.
 fn matching_kind(
   wiring: Wiring(model, message),
   id: String,
 ) -> Option(KindConfig(model, message)) {
   wiring.kinds
-  |> list.filter(fn(kind) { string.starts_with(id, kind.prefix) })
-  |> list.fold(option.None, fn(best: Option(KindConfig(model, message)), kind) {
-    case best {
-      option.None -> option.Some(kind)
-      option.Some(current) ->
-        case string.length(kind.prefix) > string.length(current.prefix) {
-          True -> option.Some(kind)
-          False -> best
+  |> list.fold(option.None, fn(best, kind) {
+    case string.starts_with(id, kind.prefix) {
+      False -> best
+      True -> {
+        let length = string.length(kind.prefix)
+        case best {
+          option.Some(#(_, best_length)) if best_length >= length -> best
+          _ -> option.Some(#(kind, length))
         }
+      }
     }
   })
+  |> option.map(fn(pair) { pair.0 })
+}
+
+/// Run `on_session` with the session config when it exists and accepts the
+/// message, otherwise fall back to `on_topic`. Shared by `apply_message` and
+/// `route_message` so the session-first routing rule lives in one place.
+fn on_session_else_topic(
+  wiring: Wiring(model, message),
+  message: message,
+  on_session: fn(TargetConfig(model, message)) -> a,
+  on_topic: fn() -> a,
+) -> a {
+  case wiring.session {
+    option.Some(config) ->
+      case config.is_for_target(message) {
+        True -> on_session(config)
+        False -> on_topic()
+      }
+    option.None -> on_topic()
+  }
 }
 
 /// Route a non-session message: exact topic entry first, else a parametric kind
 /// (concrete id `prefix <> key` from the message). Falls back to `Session` when
 /// nothing matches, the safe default for unrecognised messages.
 fn topic_target(wiring: Wiring(model, message), message: message) -> Target {
-  case find_topic_entry(wiring, message) {
-    Ok(#(id, _)) -> transport.Topic(id)
-    Error(_) ->
-      case list.find(wiring.kinds, fn(kind) { kind.is_for_target(message) }) {
-        Ok(kind) ->
-          case kind.topic_id_of(message) {
-            Ok(id) -> transport.Topic(id)
-            Error(_) -> transport.Session
-          }
+  case match_topic_route(wiring, message) {
+    MatchedTopic(id, _) -> transport.Topic(id)
+    MatchedKind(kind) ->
+      case kind.topic_id_of(message) {
+        Ok(id) -> transport.Topic(id)
         Error(_) -> transport.Session
       }
+    MatchedNone -> transport.Session
   }
 }

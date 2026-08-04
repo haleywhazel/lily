@@ -65,6 +65,7 @@ pub fn decode_message_pack_bounded(
   ))
   use reflected <- result.try(message_pack_value_to_reflected(
     message_pack_value,
+    max_depth,
   ))
   reflection.construct(reflected)
 }
@@ -87,68 +88,88 @@ pub fn encode_message_pack(value: a) -> BitArray {
 // PRIVATE FUNCTIONS
 // =============================================================================
 
-fn decode_dict(entries: List(#(Value, Value))) -> Result(Reflected, Nil) {
+fn collect_indexed(
+  index: Dict(String, value),
+  number: Int,
+  accumulator: List(Reflected),
+  convert: fn(value) -> Result(Reflected, Nil),
+) -> Result(List(Reflected), Nil) {
+  // Walk the positional keys '0', '1', and so on, converting each in turn and
+  // stopping at the first missing key so both wire formats agree on the field
+  // count. The MessagePack and JSON paths differ only in 'convert'.
+  case dict.get(index, int.to_string(number)) {
+    Error(_) -> Ok(list.reverse(accumulator))
+    Ok(value) -> {
+      use reflected <- result.try(convert(value))
+      collect_indexed(index, number + 1, [reflected, ..accumulator], convert)
+    }
+  }
+}
+
+fn decode_dict(
+  entries: List(#(Value, Value)),
+  max_depth: Int,
+) -> Result(Reflected, Nil) {
   use pairs_value <- result.try(message_pack.lookup_string_key(entries, "0"))
   case pairs_value {
     ValueArray(pair_values) -> {
-      use pair_reflected_list <- result.try(list.try_map(
-        pair_values,
-        decode_dict_pair,
-      ))
+      use pair_reflected_list <- result.try(
+        list.try_map(pair_values, fn(pair) { decode_dict_pair(pair, max_depth) }),
+      )
       Ok(ReflectedDict(entries: pair_reflected_list))
     }
     _ -> Error(Nil)
   }
 }
 
-fn decode_dict_pair(pair: Value) -> Result(#(Reflected, Reflected), Nil) {
+fn decode_dict_pair(
+  pair: Value,
+  max_depth: Int,
+) -> Result(#(Reflected, Reflected), Nil) {
   case pair {
     ValueArray([k_value, v_value]) -> {
-      use k <- result.try(message_pack_value_to_reflected(k_value))
-      use v <- result.try(message_pack_value_to_reflected(v_value))
+      use k <- result.try(message_pack_value_to_reflected(k_value, max_depth))
+      use v <- result.try(message_pack_value_to_reflected(v_value, max_depth))
       Ok(#(k, v))
     }
     _ -> Error(Nil)
   }
 }
 
-fn decode_set(entries: List(#(Value, Value))) -> Result(Reflected, Nil) {
+fn decode_set(
+  entries: List(#(Value, Value)),
+  max_depth: Int,
+) -> Result(Reflected, Nil) {
   use members_value <- result.try(message_pack.lookup_string_key(entries, "0"))
   case members_value {
     ValueArray(member_values) -> {
-      use members <- result.try(list.try_map(
-        member_values,
-        message_pack_value_to_reflected,
-      ))
+      use members <- result.try(
+        list.try_map(member_values, fn(member) {
+          message_pack_value_to_reflected(member, max_depth)
+        }),
+      )
       Ok(ReflectedSet(members:))
     }
     _ -> Error(Nil)
   }
 }
 
-fn extract_constructor_fields(
-  entries: List(#(Value, Value)),
-  index: Int,
-  accumulator: List(Reflected),
-) -> Result(List(Reflected), Nil) {
-  let key = int.to_string(index)
-  case message_pack.lookup_string_key(entries, key) {
-    Error(_) -> Ok(list.reverse(accumulator))
-    Ok(value) -> {
-      use reflected <- result.try(message_pack_value_to_reflected(value))
-      extract_constructor_fields(entries, index + 1, [reflected, ..accumulator])
-    }
+fn extract_constructor_name(index: Dict(String, Value)) -> Result(String, Nil) {
+  case dict.get(index, "_") {
+    Ok(ValueString(name)) -> Ok(name)
+    _ -> Error(Nil)
   }
 }
 
-fn extract_constructor_name(
-  entries: List(#(Value, Value)),
-) -> Result(String, Nil) {
-  case entries {
-    [] -> Error(Nil)
-    [#(ValueString("_"), ValueString(name)), ..] -> Ok(name)
-    [_, ..rest] -> extract_constructor_name(rest)
-  }
+fn index_entries(entries: List(#(Value, Value))) -> Dict(String, Value) {
+  // Fold the string-keyed entries into a dict once so field and name lookups
+  // are O(1) instead of rescanning the list per positional field.
+  list.fold(entries, dict.new(), fn(index, entry) {
+    case entry {
+      #(ValueString(key), value) -> dict.insert(index, key, value)
+      _ -> index
+    }
+  })
 }
 
 fn indexed_fields_json(fields: List(Reflected)) -> List(#(String, Json)) {
@@ -184,21 +205,7 @@ fn json_dict_to_reflected(
 fn json_indexed_fields(
   fields: Dict(String, Dynamic),
 ) -> Result(List(Reflected), Nil) {
-  json_indexed_loop(fields, 0, [])
-}
-
-fn json_indexed_loop(
-  fields: Dict(String, Dynamic),
-  index: Int,
-  accumulator: List(Reflected),
-) -> Result(List(Reflected), Nil) {
-  case dict.get(fields, int.to_string(index)) {
-    Error(_) -> Ok(list.reverse(accumulator))
-    Ok(value) -> {
-      use reflected <- result.try(json_to_reflected(value))
-      json_indexed_loop(fields, index + 1, [reflected, ..accumulator])
-    }
-  }
+  collect_indexed(fields, 0, [], json_to_reflected)
 }
 
 fn json_object_to_reflected(
@@ -278,20 +285,32 @@ fn json_to_reflected(value: Dynamic) -> Result(Reflected, Nil) {
   }
 }
 
-fn map_to_reflected(entries: List(#(Value, Value))) -> Result(Reflected, Nil) {
+fn map_to_reflected(
+  entries: List(#(Value, Value)),
+  max_depth: Int,
+) -> Result(Reflected, Nil) {
   // Three shapes reach here. A `_`-tagged custom type (normal case), a
   // tag-less numeric-keyed map (raw tuple), or the `$dict`/`$set` collection
   // sentinels.
-  case extract_constructor_name(entries) {
-    Ok("$dict") -> decode_dict(entries)
-    Ok("$set") -> decode_set(entries)
+  let index = index_entries(entries)
+  case extract_constructor_name(index) {
+    Ok("$dict") -> decode_dict(entries, max_depth)
+    Ok("$set") -> decode_set(entries, max_depth)
     Ok(name) -> {
-      use fields <- result.try(extract_constructor_fields(entries, 0, []))
+      use fields <- result.try(
+        collect_indexed(index, 0, [], fn(value) {
+          message_pack_value_to_reflected(value, max_depth)
+        }),
+      )
       Ok(ReflectedConstructor(name:, fields:))
     }
     Error(_) -> {
       // No `_` tag, so it's a raw tuple.
-      use fields <- result.try(extract_constructor_fields(entries, 0, []))
+      use fields <- result.try(
+        collect_indexed(index, 0, [], fn(value) {
+          message_pack_value_to_reflected(value, max_depth)
+        }),
+      )
       case fields {
         [] -> Error(Nil)
         _ -> Ok(ReflectedTuple(fields:))
@@ -300,7 +319,10 @@ fn map_to_reflected(entries: List(#(Value, Value))) -> Result(Reflected, Nil) {
   }
 }
 
-fn message_pack_value_to_reflected(value: Value) -> Result(Reflected, Nil) {
+fn message_pack_value_to_reflected(
+  value: Value,
+  max_depth: Int,
+) -> Result(Reflected, Nil) {
   case value {
     ValueNil -> Ok(ReflectedNil)
     ValueBool(b) -> Ok(ReflectedBool(b))
@@ -308,20 +330,22 @@ fn message_pack_value_to_reflected(value: Value) -> Result(Reflected, Nil) {
     ValueFloat(f) -> Ok(ReflectedFloat(f))
     ValueString(s) -> Ok(ReflectedString(s))
     // Auto-format never emits top-level bin, but the protocol envelope wraps
-    // payload bytes that way, so treat it as a nested decode.
+    // payload bytes that way, so treat it as a nested decode under the same
+    // depth bound the caller threaded in.
     ValueBytes(bytes) ->
-      case message_pack.decode(bytes) {
+      case message_pack.decode_bounded(bytes, max_depth) {
         Error(_) -> Error(Nil)
-        Ok(#(inner, _)) -> message_pack_value_to_reflected(inner)
+        Ok(#(inner, _)) -> message_pack_value_to_reflected(inner, max_depth)
       }
     ValueArray(items) -> {
-      use reflected_items <- result.try(list.try_map(
-        items,
-        message_pack_value_to_reflected,
-      ))
+      use reflected_items <- result.try(
+        list.try_map(items, fn(item) {
+          message_pack_value_to_reflected(item, max_depth)
+        }),
+      )
       Ok(ReflectedList(reflected_items))
     }
-    ValueMap(entries) -> map_to_reflected(entries)
+    ValueMap(entries) -> map_to_reflected(entries, max_depth)
   }
 }
 

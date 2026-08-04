@@ -181,7 +181,10 @@ pub fn broadcast_from(
 /// ```gleam
 /// topic.dispatch(chat_topic, Chat(NewChatMessage(body)))
 /// ```
-pub fn dispatch(topic: Topic(model, message, Stateful), message: message) -> Nil {
+pub fn dispatch(
+  topic: Topic(model, message, Stateful),
+  message: message,
+) -> Nil {
   actor_cell.send(topic.handle, Dispatch(from: option.None, message:))
 }
 
@@ -284,7 +287,10 @@ pub fn subscribe(topic: Topic(model, message, kind), client_id: String) -> Nil {
 /// ```gleam
 /// topic.unsubscribe(chat_topic, client_id)
 /// ```
-pub fn unsubscribe(topic: Topic(model, message, kind), client_id: String) -> Nil {
+pub fn unsubscribe(
+  topic: Topic(model, message, kind),
+  client_id: String,
+) -> Nil {
   actor_cell.send(topic.handle, ClientUnsubscribe(client_id:))
 }
 
@@ -400,27 +406,22 @@ type TopicStore(model, message) {
 // PRIVATE FUNCTIONS
 // =============================================================================
 
+/// Encode a protocol frame with the topic actor's serialiser.
+fn encode_frame(
+  state: TopicActorState(model, message),
+  frame: transport.Protocol(model, message),
+) -> BitArray {
+  transport.encode(frame, serialiser: state.serialiser)
+}
+
 fn handle_broadcast_logic(
   state: TopicActorState(model, message),
   message: message,
   exclude: Option(String),
 ) -> TopicActorState(model, message) {
-  case dict.is_empty(state.subscribers) {
-    True -> Nil
-    False -> {
-      let push_frame =
-        transport.encode(
-          transport.Push(topic_id: state.id, payload: message),
-          serialiser: state.serialiser,
-        )
-      dict.each(state.subscribers, fn(id, send) {
-        case exclude {
-          option.Some(excluded) if excluded == id -> Nil
-          option.Some(_) | option.None -> send(push_frame)
-        }
-      })
-    }
-  }
+  let push_frame =
+    encode_frame(state, transport.Push(topic_id: state.id, payload: message))
+  send_to_subscribers(state.subscribers, exclude, option.None, push_frame)
   state
 }
 
@@ -442,10 +443,14 @@ fn handle_dispatch_logic(
     // sequence, no replay). Originator skipped, it already applied
     // optimistically. Fans out client-to-client signalling without a hook.
     option.None -> handle_broadcast_logic(state, message, from)
-    option.Some(store) ->
+    option.Some(topic_store) ->
       // A subscribed client can send a payload the update function cannot
       // match, so a crash here drops the frame, not the actor.
-      case server.rescue(fn() { store.apply_message(store.current, message) }) {
+      case
+        server.rescue(fn() {
+          topic_store.apply_message(topic_store.current, message)
+        })
+      {
         Error(reason) -> {
           logging.log(
             logging.Warning,
@@ -457,38 +462,34 @@ fn handle_dispatch_logic(
           state
         }
         Ok(new_model) -> {
-          let new_seq = store.sequence + 1
-          case dict.is_empty(state.subscribers) {
-            True -> Nil
-            False -> {
-              let update_frame =
-                transport.encode(
-                  transport.TopicUpdate(
-                    topic_id: state.id,
-                    sequence: new_seq,
-                    payload: message,
-                  ),
-                  serialiser: state.serialiser,
-                )
-              let ack_frame =
-                transport.encode(
-                  transport.Acknowledge(
-                    target: transport.Topic(state.id),
-                    sequence: new_seq,
-                  ),
-                  serialiser: state.serialiser,
-                )
-              // Originator gets the ack, everyone else the update.
-              dict.each(state.subscribers, fn(id, send) {
-                case from {
-                  option.Some(sender) if sender == id -> send(ack_frame)
-                  option.Some(_) | option.None -> send(update_frame)
-                }
-              })
-            }
-          }
-          let store = TopicStore(..store, current: new_model, sequence: new_seq)
-          TopicActorState(..state, store: option.Some(store))
+          let new_seq = topic_store.sequence + 1
+          let update_frame =
+            encode_frame(
+              state,
+              transport.TopicUpdate(
+                topic_id: state.id,
+                sequence: new_seq,
+                payload: message,
+              ),
+            )
+          let ack_frame =
+            encode_frame(
+              state,
+              transport.Acknowledge(
+                target: transport.Topic(state.id),
+                sequence: new_seq,
+              ),
+            )
+          // Originator gets the ack, everyone else the update.
+          send_to_subscribers(
+            state.subscribers,
+            from,
+            option.Some(ack_frame),
+            update_frame,
+          )
+          let topic_store =
+            TopicStore(..topic_store, current: new_model, sequence: new_seq)
+          TopicActorState(..state, store: option.Some(topic_store))
         }
       }
   }
@@ -515,13 +516,8 @@ fn handle_send_snapshot_logic(
   state: TopicActorState(model, message),
   send: fn(BitArray) -> Nil,
 ) -> TopicActorState(model, message) {
-  case state.store {
-    option.None -> state
-    option.Some(store) -> {
-      send(snapshot_frame(state, store))
-      state
-    }
-  }
+  maybe_send_snapshot(state, send)
+  state
 }
 
 fn handle_set_can_subscribe_logic(
@@ -551,9 +547,9 @@ fn handle_stop_logic(state: TopicActorState(model, message)) -> Nil {
     option.None -> 0
   }
   let ack_frame =
-    transport.encode(
+    encode_frame(
+      state,
       transport.Acknowledge(target: transport.Topic(state.id), sequence: seq),
-      serialiser: state.serialiser,
     )
   dict.each(state.subscribers, fn(_id, send) { send(ack_frame) })
 }
@@ -567,9 +563,9 @@ fn handle_subscribe_logic(
   case authorised {
     False -> {
       let rejected_frame =
-        transport.encode(
+        encode_frame(
+          state,
           transport.Rejected(topic_id: state.id, reason: "denied"),
-          serialiser: state.serialiser,
         )
       send(rejected_frame)
       state
@@ -577,13 +573,7 @@ fn handle_subscribe_logic(
     True -> {
       let subscribers = dict.insert(state.subscribers, client_id, send)
       let state = TopicActorState(..state, subscribers:)
-      let state = case state.store {
-        option.None -> state
-        option.Some(store) -> {
-          send(snapshot_frame(state, store))
-          state
-        }
-      }
+      maybe_send_snapshot(state, send)
       handle_hook_messages(state, state.on_subscribe(client_id), option.None)
     }
   }
@@ -640,6 +630,17 @@ fn make_initial_state(
   )
 }
 
+/// Send a snapshot to `send` when the topic is stateful, a no-op otherwise.
+fn maybe_send_snapshot(
+  state: TopicActorState(model, message),
+  send: fn(BitArray) -> Nil,
+) -> Nil {
+  case state.store {
+    option.None -> Nil
+    option.Some(topic_store) -> send(snapshot_frame(state, topic_store))
+  }
+}
+
 fn reduce(
   event: InternalEvent(model, message),
   state: TopicActorState(model, message),
@@ -678,16 +679,38 @@ fn reduce(
   }
 }
 
+/// Fan a frame out to subscribers, guarding on empty. The originator, when
+/// `Some`, receives `originator_frame` if that is `Some` and is skipped
+/// otherwise. Everyone else receives `other_frame`.
+fn send_to_subscribers(
+  subscribers: Dict(String, fn(BitArray) -> Nil),
+  originator: Option(String),
+  originator_frame: Option(BitArray),
+  other_frame: BitArray,
+) -> Nil {
+  use <- bool.guard(when: dict.is_empty(subscribers), return: Nil)
+  dict.each(subscribers, fn(id, send) {
+    case originator {
+      option.Some(sender) if sender == id ->
+        case originator_frame {
+          option.Some(frame) -> send(frame)
+          option.None -> Nil
+        }
+      option.Some(_) | option.None -> send(other_frame)
+    }
+  })
+}
+
 fn snapshot_frame(
   state: TopicActorState(model, message),
   store: TopicStore(model, message),
 ) -> BitArray {
-  transport.encode(
+  encode_frame(
+    state,
     transport.Snapshot(
       target: transport.Topic(state.id),
       sequence: store.sequence,
       state: store.current,
     ),
-    serialiser: state.serialiser,
   )
 }

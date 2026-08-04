@@ -1,8 +1,8 @@
 /**
  * SERVER FFI (JAVASCRIPT)
  *
- * Client ID generation and the rescue combinator used to keep one bad frame
- * from tearing down the runtime.
+ * The rescue combinator used to keep one bad frame from tearing down the
+ * runtime. Client IDs come from lily/internal/id on both targets.
  */
 
 // =============================================================================
@@ -14,13 +14,6 @@ import { Ok, Error as GleamError } from "../gleam.mjs";
 // =============================================================================
 // EXPORT FUNCTIONS
 // =============================================================================
-
-/** Generate a cryptographically random 32-character hex client ID. */
-export function generateClientId() {
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-}
 
 /** Run the operation, capturing any thrown value as Error(description). */
 export function rescue(operation) {

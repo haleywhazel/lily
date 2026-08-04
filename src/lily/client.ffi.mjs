@@ -157,7 +157,7 @@ export function createRuntime(store, apply) {
         localStorage.setItem(field.storageKey, serialised);
       } catch (error) {
         logLine(
-          "EROR",
+          3,
           `failed to persist session field "${field.key}": ${error}`,
         );
       }
@@ -491,16 +491,6 @@ export function fireReconnectHook(runtime) {
   runtime.fireReconnectHook();
 }
 
-/**
- * Generate a random 32-character hex string for use as a client-side
- * session identifier.
- */
-export function generateSessionId() {
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-}
-
 export function getAllSequences(runtime) {
   return runtime.getAllSequences();
 }
@@ -513,12 +503,12 @@ export function getSnapshotHook(runtime) {
   return runtime.getSnapshotHook();
 }
 
-export function getWiring(runtime) {
-  return runtime.getWiring();
-}
-
 export function getSerialiser(runtime) {
   return runtime.getSerialiser();
+}
+
+export function getWiring(runtime) {
+  return runtime.getWiring();
 }
 
 export function handleClientId(runtime, clientId) {

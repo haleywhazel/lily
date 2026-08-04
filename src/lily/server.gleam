@@ -116,8 +116,10 @@ import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option}
 import gleam/result
+import gleam/set.{type Set}
 import gleam/string
 import lily/internal/actor_cell.{type Cell, Continue, Halt, Reply}
+import lily/internal/id
 import lily/logging
 import lily/store
 import lily/transport.{type Serialiser}
@@ -238,7 +240,7 @@ pub fn dispatch_to_all(
 /// server.connect(server, client_id:, send:)
 /// ```
 pub fn generate_client_id() -> String {
-  ffi_generate_client_id()
+  id.random_hex(client_id_bytes)
 }
 
 /// Process an incoming frame from a client. Decodes and routes it:
@@ -381,6 +383,7 @@ pub fn start(
       serialiser: builder.serialiser,
       session_apply: store.session_apply(builder.wiring),
       clients: dict.new(),
+      client_topics: dict.new(),
       sessions: dict.new(),
       topics: dict.new(),
       topic_kinds: [],
@@ -515,6 +518,7 @@ type ServerState(model, message) {
     serialiser: Serialiser(model, message),
     session_apply: Option(fn(model, message) -> model),
     clients: Dict(String, fn(BitArray) -> Nil),
+    client_topics: Dict(String, Set(String)),
     sessions: Dict(String, ConnectionState(model, message)),
     topics: Dict(String, ServerTopicEntry(model, message)),
     topic_kinds: List(TopicKindEntry(model, message)),
@@ -537,8 +541,41 @@ type TopicKindEntry(model, message) {
 // PRIVATE FUNCTIONS
 // =============================================================================
 
+// Random bytes behind a client ID, so 32 hex characters. Wide enough that two
+// connections never collide.
+const client_id_bytes = 16
+
 // Default cap on live topic actors, overridable with `server.max_topics`.
 const default_max_topics = 100_000
+
+/// Apply `message` to a connection's model under crash isolation, returning the
+/// new model or the crash reason. `None` session apply leaves the model as-is.
+fn apply_session(
+  state: ServerState(model, message),
+  connection: ConnectionState(model, message),
+  message: message,
+) -> Result(model, String) {
+  case state.session_apply {
+    option.None -> Ok(connection.model)
+    option.Some(apply) -> rescue(fn() { apply(connection.model, message) })
+  }
+}
+
+/// Bump a client's session sequence and store the new model against it.
+fn commit_session(
+  state: ServerState(model, message),
+  client_id: String,
+  new_model: model,
+  new_sequence: Int,
+) -> ServerState(model, message) {
+  let sessions =
+    dict.insert(
+      state.sessions,
+      client_id,
+      ConnectionState(model: new_model, sequence: new_sequence),
+    )
+  ServerState(..state, sessions:)
+}
 
 fn find_or_create_topic(
   state: ServerState(model, message),
@@ -592,11 +629,19 @@ fn handle_disconnect_logic(
   state: ServerState(model, message),
   client_id: String,
 ) -> ServerState(model, message) {
-  dict.each(state.topics, fn(_id, entry) { entry.unsubscribe(client_id) })
+  let subscribed =
+    dict.get(state.client_topics, client_id) |> result.unwrap(set.new())
+  set.each(subscribed, fn(topic_id) {
+    case dict.get(state.topics, topic_id) {
+      Ok(entry) -> entry.unsubscribe(client_id)
+      Error(_) -> Nil
+    }
+  })
   let clients = dict.delete(state.clients, client_id)
+  let client_topics = dict.delete(state.client_topics, client_id)
   let sessions = dict.delete(state.sessions, client_id)
   state.on_disconnect_hook(client_id)
-  ServerState(..state, clients:, sessions:)
+  ServerState(..state, clients:, client_topics:, sessions:)
 }
 
 fn handle_dispatch_to_all_logic(
@@ -614,26 +659,28 @@ fn handle_dispatch_to_logic(
   message: message,
 ) -> ServerState(model, message) {
   case dict.get(state.sessions, client_id), dict.get(state.clients, client_id) {
-    Ok(connection), Ok(send) -> {
-      let new_model = case state.session_apply {
-        option.None -> connection.model
-        option.Some(apply) -> apply(connection.model, message)
+    Ok(connection), Ok(send) ->
+      case apply_session(state, connection, message) {
+        // a crashing update must not take down the shared actor and every
+        // connection on it, so drop this dispatch without sending an update
+        Error(reason) -> {
+          logging.log(
+            logging.Warning,
+            "lily: dropped crashing dispatch to " <> client_id <> ": " <> reason,
+          )
+          state
+        }
+        Ok(new_model) -> {
+          let new_sequence = connection.sequence + 1
+          let frame =
+            transport.encode(
+              transport.SessionUpdate(sequence: new_sequence, payload: message),
+              serialiser: state.serialiser,
+            )
+          send(frame)
+          commit_session(state, client_id, new_model, new_sequence)
+        }
       }
-      let new_sequence = connection.sequence + 1
-      let frame =
-        transport.encode(
-          transport.SessionUpdate(sequence: new_sequence, payload: message),
-          serialiser: state.serialiser,
-        )
-      send(frame)
-      let sessions =
-        dict.insert(
-          state.sessions,
-          client_id,
-          ConnectionState(model: new_model, sequence: new_sequence),
-        )
-      ServerState(..state, sessions:)
-    }
     _, _ -> state
   }
 }
@@ -646,7 +693,7 @@ fn handle_do_subscribe_logic(
   case dict.get(state.clients, client_id), dict.get(state.topics, topic_id) {
     Ok(send), Ok(entry) -> {
       entry.subscribe(client_id, send)
-      state
+      track_subscription(state, client_id, topic_id)
     }
     _, _ -> state
   }
@@ -710,10 +757,7 @@ fn handle_register_topic_logic(
   id: String,
   entry: ServerTopicEntry(model, message),
 ) -> #(ServerState(model, message), Result(Nil, Nil)) {
-  let already_exists = case dict.get(state.topics, id) {
-    Ok(_) -> True
-    Error(_) -> False
-  }
+  let already_exists = dict.has_key(state.topics, id)
   // both directions matter, `id="room:1"` collides with kind prefix `"room:"`,
   // and a fixed `id="room"` would shadow that prefix
   let kind_collision =
@@ -775,12 +819,8 @@ fn handle_session_message_logic(
 ) -> ServerState(model, message) {
   case dict.get(state.sessions, client_id) {
     Error(_) -> state
-    Ok(connection) -> {
-      let applied = case state.session_apply {
-        option.None -> Ok(connection.model)
-        option.Some(apply) -> rescue(fn() { apply(connection.model, message) })
-      }
-      case applied {
+    Ok(connection) ->
+      case apply_session(state, connection, message) {
         // a crash means the frame decoded to a value update can't match, drop
         // it without acking to keep the actor alive
         Error(reason) -> {
@@ -794,14 +834,14 @@ fn handle_session_message_logic(
           state
         }
         Ok(new_model) -> {
-          let new_seq = connection.sequence + 1
+          let new_sequence = connection.sequence + 1
           case dict.get(state.clients, client_id) {
             Ok(send) -> {
               let ack_frame =
                 transport.encode(
                   transport.Acknowledge(
                     target: transport.Session,
-                    sequence: new_seq,
+                    sequence: new_sequence,
                   ),
                   serialiser: state.serialiser,
                 )
@@ -810,16 +850,9 @@ fn handle_session_message_logic(
             Error(_) -> Nil
           }
           state.on_message_hook(message, new_model, client_id)
-          let sessions =
-            dict.insert(
-              state.sessions,
-              client_id,
-              ConnectionState(model: new_model, sequence: new_seq),
-            )
-          ServerState(..state, sessions:)
+          commit_session(state, client_id, new_model, new_sequence)
         }
       }
-    }
   }
 }
 
@@ -869,7 +902,7 @@ fn handle_subscribe_logic(
       case find_or_create_topic(state, topic_id) {
         #(state, option.Some(entry)) -> {
           entry.subscribe(client_id, send)
-          state
+          track_subscription(state, client_id, topic_id)
         }
         #(state, option.None) -> {
           let rejected_frame =
@@ -917,7 +950,7 @@ fn handle_unsubscribe_logic(
     Ok(entry) -> entry.unsubscribe(client_id)
     Error(_) -> Nil
   }
-  state
+  untrack_subscription(state, client_id, topic_id)
 }
 
 fn reduce(
@@ -974,21 +1007,45 @@ fn reduce(
   }
 }
 
+/// Record that `client_id` is subscribed to `topic_id`, so disconnect can
+/// unsubscribe only the topics the client actually joined.
+fn track_subscription(
+  state: ServerState(model, message),
+  client_id: String,
+  topic_id: String,
+) -> ServerState(model, message) {
+  let topics =
+    dict.get(state.client_topics, client_id)
+    |> result.unwrap(set.new())
+    |> set.insert(topic_id)
+  let client_topics = dict.insert(state.client_topics, client_id, topics)
+  ServerState(..state, client_topics:)
+}
+
+/// Drop `topic_id` from `client_id`'s subscription set on an explicit
+/// unsubscribe.
+fn untrack_subscription(
+  state: ServerState(model, message),
+  client_id: String,
+  topic_id: String,
+) -> ServerState(model, message) {
+  case dict.get(state.client_topics, client_id) {
+    Error(_) -> state
+    Ok(topics) -> {
+      let client_topics =
+        dict.insert(
+          state.client_topics,
+          client_id,
+          set.delete(topics, topic_id),
+        )
+      ServerState(..state, client_topics:)
+    }
+  }
+}
+
 // =============================================================================
 // PRIVATE FFI
 // =============================================================================
-
-@target(erlang)
-@external(erlang, "lily_server_ffi", "generate_client_id")
-fn ffi_generate_client_id() -> String {
-  ""
-}
-
-@target(javascript)
-@external(javascript, "./server.ffi.mjs", "generateClientId")
-fn ffi_generate_client_id() -> String {
-  ""
-}
 
 /// Run `operation`, turning a runtime crash into `Error(description)`. Types
 /// are erased on Erlang, so a hostile frame can decode to a value update can't

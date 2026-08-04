@@ -71,6 +71,16 @@ pub fn encode_int_uint32_test() {
   assert_encodes(message_pack.encode_int(4_294_967_295), "CEFFFFFFFF")
 }
 
+pub fn encode_int_uint64_test() {
+  // 2^32 is the first value past uint32, and 2^53 - 1 is the largest Int the
+  // JS target holds exactly, so both must round-trip on both targets.
+  assert_encodes(message_pack.encode_int(4_294_967_296), "CF0000000100000000")
+  assert_encodes(
+    message_pack.encode_int(9_007_199_254_740_991),
+    "CF001FFFFFFFFFFFFF",
+  )
+}
+
 // =============================================================================
 // ENCODE: INTEGERS (negative)
 // =============================================================================
@@ -93,6 +103,16 @@ pub fn encode_int_int16_test() {
 pub fn encode_int_int32_test() {
   assert_encodes(message_pack.encode_int(-32_769), "D2FFFF7FFF")
   assert_encodes(message_pack.encode_int(-2_147_483_648), "D280000000")
+}
+
+pub fn encode_int_int64_test() {
+  // First value past int32, and -(2^53 - 1) the smallest Int the JS target
+  // holds exactly. Both are two's-complement over eight bytes.
+  assert_encodes(message_pack.encode_int(-2_147_483_649), "D3FFFFFFFF7FFFFFFF")
+  assert_encodes(
+    message_pack.encode_int(-9_007_199_254_740_991),
+    "D3FFE0000000000001",
+  )
 }
 
 // =============================================================================
@@ -217,6 +237,11 @@ pub fn decode_uint32_test() {
   assert_decodes("CE00010000", ValueInteger(65_536))
 }
 
+pub fn decode_uint64_test() {
+  assert_decodes("CF0000000100000000", ValueInteger(4_294_967_296))
+  assert_decodes("CF001FFFFFFFFFFFFF", ValueInteger(9_007_199_254_740_991))
+}
+
 pub fn decode_int8_test() {
   assert_decodes("D080", ValueInteger(-128))
 }
@@ -227,6 +252,11 @@ pub fn decode_int16_test() {
 
 pub fn decode_int32_test() {
   assert_decodes("D280000000", ValueInteger(-2_147_483_648))
+}
+
+pub fn decode_int64_test() {
+  assert_decodes("D3FFFFFFFF7FFFFFFF", ValueInteger(-2_147_483_649))
+  assert_decodes("D3FFE0000000000001", ValueInteger(-9_007_199_254_740_991))
 }
 
 pub fn decode_fixstr_test() {
@@ -283,6 +313,10 @@ pub fn roundtrip_int_range_test() {
   roundtrip_int(-129)
   roundtrip_int(-32_768)
   roundtrip_int(-32_769)
+  roundtrip_int(4_294_967_296)
+  roundtrip_int(9_007_199_254_740_991)
+  roundtrip_int(-2_147_483_649)
+  roundtrip_int(-9_007_199_254_740_991)
 }
 
 pub fn roundtrip_string_test() {

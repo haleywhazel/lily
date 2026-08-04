@@ -49,31 +49,19 @@ export function releaseFocusTrap() {
 
 /** Click handler with data-message delegation and options. */
 export function setupClickEventWithOptions(selector, options, handler) {
-  const [debounceMs, throttleMs, once, stopPropagation, preventDefault] =
-    options;
-  let listener = (event) => {
-    if (!matchesSelectorScope(event, selector)) return;
-    if (event.target.closest("[data-lily-disabled]")) return;
-    const matched = event.target.closest("[data-message]");
-    if (!matched) return;
-    handler(matched.getAttribute("data-message"));
-  };
-  listener = applyOptions(
-    listener,
-    debounceMs,
-    throttleMs,
-    once,
-    stopPropagation,
+  installDelegated({
+    key: "click\x1f" + selector,
+    root: document,
+    domEvent: "click",
+    capture: false,
     selector,
-  );
-  if (preventDefault) listener = preventDefaultFirst(listener);
-  registerDelegatedListener(
-    "click\x1f" + selector,
-    document,
-    "click",
-    false,
-    listener,
-  );
+    options,
+    build: (event) => {
+      const matched = event.target.closest("[data-message]");
+      if (!matched) return;
+      handler(matched.getAttribute("data-message"));
+    },
+  });
 }
 
 /**
@@ -91,33 +79,21 @@ export function setupCoordinateElementEventWithOptions(
   makeElementData,
   handler,
 ) {
-  const [debounceMs, throttleMs, once, stopPropagation, preventDefault] =
-    options;
-  let listener = (event) => {
-    if (!matchesSelectorScope(event, selector)) return;
-    if (event.target.closest("[data-lily-disabled]")) return;
-    handler(
-      event.clientX,
-      event.clientY,
-      makeElementData(datasetToList(event.target)),
-    );
-  };
-  listener = applyOptions(
-    listener,
-    debounceMs,
-    throttleMs,
-    once,
-    stopPropagation,
+  installDelegated({
+    key: "coordel\x1f" + eventName + "\x1f" + selector,
+    root: document,
+    domEvent: eventName,
+    capture: false,
     selector,
-  );
-  if (preventDefault) listener = preventDefaultFirst(listener);
-  registerDelegatedListener(
-    "coordel\x1f" + eventName + "\x1f" + selector,
-    document,
-    eventName,
-    false,
-    listener,
-  );
+    options,
+    build: (event) => {
+      handler(
+        event.clientX,
+        event.clientY,
+        makeElementData(datasetToList(event.target)),
+      );
+    },
+  });
 }
 
 /** Coordinate event (mouse/touch/pointer) with x,y position and options. */
@@ -127,29 +103,17 @@ export function setupCoordinateEventWithOptions(
   options,
   handler,
 ) {
-  const [debounceMs, throttleMs, once, stopPropagation, preventDefault] =
-    options;
-  let listener = (event) => {
-    if (!matchesSelectorScope(event, selector)) return;
-    if (event.target.closest("[data-lily-disabled]")) return;
-    handler(event.clientX, event.clientY);
-  };
-  listener = applyOptions(
-    listener,
-    debounceMs,
-    throttleMs,
-    once,
-    stopPropagation,
+  installDelegated({
+    key: "coord\x1f" + eventName + "\x1f" + selector,
+    root: delegationRoot(selector),
+    domEvent: eventName,
+    capture: false,
     selector,
-  );
-  if (preventDefault) listener = preventDefaultFirst(listener);
-  registerDelegatedListener(
-    "coord\x1f" + eventName + "\x1f" + selector,
-    delegationRoot(selector),
-    eventName,
-    false,
-    listener,
-  );
+    options,
+    build: (event) => {
+      handler(event.clientX, event.clientY);
+    },
+  });
 }
 
 /**
@@ -164,33 +128,20 @@ export function setupElementEventWithOptions(
   makeElementData,
   handler,
 ) {
-  const [debounceMs, throttleMs, once, stopPropagation, preventDefault] =
-    options;
-  const domEvent = delegatedEventName(eventName);
-  let listener = (event) => {
-    if (!matchesSelectorScope(event, selector)) return;
-    if (event.target.closest("[data-lily-disabled]")) return;
-    const matched = event.target;
-    if (shouldSkipDelegatedEvent(eventName, matched, event.relatedTarget))
-      return;
-    handler(makeElementData(datasetToList(matched)));
-  };
-  listener = applyOptions(
-    listener,
-    debounceMs,
-    throttleMs,
-    once,
-    stopPropagation,
+  installDelegated({
+    key: "el\x1f" + eventName + "\x1f" + selector,
+    root: document,
+    domEvent: delegatedEventName(eventName),
+    capture: false,
     selector,
-  );
-  if (preventDefault) listener = preventDefaultFirst(listener);
-  registerDelegatedListener(
-    "el\x1f" + eventName + "\x1f" + selector,
-    document,
-    domEvent,
-    false,
-    listener,
-  );
+    options,
+    build: (event) => {
+      const matched = event.target;
+      if (shouldSkipDelegatedEvent(eventName, matched, event.relatedTarget))
+        return;
+      handler(makeElementData(datasetToList(matched)));
+    },
+  });
 }
 
 /** Move focus to the first match of selector after the next paint. */
@@ -248,31 +199,19 @@ export function setupFocusTrap(within, releaseOn, onExit) {
  * forms re-rendered by innerHTML updates keep firing.
  */
 export function setupFormChangeEventWithOptions(selector, options, handler) {
-  const [debounceMs, throttleMs, once, stopPropagation, preventDefault] =
-    options;
-  let listener = (event) => {
-    if (!matchesSelectorScope(event, selector)) return;
-    if (event.target.closest?.("[data-lily-disabled]")) return;
-    const form = event.target.closest?.("form");
-    if (!(form instanceof HTMLFormElement)) return;
-    handler(formDataToList(form));
-  };
-  listener = applyOptions(
-    listener,
-    debounceMs,
-    throttleMs,
-    once,
-    stopPropagation,
+  installDelegated({
+    key: "formchange\x1f" + selector,
+    root: document,
+    domEvent: "input",
+    capture: false,
     selector,
-  );
-  if (preventDefault) listener = preventDefaultFirst(listener);
-  registerDelegatedListener(
-    "formchange\x1f" + selector,
-    document,
-    "input",
-    false,
-    listener,
-  );
+    options,
+    build: (event) => {
+      const form = event.target.closest?.("form");
+      if (!(form instanceof HTMLFormElement)) return;
+      handler(formDataToList(form));
+    },
+  });
 }
 
 /** Keyboard event passing key name and modifier flags, with options. */
@@ -283,37 +222,25 @@ export function setupKeyFullEventWithOptions(
   makeKeyEvent,
   handler,
 ) {
-  const [debounceMs, throttleMs, once, stopPropagation, preventDefault] =
-    options;
-  let listener = (event) => {
-    if (!matchesSelectorScope(event, selector)) return;
-    if (event.target.closest?.("[data-lily-disabled]")) return;
-    handler(
-      makeKeyEvent(
-        event.key,
-        event.ctrlKey,
-        event.shiftKey,
-        event.altKey,
-        event.metaKey,
-      ),
-    );
-  };
-  listener = applyOptions(
-    listener,
-    debounceMs,
-    throttleMs,
-    once,
-    stopPropagation,
+  installDelegated({
+    key: "key\x1f" + eventName + "\x1f" + selector,
+    root: document,
+    domEvent: eventName,
+    capture: false,
     selector,
-  );
-  if (preventDefault) listener = preventDefaultFirst(listener);
-  registerDelegatedListener(
-    "key\x1f" + eventName + "\x1f" + selector,
-    document,
-    eventName,
-    false,
-    listener,
-  );
+    options,
+    build: (event) => {
+      handler(
+        makeKeyEvent(
+          event.key,
+          event.ctrlKey,
+          event.shiftKey,
+          event.altKey,
+          event.metaKey,
+        ),
+      );
+    },
+  });
 }
 
 /**
@@ -327,30 +254,18 @@ export function setupScrollPositionEventWithOptions(
   options,
   handler,
 ) {
-  const [debounceMs, throttleMs, once, stopPropagation, preventDefault] =
-    options;
-  let listener = (event) => {
-    if (!matchesSelectorScope(event, selector)) return;
-    if (event.target.closest?.("[data-lily-disabled]")) return;
-    const element = event.target;
-    handler(element.scrollTop ?? 0, element.scrollLeft ?? 0);
-  };
-  listener = applyOptions(
-    listener,
-    debounceMs,
-    throttleMs,
-    once,
-    stopPropagation,
+  installDelegated({
+    key: "scroll\x1f" + selector,
+    root: delegationRoot(selector),
+    domEvent: "scroll",
+    capture: true,
     selector,
-  );
-  if (preventDefault) listener = preventDefaultFirst(listener);
-  registerDelegatedListener(
-    "scroll\x1f" + selector,
-    delegationRoot(selector),
-    "scroll",
-    true,
-    listener,
-  );
+    options,
+    build: (event) => {
+      const element = event.target;
+      handler(element.scrollTop ?? 0, element.scrollLeft ?? 0);
+    },
+  });
 }
 
 /** Attaches a simple event with no event data, with options */
@@ -360,29 +275,17 @@ export function setupSimpleEventWithOptions(
   options,
   handler,
 ) {
-  const [debounceMs, throttleMs, once, stopPropagation, preventDefault] =
-    options;
-  let listener = (event) => {
-    if (!matchesSelectorScope(event, selector)) return;
-    if (event.target.closest?.("[data-lily-disabled]")) return;
-    handler();
-  };
-  listener = applyOptions(
-    listener,
-    debounceMs,
-    throttleMs,
-    once,
-    stopPropagation,
+  installDelegated({
+    key: "simple\x1f" + eventName + "\x1f" + selector,
+    root: delegationRoot(selector),
+    domEvent: eventName,
+    capture: false,
     selector,
-  );
-  if (preventDefault) listener = preventDefaultFirst(listener);
-  registerDelegatedListener(
-    "simple\x1f" + eventName + "\x1f" + selector,
-    delegationRoot(selector),
-    eventName,
-    false,
-    listener,
-  );
+    options,
+    build: () => {
+      handler();
+    },
+  });
 }
 
 /**
@@ -393,39 +296,27 @@ export function setupSimpleEventWithOptions(
  * selector is handled, including forms rendered after setup.
  */
 export function setupSubmitFormEventWithOptions(selector, options, handler) {
-  const [debounceMs, throttleMs, once, stopPropagation] = options;
-  let listener = (event) => {
-    if (!matchesSelectorScope(event, selector)) return;
-    const form = event.target.closest?.("form");
-    if (!(form instanceof HTMLFormElement)) return;
-    if (form.closest("[data-lily-disabled]")) return;
-    handler(formDataToList(form));
-    form.reset();
-  };
-  listener = applyOptions(
-    listener,
-    debounceMs,
-    throttleMs,
-    once,
-    stopPropagation,
+  // preventDefault is unconditional for submit, the browser would otherwise
+  // navigate before the handler can run. alwaysPreventDefault layers it on top
+  // of applyOptions so it fires even when debounce or throttle skip the body.
+  // The disabled guard is on the form, not the event target, so build owns it.
+  installDelegated({
+    key: "formsubmit\x1f" + selector,
+    root: document,
+    domEvent: "submit",
+    capture: false,
     selector,
-  );
-  // preventDefault is unconditional for submit, the browser would
-  // otherwise navigate before the handler can run. Wrap before applyOptions
-  // would put preventDefault behind debounce/throttle gates, so we layer
-  // it on top.
-  const inner = listener;
-  listener = (event) => {
-    event.preventDefault();
-    inner(event);
-  };
-  registerDelegatedListener(
-    "formsubmit\x1f" + selector,
-    document,
-    "submit",
-    false,
-    listener,
-  );
+    options,
+    alwaysPreventDefault: true,
+    guardDisabled: false,
+    build: (event) => {
+      const form = event.target.closest?.("form");
+      if (!(form instanceof HTMLFormElement)) return;
+      if (form.closest("[data-lily-disabled]")) return;
+      handler(formDataToList(form));
+      form.reset();
+    },
+  });
 }
 
 /** Attaches an input/change event with input value, with options */
@@ -435,56 +326,32 @@ export function setupValueEventWithOptions(
   options,
   handler,
 ) {
-  const [debounceMs, throttleMs, once, stopPropagation, preventDefault] =
-    options;
-  let listener = (event) => {
-    if (!matchesSelectorScope(event, selector)) return;
-    if (event.target.closest("[data-lily-disabled]")) return;
-    handler(event.target.value || "");
-  };
-  listener = applyOptions(
-    listener,
-    debounceMs,
-    throttleMs,
-    once,
-    stopPropagation,
+  installDelegated({
+    key: "value\x1f" + eventName + "\x1f" + selector,
+    root: document,
+    domEvent: eventName,
+    capture: false,
     selector,
-  );
-  if (preventDefault) listener = preventDefaultFirst(listener);
-  registerDelegatedListener(
-    "value\x1f" + eventName + "\x1f" + selector,
-    document,
-    eventName,
-    false,
-    listener,
-  );
+    options,
+    build: (event) => {
+      handler(event.target.value || "");
+    },
+  });
 }
 
 /** Attaches a wheel event with deltaX and deltaY values, with options */
 export function setupWheelEventWithOptions(selector, options, handler) {
-  const [debounceMs, throttleMs, once, stopPropagation, preventDefault] =
-    options;
-  let listener = (event) => {
-    if (!matchesSelectorScope(event, selector)) return;
-    if (event.target.closest("[data-lily-disabled]")) return;
-    handler(event.deltaX, event.deltaY);
-  };
-  listener = applyOptions(
-    listener,
-    debounceMs,
-    throttleMs,
-    once,
-    stopPropagation,
+  installDelegated({
+    key: "wheel\x1f" + selector,
+    root: document,
+    domEvent: "wheel",
+    capture: false,
     selector,
-  );
-  if (preventDefault) listener = preventDefaultFirst(listener);
-  registerDelegatedListener(
-    "wheel\x1f" + selector,
-    document,
-    "wheel",
-    false,
-    listener,
-  );
+    options,
+    build: (event) => {
+      handler(event.deltaX, event.deltaY);
+    },
+  });
 }
 
 /**
@@ -503,27 +370,52 @@ export function warnScopeless() {
 }
 
 /**
- * Install the document-level focus-trap observer. Idempotent. Once installed,
- * any element carrying `data-lily-focus-trap` is focus-trapped while in the
- * DOM and releases (restoring focus to its opener) when removed.
+ * Manage native <details> popups carrying `data-lily-focus-on-open`. Opening
+ * seeds focus on the selected option (arrow group and typeahead then work with
+ * no manual tab in), Escape closes it back to the summary, and focus leaving it
+ * closes it so it never blocks the next tab stop. Closing via `open = false`
+ * never steals the incoming focus. toggle and focusout do not bubble, so both
+ * listen in the capture phase.
  */
-export function watchFocusTraps() {
-  if (trapObserver !== null) return;
-  trapObserver = new MutationObserver((mutations) => {
-    for (const mutation of mutations) {
-      for (const node of mutation.addedNodes) {
-        if (node.nodeType === 1) {
-          collectDeclaredTraps(node).forEach(activateDeclaredTrap);
-        }
-      }
-      for (const node of mutation.removedNodes) {
-        if (node.nodeType === 1) {
-          collectDeclaredTraps(node).forEach(deactivateDeclaredTrap);
-        }
-      }
-    }
-  });
-  trapObserver.observe(document.body, { childList: true, subtree: true });
+export function watchDetailsOpen() {
+  if (detailsOpenHandler !== null) return;
+  detailsOpenHandler = (event) => {
+    const details = event.target;
+    if (!details.matches || !details.matches("[data-lily-focus-on-open]")) return;
+    if (!details.open) return;
+    const target =
+      details.querySelector('[aria-selected="true"]') || firstFocusable(details);
+    if (target) target.focus();
+  };
+  document.addEventListener("toggle", detailsOpenHandler, true);
+
+  document.addEventListener(
+    "keydown",
+    (event) => {
+      if (event.key !== "Escape") return;
+      const details = event.target.closest?.(
+        "[data-lily-focus-on-open][open]",
+      );
+      if (!details) return;
+      event.preventDefault();
+      details.open = false;
+      details.querySelector("summary")?.focus();
+    },
+    true,
+  );
+
+  document.addEventListener(
+    "focusout",
+    (event) => {
+      const details = event.target.closest?.(
+        "[data-lily-focus-on-open][open]",
+      );
+      if (!details) return;
+      if (event.relatedTarget && details.contains(event.relatedTarget)) return;
+      details.open = false;
+    },
+    true,
+  );
 }
 
 /**
@@ -596,52 +488,27 @@ export function watchFileDrops() {
 }
 
 /**
- * Manage native <details> popups carrying `data-lily-focus-on-open`. Opening
- * seeds focus on the selected option (arrow group and typeahead then work with
- * no manual tab in), Escape closes it back to the summary, and focus leaving it
- * closes it so it never blocks the next tab stop. Closing via `open = false`
- * never steals the incoming focus. toggle and focusout do not bubble, so both
- * listen in the capture phase.
+ * Install the document-level focus-trap observer. Idempotent. Once installed,
+ * any element carrying `data-lily-focus-trap` is focus-trapped while in the
+ * DOM and releases (restoring focus to its opener) when removed.
  */
-export function watchDetailsOpen() {
-  if (detailsOpenHandler !== null) return;
-  detailsOpenHandler = (event) => {
-    const details = event.target;
-    if (!details.matches || !details.matches("[data-lily-focus-on-open]")) return;
-    if (!details.open) return;
-    const target =
-      details.querySelector('[aria-selected="true"]') || firstFocusable(details);
-    if (target) target.focus();
-  };
-  document.addEventListener("toggle", detailsOpenHandler, true);
-
-  document.addEventListener(
-    "keydown",
-    (event) => {
-      if (event.key !== "Escape") return;
-      const details = event.target.closest?.(
-        "[data-lily-focus-on-open][open]",
-      );
-      if (!details) return;
-      event.preventDefault();
-      details.open = false;
-      details.querySelector("summary")?.focus();
-    },
-    true,
-  );
-
-  document.addEventListener(
-    "focusout",
-    (event) => {
-      const details = event.target.closest?.(
-        "[data-lily-focus-on-open][open]",
-      );
-      if (!details) return;
-      if (event.relatedTarget && details.contains(event.relatedTarget)) return;
-      details.open = false;
-    },
-    true,
-  );
+export function watchFocusTraps() {
+  if (trapObserver !== null) return;
+  trapObserver = new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (node.nodeType === 1) {
+          collectDeclaredTraps(node).forEach(activateDeclaredTrap);
+        }
+      }
+      for (const node of mutation.removedNodes) {
+        if (node.nodeType === 1) {
+          collectDeclaredTraps(node).forEach(deactivateDeclaredTrap);
+        }
+      }
+    }
+  });
+  trapObserver.observe(document.body, { childList: true, subtree: true });
 }
 
 /**
@@ -899,10 +766,6 @@ function groupStep(key, orientation) {
   return 0;
 }
 
-// Printable keys build up a prefix within the debounce window, cleared on pause.
-let typeaheadBuffer = "";
-let typeaheadClearTimer = null;
-
 /**
  * Focus the next group item whose label matches the typed buffer. A repeat of
  * one key cycles same-initial items, a growing prefix narrows. Returns the
@@ -1036,6 +899,48 @@ function handleTrapKeydown(event, trap) {
   }
 }
 
+/**
+ * Wire one delegated event binding. Owns the ritual shared by every setup*
+ * export, destructure the options array, scope by selector, guard the disabled
+ * subtree, wrap with applyOptions, layer preventDefault, then register. `build`
+ * holds the distinct body and runs only for a matching, enabled target.
+ *
+ * alwaysPreventDefault forces preventDefault even when the option is unset (the
+ * submit-form case). guardDisabled skips the target-based disabled guard for
+ * callers that guard a different node themselves.
+ */
+function installDelegated({
+  key,
+  root,
+  domEvent,
+  capture,
+  selector,
+  options,
+  alwaysPreventDefault = false,
+  guardDisabled = true,
+  build,
+}) {
+  const [debounceMs, throttleMs, once, stopPropagation, preventDefault] =
+    options;
+  let listener = (event) => {
+    if (!matchesSelectorScope(event, selector)) return;
+    if (guardDisabled && event.target.closest?.("[data-lily-disabled]")) return;
+    build(event);
+  };
+  listener = applyOptions(
+    listener,
+    debounceMs,
+    throttleMs,
+    once,
+    stopPropagation,
+    selector,
+  );
+  if (alwaysPreventDefault || preventDefault) {
+    listener = preventDefaultFirst(listener);
+  }
+  registerDelegatedListener(key, root, domEvent, capture, listener);
+}
+
 /** Install the focus-group keydown listener if not already installed. */
 function installGroupKeydownHandler() {
   if (groupKeydownHandler !== null) return;
@@ -1062,7 +967,8 @@ function installTrapKeydownHandler() {
  */
 function matchesSelectorScope(event, selector) {
   if (selector === "document" || selector === "window") return true;
-  return event.target.closest?.(selector) !== null;
+  const el = event.target;
+  return !!(el && el.closest) && el.closest(selector) !== null;
 }
 
 /** Pop the top trap. Uninstall the document listener if the stack empties. */
@@ -1190,6 +1096,11 @@ const focusGroups = new Map();
 let groupKeydownHandler = null;
 
 let trapKeydownHandler = null;
+
+// Printable keys build up a prefix within the debounce window, cleared on
+// pause. Used by typeaheadMatch.
+let typeaheadBuffer = "";
+let typeaheadClearTimer = null;
 
 // Document-level Escape-to-dismiss handler installed by watchEscapeDismiss.
 // Unlike a focus trap it holds no state beyond the listener itself. On every

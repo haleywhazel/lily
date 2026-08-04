@@ -140,6 +140,19 @@ function applyDecorations(handle, decorations, html, model) {
   return html;
 }
 
+/**
+ * Cancel a pending exit on `node` and strip its stored exit class in place.
+ * Used when a mid-exit wrapper is re-added, the synchronous strip lets a
+ * following DOM read see the cleaned-up element (removeWithTransition's abort
+ * strips it too, but only as a later microtask).
+ */
+function cancelExitAndStripClass(handle, node) {
+  handle.cancelPendingExit(node);
+  const transitionElement = findTransitionElement(node);
+  const exitClass = transitionElement?.dataset.lilyTransitionExit;
+  if (exitClass) transitionElement.classList.remove(exitClass);
+}
+
 /** Handler for `component.each`. */
 function createEachHandler(
   handle,
@@ -216,8 +229,7 @@ function createEachHandler(
  *
  * `onDrop(keyStr)` runs after a child leaves the DOM, to release per-key
  * state. `onItem` runs once per item and decides whether to render, patch, or
- * do nothing. Work that must run after all items are positioned is pushed onto
- * `deferred`.
+ * do nothing.
  */
 function createKeyedListHandler({ handle, selector, slice, getKey, onDrop, onItem }) {
   const children = new Map();
@@ -258,7 +270,6 @@ function createKeyedListHandler({ handle, selector, slice, getKey, onDrop, onIte
     // Cache the live HTMLCollection once to skip a per-iteration lookup on
     // `container`. It updates as we `insertBefore`, so live semantics hold.
     const liveChildren = container.children;
-    const deferred = [];
 
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
@@ -272,22 +283,14 @@ function createKeyedListHandler({ handle, selector, slice, getKey, onDrop, onIte
         children.set(keyStr, element);
       } else if (handle.getPendingExit(element)) {
         // Re-added mid-exit, cancel the pending removal and strip the exit
-        // class synchronously. removeWithTransition's abort strips it too but
-        // as a later microtask, doing it here lets synchronous DOM reads see
-        // the cleaned-up element immediately.
-        handle.cancelPendingExit(element);
-        const transitionElement = findTransitionElement(element);
-        if (transitionElement) {
-          const exitClass = transitionElement.dataset.lilyTransitionExit;
-          if (exitClass) transitionElement.classList.remove(exitClass);
-        }
+        // class synchronously.
+        cancelExitAndStripClass(handle, element);
       }
 
       onItem({
         handle,
         container,
         liveChildren,
-        deferred,
         item,
         keyStr,
         element,
@@ -295,12 +298,6 @@ function createKeyedListHandler({ handle, selector, slice, getKey, onDrop, onIte
         index: i,
         model,
       });
-    }
-
-    // Run anything queued during the loop (e.g. per-new-child handlers wait
-    // until all positioning is done).
-    for (let i = 0; i < deferred.length; i++) {
-      deferred[i]();
     }
   };
 }
@@ -394,11 +391,7 @@ function morph(handle, live, next) {
       // Both runtime-owned, keep the live one intact (opaque). If it was
       // mid-exit (re-added before its close animation finished), cancel it.
       if (handle.getPendingExit(liveNode)) {
-        handle.cancelPendingExit(liveNode);
-        const te = findTransitionElement(liveNode);
-        if (te?.dataset.lilyTransitionExit) {
-          te.classList.remove(te.dataset.lilyTransitionExit);
-        }
+        cancelExitAndStripClass(handle, liveNode);
       }
       liveNode = liveNode.nextSibling;
       nextNode = nextAfter;
@@ -620,15 +613,12 @@ function renderLive(handle, component, model, toHtml, toSlot) {
 
   // Initial HTML with slot substitution. Children registered here persist for
   // the live component's lifetime, never unregistered between patch updates.
-  const { slot, collected } = makeSlotter(toSlot);
-  const rawHtml = toHtml(initial(slot));
-  const { html: initialHtml, ids: childIds } = substituteSlots(
-    rawHtml,
-    collected,
+  const { html: initialHtml, ids: childIds } = renderWithSlots(
     handle,
     model,
     toHtml,
     toSlot,
+    initial,
   );
 
   let cachedElement = null;
@@ -667,15 +657,12 @@ function renderSimple(handle, component, model, toHtml, toSlot) {
     // them), so freshly-rendered duplicates are discarded by the morph, swept
     // from the registry below. Genuinely new slots land in the DOM, run their
     // handlers and drain bindings.
-    const { slot, collected } = makeSlotter(toSlot);
-    const rawHtml = toHtml(render(data, slot));
-    const { html, ids: newChildIds } = substituteSlots(
-      rawHtml,
-      collected,
+    const { html, ids: newChildIds } = renderWithSlots(
       handle,
       model,
       toHtml,
       toSlot,
+      (slot) => render(data, slot),
     );
 
     cachedElement = ensureCached(cachedElement, selector);
@@ -687,7 +674,9 @@ function renderSimple(handle, component, model, toHtml, toSlot) {
 
     const registry = handle.getComponentRegistry();
     for (const id of newChildIds) {
-      const kept = document.querySelector(`[data-lily-component="${id}"]`);
+      const kept = cachedElement.querySelector(
+        `[data-lily-component="${id}"]`,
+      );
       if (kept) {
         const childHandler = registry.get(id);
         if (childHandler) childHandler(model);
@@ -702,15 +691,12 @@ function renderSimple(handle, component, model, toHtml, toSlot) {
 
   // Children registered here are run at mount by renderTree and preserved
   // across updates by the morph above.
-  const { slot, collected } = makeSlotter(toSlot);
-  const rawHtml = toHtml(render(slice(model), slot));
-  const { html: initialHtml } = substituteSlots(
-    rawHtml,
-    collected,
+  const { html: initialHtml } = renderWithSlots(
     handle,
     model,
     toHtml,
     toSlot,
+    (slot) => render(slice(model), slot),
   );
 
   return `<div data-lily-component="${componentId}">${initialHtml}</div>`;
@@ -718,19 +704,26 @@ function renderSimple(handle, component, model, toHtml, toSlot) {
 
 /** Renders a Static component */
 function renderStatic(handle, component, model, toHtml, toSlot) {
-  const { slot, collected } = makeSlotter(toSlot);
-  const rawHtml = toHtml(component.content(slot));
-  if (collected.length === 0) return rawHtml;
-
-  const { html } = substituteSlots(
-    rawHtml,
-    collected,
+  const { html } = renderWithSlots(
     handle,
     model,
     toHtml,
     toSlot,
+    component.content,
   );
   return html;
+}
+
+/**
+ * Render a content function that may place child components via slot(). Builds
+ * the slotter, runs `produce(slot)` through toHtml, then substitutes the
+ * collected children back into their placeholders. Returns { html, ids }, the
+ * ids being every child component registered during the render.
+ */
+function renderWithSlots(handle, model, toHtml, toSlot, produce) {
+  const { slot, collected } = makeSlotter(toSlot);
+  const rawHtml = toHtml(produce(slot));
+  return substituteSlots(rawHtml, collected, handle, model, toHtml, toSlot);
 }
 
 /** Runs each handler in `ids` once with the current model to populate. */

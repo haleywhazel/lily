@@ -58,7 +58,7 @@ export function reflect(value) {
       items.push(reflect(current.head));
       current = current.tail;
     }
-    return new ReflectedList(arrayToGleamList(items));
+    return new ReflectedList(toList(items));
   }
 
   // Gleam tuple (`#(a, b)`) compiles to a plain JS array on this target.
@@ -66,7 +66,7 @@ export function reflect(value) {
   // instances (below) by the native Array test.
   if (Array.isArray(value)) {
     const fields = value.map(reflect);
-    return new ReflectedTuple(arrayToGleamList(fields));
+    return new ReflectedTuple(toList(fields));
   }
 
   // Gleam Dict (`gleam_stdlib/dict.Dict`). Recognised by class identity.
@@ -79,7 +79,9 @@ export function reflect(value) {
       entries.push([reflect(k), reflect(v)]);
       return undefined;
     });
-    return new ReflectedDict(arrayToGleamList(entries.map(pairToTuple)));
+    // entries already hold `[reflect(k), reflect(v)]` arrays, which are Gleam
+    // 2-tuples on this target, so no conversion is needed.
+    return new ReflectedDict(toList(entries));
   }
 
   // Gleam Set (`gleam_stdlib/set.Set`). Internally `Set(dict: Dict)`, so
@@ -95,7 +97,7 @@ export function reflect(value) {
       members.push(reflect(k));
       return undefined;
     });
-    return new ReflectedSet(arrayToGleamList(members));
+    return new ReflectedSet(toList(members));
   }
 
   // Custom type instance
@@ -105,20 +107,12 @@ export function reflect(value) {
       constructorRegistry.set(name, value.constructor);
     }
     const fields = Object.keys(value).map((field) => reflect(value[field]));
-    return new ReflectedConstructor(name, arrayToGleamList(fields));
+    return new ReflectedConstructor(name, toList(fields));
   }
 
   // Anything else falls back to nil, lily values are always one of the cases
   // above in practice.
   return new ReflectedNil();
-}
-
-// Convert a [k, v] JS array into a Gleam 2-tuple so the ReflectedDict's
-// entries field has the right type at the Gleam level. Gleam tuples on
-// this target are plain JS arrays, so the conversion is a no-op at
-// runtime, kept as a named helper for clarity.
-function pairToTuple(pair) {
-  return pair;
 }
 
 /** Rebuild a Gleam runtime value from a Reflected tree. */
@@ -161,7 +155,7 @@ function constructInner(reflected) {
   if (reflected instanceof ReflectedFloat) return reflected[0];
   if (reflected instanceof ReflectedString) return reflected[0];
   if (reflected instanceof ReflectedList) {
-    const items = gleamListToArray(reflected[0]).map(constructInner);
+    const items = reflected[0].toArray().map(constructInner);
     let list = new Empty();
     for (let i = items.length - 1; i >= 0; i--) {
       list = new NonEmpty(items[i], list);
@@ -170,19 +164,19 @@ function constructInner(reflected) {
   }
   if (reflected instanceof ReflectedTuple) {
     // Gleam tuples are plain JS arrays on this target.
-    return gleamListToArray(reflected.fields).map(constructInner);
+    return reflected.fields.toArray().map(constructInner);
   }
   if (reflected instanceof ReflectedDict) {
     // Entries are a Gleam list of 2-tuples, tuples are plain JS arrays
     // on this target, so each entry is `[reflected_k, reflected_v]`.
-    const entries = gleamListToArray(reflected.entries).map((entry) => [
+    const entries = reflected.entries.toArray().map((entry) => [
       constructInner(entry[0]),
       constructInner(entry[1]),
     ]);
     return dictFrom(entries);
   }
   if (reflected instanceof ReflectedSet) {
-    const members = gleamListToArray(reflected.members).map(constructInner);
+    const members = reflected.members.toArray().map(constructInner);
     return setFromList(toList(members));
   }
   if (reflected instanceof ReflectedConstructor) {
@@ -193,28 +187,10 @@ function constructInner(reflected) {
         `Unknown constructor: ${name}. Did you forget to call register_types()?`,
       );
     }
-    const fields = gleamListToArray(reflected.fields).map(constructInner);
+    const fields = reflected.fields.toArray().map(constructInner);
     return new constructor(...fields);
   }
   throw new globalThis.Error("Unknown Reflected variant");
-}
-
-function arrayToGleamList(items) {
-  let list = new Empty();
-  for (let i = items.length - 1; i >= 0; i--) {
-    list = new NonEmpty(items[i], list);
-  }
-  return list;
-}
-
-function gleamListToArray(list) {
-  const items = [];
-  let current = list;
-  while (current instanceof NonEmpty) {
-    items.push(current.head);
-    current = current.tail;
-  }
-  return items;
 }
 
 function isCustomTypeClass(fn) {

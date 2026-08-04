@@ -4,6 +4,14 @@
 //// [`Store`](./store.html#Store), so the rest of your app only ever deals in
 //// tidy little message values.
 ////
+//// Most events carry data you react to, a text input's value, a pressed key, a
+//// submitted form etc, so you hand [`on()`](#on) (or a page-level or decoding
+//// variant) a function that reads the event. The other type is a bare
+//// element, like a button, that sends a fixed message on click without
+//// becoming a component. It carries the message in a `data-message` attribute
+////  with [`encode_message()`](#encode_message), and one root
+//// [`on_global_decoded()`](#on_global_decoded) decodes it.
+////
 //// The core API is a pair of scoped binders, [`on()`](#on) and
 //// [`on_decoded()`](#on_decoded), their page-level counterparts
 //// [`on_global()`](#on_global) and
@@ -25,6 +33,9 @@
 //// components, bindings declared inside [`each`](./component.html#each) item
 //// bodies aren't collected, so put them on the each wrapper or any static
 //// ancestor.
+////
+//// Here's an example where events are able to react to HTML inputs (more
+//// reactively):
 ////
 //// ```gleam
 //// import lily/client
@@ -82,6 +93,27 @@
 //// }
 //// ```
 ////
+//// And here's an example of implementing it on an element, note that this
+//// requires an [`event.on_global_decoded`](#on_global_decoded) somewhere to
+//// actually decode the message:
+////
+//// ```gleam
+//// // A component (or your element) carries the message, no handler.
+//// html.button(
+////   [attribute.data("message", event.encode_message(SaveDraft))],
+////   [html.text("Save")],
+//// )
+////
+//// // One root binder recovers and sends every such message.
+//// view
+//// |> event.on_global_decoded(
+////   event: event.click,
+////   selector: ".lily-ui-root",
+////   decoder: event.decode_message,
+////   options: event.options(),
+//// )
+//// ```
+////
 //// The `options` argument carries debouncing, throttling, or `preventDefault`.
 //// Pass [`options()`](#options) for the defaults, or build modifiers onto it
 //// with the builder functions:
@@ -107,7 +139,10 @@
 //// their items relative to the component like [`on()`](#on) does and re-query
 //// on every keypress, so content that shows up later just works.
 ////
-//// All event handlers are JavaScript-only (`@target(javascript)`).
+//// The binders and event values are dual-target. On the browser the binder
+//// registers a delegated listener, on the server it is a no-op (events do not
+//// fire during server render), so a `shared` view can pipe them directly and
+//// still render server-side.
 ////
 //// To validate a form submission with the
 //// [`formal`](https://hexdocs.pm/formal/) library, pass
@@ -157,7 +192,6 @@
 // =============================================================================
 
 import gleam/bit_array
-@target(javascript)
 import gleam/option.{type Option}
 import gleam/result
 
@@ -171,7 +205,6 @@ import lily/internal/reflection
 // PUBLIC TYPES
 // =============================================================================
 
-@target(javascript)
 /// Data from the DOM element that matched the handler's selector. `dataset`
 /// holds all `data-*` attributes as name/value pairs in their original
 /// kebab-case, so `data-card-id` becomes `'card-id'`.
@@ -179,7 +212,6 @@ pub type ElementData {
   ElementData(dataset: List(#(String, String)))
 }
 
-@target(javascript)
 /// A typed handle for a DOM event. `payload` is fixed by each constant (e.g.
 /// [`mouse_down`](#mouse_down) is `Event(#(Int, Int, ElementData))`), so the
 /// handler signature is checked at compile time. Pass these to [`on()`](#on)
@@ -188,7 +220,6 @@ pub opaque type Event(payload) {
   Event(name: String, event_type: EventType)
 }
 
-@target(javascript)
 /// Modifiers for an event handler (debounce, throttle, fire-once,
 /// stop-propagation, prevent-default). Build with [`options()`](#options)
 /// and the dedicated builder functions.
@@ -208,7 +239,6 @@ pub opaque type EventOptions {
   )
 }
 
-@target(javascript)
 /// Data from a keyboard event. `key` is the key name (e.g. `'Enter'`,
 /// `'ArrowUp'`, `'a'`). The modifier flags match the browser event properties.
 pub type KeyEvent {
@@ -228,9 +258,7 @@ pub type Orientation {
 // =============================================================================
 
 @target(erlang)
-/// Erlang no-op twin of [`arrow_grid`](#arrow_grid), returns the component
-/// unchanged so shared views compile on the server (mount is JavaScript-only,
-/// focus groups never register there).
+/// Erlang no-op twin.
 pub fn arrow_grid(
   component: Component(model, message, html),
   items _items: String,
@@ -263,9 +291,7 @@ pub fn arrow_grid(
 }
 
 @target(erlang)
-/// Erlang no-op twin of [`arrow_group`](#arrow_group), returns the component
-/// unchanged so shared views compile on the server (mount is JavaScript-only,
-/// focus groups never register there).
+/// Erlang no-op twin.
 pub fn arrow_group(
   component: Component(model, message, html),
   items _items: String,
@@ -308,32 +334,12 @@ pub fn arrow_group(
   })
 }
 
-@target(erlang)
-/// Erlang no-op twin of [`focus_on_mount`](#focus_on_mount), returns the
-/// component unchanged so shared views compile on the server.
-pub fn focus_on_mount(
-  component: Component(model, message, html),
-  selector _selector: String,
-) -> Component(model, message, html) {
-  component
-}
-
-@target(javascript)
-/// Focus the first match of `selector` when the component renders in. The
-/// non-modal counterpart to [`focus_trap`](#focus_trap), it fires from the
-/// component's own render, not a DOM observer, so an overlay seeds focus as it
-/// opens.
-pub fn focus_on_mount(
-  component: Component(model, message, html),
-  selector selector: String,
-) -> Component(model, message, html) {
-  component.attach_event(component, fn(_runtime) { setup_focus(selector) })
-}
-
-@target(javascript)
 /// Set the debounce delay in milliseconds. Events within the window collapse to
 /// one dispatch fired after the gap.
-pub fn debounce_milliseconds(options: EventOptions, value: Int) -> EventOptions {
+pub fn debounce_milliseconds(
+  options: EventOptions,
+  value: Int,
+) -> EventOptions {
   EventOptions(..options, debounce_milliseconds: option.Some(value))
 }
 
@@ -360,28 +366,6 @@ pub fn decode_message(encoded: String) -> Result(message, Nil) {
     }
     _ -> Error(Nil)
   }
-}
-
-@target(javascript)
-/// Install a page-wide click dispatcher, any element carrying `data-message`
-/// dispatches its message when clicked.
-///
-/// ```gleam
-/// runtime
-/// |> component.mount(selector: "#app", ..., view: view)
-/// |> event.dispatch_messages()
-/// ```
-pub fn dispatch_messages(
-  runtime: Runtime(model, message),
-) -> Runtime(model, message) {
-  let dispatch = fn(encoded: String) {
-    case decode_message(encoded) {
-      Ok(message) -> client.send_message(runtime, message)
-      Error(Nil) -> Nil
-    }
-  }
-  register_event(click, "document", options(), dispatch)
-  runtime
 }
 
 /// Serialise `message` into an attribute-safe string for `data-message`, so a
@@ -419,6 +403,27 @@ pub fn focus(_runtime: Runtime(model, message), selector: String) -> Nil {
   setup_focus(selector)
 }
 
+@target(erlang)
+/// Erlang no-op twin.
+pub fn focus_on_mount(
+  component: Component(model, message, html),
+  selector _selector: String,
+) -> Component(model, message, html) {
+  component
+}
+
+@target(javascript)
+/// Focus the first match of `selector` when the component renders in. The
+/// non-modal counterpart to [`focus_trap`](#focus_trap), it fires from the
+/// component's own render, not a DOM observer, so an overlay seeds focus as it
+/// opens.
+pub fn focus_on_mount(
+  component: Component(model, message, html),
+  selector selector: String,
+) -> Component(model, message, html) {
+  component.attach_event(component, fn(_runtime) { setup_focus(selector) })
+}
+
 @target(javascript)
 /// Confine Tab and Shift+Tab cycling to focusable descendants of the element
 /// matching `within`. Pushes onto a stack so nested overlays (a Combobox in a
@@ -440,6 +445,17 @@ pub fn focus_trap(
   setup_focus_trap(within, release_on, fn() {
     client.send_message(runtime, on_exit())
   })
+}
+
+@target(erlang)
+/// Erlang no-op twin.
+pub fn on(
+  component: Component(model, message, html),
+  event _event: Event(payload),
+  handler _handler: fn(payload) -> message,
+  options _options: EventOptions,
+) -> Component(model, message, html) {
+  component
 }
 
 @target(javascript)
@@ -487,6 +503,17 @@ pub fn on(
   component.attach_event(component, binding)
 }
 
+@target(erlang)
+/// Erlang no-op twin.
+pub fn on_decoded(
+  component: Component(model, message, html),
+  event _event: Event(payload),
+  decoder _decoder: fn(payload) -> Result(message, Nil),
+  options _options: EventOptions,
+) -> Component(model, message, html) {
+  component
+}
+
 @target(javascript)
 /// Bind an event handler whose decoder may decline by returning `Error(Nil)`.
 /// Useful for [`click`](#click) (the `data-message` may not match a known
@@ -518,6 +545,18 @@ pub fn on_decoded(
     register_event(event, selector, options, dispatch)
   }
   component.attach_event(component, binding)
+}
+
+@target(erlang)
+/// Erlang no-op twin.
+pub fn on_global(
+  component: Component(model, message, html),
+  event _event: Event(payload),
+  selector _selector: String,
+  handler _handler: fn(payload) -> message,
+  options _options: EventOptions,
+) -> Component(model, message, html) {
+  component
 }
 
 @target(javascript)
@@ -556,6 +595,18 @@ pub fn on_global(
   component.attach_event(component, binding)
 }
 
+@target(erlang)
+/// Erlang no-op twin.
+pub fn on_global_decoded(
+  component: Component(model, message, html),
+  event _event: Event(payload),
+  selector _selector: String,
+  decoder _decoder: fn(payload) -> Result(message, Nil),
+  options _options: EventOptions,
+) -> Component(model, message, html) {
+  component
+}
+
 @target(javascript)
 /// The [`on_decoded`](#on_decoded) counterpart to [`on_global`](#on_global), a
 /// page-level binding whose decoder may decline with `Error(Nil)`. Canonical
@@ -589,13 +640,11 @@ pub fn on_global_decoded(
   component.attach_event(component, binding)
 }
 
-@target(javascript)
 /// Fire only on the first matching event, ignore the rest.
 pub fn once(options: EventOptions) -> EventOptions {
   EventOptions(..options, once: True)
 }
 
-@target(javascript)
 /// Build an [`EventOptions`](#EventOptions) with all modifiers off: no
 /// debounce, no throttle, fires every time, no stop-propagation or
 /// prevent-default. Compose with the builder functions to enable modifiers.
@@ -609,7 +658,6 @@ pub fn options() -> EventOptions {
   )
 }
 
-@target(javascript)
 /// Fire `event.preventDefault()` on every matching event, regardless of
 /// debounce or throttle. Use to suppress browser defaults (drop-target
 /// behaviour, native form submission).
@@ -639,18 +687,29 @@ pub fn release_focus_trap(_runtime: Runtime(model, message)) -> Nil {
   release_focus_trap_ffi()
 }
 
-@target(javascript)
 /// Fire `event.stopPropagation()` before the inner handler. Useful for
 /// delegated events that shouldn't bubble further up.
 pub fn stop_propagation(options: EventOptions) -> EventOptions {
   EventOptions(..options, stop_propagation: True)
 }
 
-@target(javascript)
 /// Set the throttle interval in milliseconds. Events fire at most once per
 /// interval, the rest within the window are dropped.
-pub fn throttle_milliseconds(options: EventOptions, value: Int) -> EventOptions {
+pub fn throttle_milliseconds(
+  options: EventOptions,
+  value: Int,
+) -> EventOptions {
   EventOptions(..options, throttle_milliseconds: option.Some(value))
+}
+
+@target(javascript)
+/// Manage native `<details>` popups carrying `data-lily-focus-on-open`. Opening
+/// seeds focus on the selected option (`aria-selected="true"`) or first
+/// focusable, so an [`arrow_group`](#arrow_group) and typeahead work with no
+/// manual tab in. Escape closes it back to the summary, and focus leaving it
+/// closes it so it never blocks the next tab stop. Idempotent.
+pub fn watch_details_open() -> Nil {
+  watch_details_open_ffi()
 }
 
 @target(javascript)
@@ -701,16 +760,6 @@ pub fn watch_focus_traps() -> Nil {
 }
 
 @target(javascript)
-/// Manage native `<details>` popups carrying `data-lily-focus-on-open`. Opening
-/// seeds focus on the selected option (`aria-selected="true"`) or first
-/// focusable, so an [`arrow_group`](#arrow_group) and typeahead work with no
-/// manual tab in. Escape closes it back to the summary, and focus leaving it
-/// closes it so it never blocks the next tab stop. Idempotent.
-pub fn watch_details_open() -> Nil {
-  watch_details_open_ffi()
-}
-
-@target(javascript)
 /// Install a document-level handler that dismisses a model-controlled popup
 /// when focus leaves it. A panel opts in with `data-lily-focusout-dismiss` set
 /// to its trigger selector, and the trigger is clicked (its toggle message
@@ -720,22 +769,18 @@ pub fn watch_focusout_dismiss() -> Nil {
   watch_focusout_dismiss_ffi()
 }
 
-@target(javascript)
 /// `blur` event, fires when an element loses focus.
 pub const blur: Event(ElementData) = Event("blur", TypeElement)
 
-@target(javascript)
 /// `change` event, fires when an input value is committed (after blur).
 /// For real-time updates, use [`input`](#input).
 pub const change: Event(String) = Event("change", TypeValue)
 
-@target(javascript)
 /// `click` event, delegated against `data-message`. Payload is the matched
 /// element's `data-message` value. Pair with [`on_decoded()`](#on_decoded) so
 /// unknown messages can be skipped via `Error(Nil)`.
 pub const click: Event(String) = Event("click", TypeClick)
 
-@target(javascript)
 /// `contextmenu` event, fires on right-click. Payload is `(x, y,
 /// element)` relative to the viewport.
 pub const context_menu: Event(#(Int, Int, ElementData)) = Event(
@@ -743,28 +788,22 @@ pub const context_menu: Event(#(Int, Int, ElementData)) = Event(
   TypeCoordinatesElement,
 )
 
-@target(javascript)
 /// `copy` event, fires when text is copied to the clipboard.
 pub const copy: Event(Nil) = Event("copy", TypeEmpty)
 
-@target(javascript)
 /// `cut` event, fires when text is cut to the clipboard.
 pub const cut: Event(Nil) = Event("cut", TypeEmpty)
 
-@target(javascript)
 /// `dblclick` event, fires on a double click.
 pub const double_click: Event(ElementData) = Event("dblclick", TypeElement)
 
-@target(javascript)
 /// `drag` event, fires repeatedly while an element is being dragged.
 /// Consider pairing with [`throttle_milliseconds`](#throttle_milliseconds).
 pub const drag: Event(#(Int, Int)) = Event("drag", TypeCoordinates)
 
-@target(javascript)
 /// `dragend` event, fires once when a drag operation ends.
 pub const drag_end: Event(ElementData) = Event("dragend", TypeElement)
 
-@target(javascript)
 /// `dragover` event, fires repeatedly while a dragged element is over a
 /// valid drop target. Pair with `prevent_default(options)` to enable
 /// dropping.
@@ -773,14 +812,12 @@ pub const drag_over: Event(#(Int, Int, ElementData)) = Event(
   TypeCoordinatesElement,
 )
 
-@target(javascript)
 /// `dragstart` event, fires once when a drag operation starts.
 pub const drag_start: Event(#(Int, Int, ElementData)) = Event(
   "dragstart",
   TypeCoordinatesElement,
 )
 
-@target(javascript)
 /// `drop` event, fires when a dragged element is dropped on a valid
 /// target.
 pub const drop: Event(#(Int, Int, ElementData)) = Event(
@@ -788,12 +825,10 @@ pub const drop: Event(#(Int, Int, ElementData)) = Event(
   TypeCoordinatesElement,
 )
 
-@target(javascript)
 /// `focus` event, fires when an element receives focus. Named
 /// `focus_event` to avoid collision with the [`focus()`](#focus) function.
 pub const focus_event: Event(ElementData) = Event("focus", TypeElement)
 
-@target(javascript)
 /// `input` on a form, payload is the current `FormData` as name/value pairs.
 /// The uncontrolled-form counterpart of [`input`](#input). Pair with
 /// [`on_decoded()`](#on_decoded) to skip dispatch on validation failure.
@@ -802,7 +837,6 @@ pub const form_change: Event(List(#(String, String))) = Event(
   TypeFormChange,
 )
 
-@target(javascript)
 /// `submit` on a form, payload is the submitted `FormData` as name/value pairs.
 /// Prevents the browser's default submission and resets the form after the
 /// handler runs. Pair with [`on_decoded()`](#on_decoded) to skip dispatch on
@@ -812,20 +846,16 @@ pub const form_submit: Event(List(#(String, String))) = Event(
   TypeFormSubmit,
 )
 
-@target(javascript)
 /// `input` event, fires immediately when an input value changes. Payload
 /// is the current value. For delayed updates use [`change`](#change).
 pub const input: Event(String) = Event("input", TypeValue)
 
-@target(javascript)
 /// `keydown` event, fires when a key is pressed.
 pub const key_down: Event(KeyEvent) = Event("keydown", TypeKey)
 
-@target(javascript)
 /// `keyup` event, fires when a key is released.
 pub const key_up: Event(KeyEvent) = Event("keyup", TypeKey)
 
-@target(javascript)
 /// `mousedown` event, fires when a mouse button is pressed. Payload is
 /// `(x, y, element)`.
 pub const mouse_down: Event(#(Int, Int, ElementData)) = Event(
@@ -833,90 +863,73 @@ pub const mouse_down: Event(#(Int, Int, ElementData)) = Event(
   TypeCoordinatesElement,
 )
 
-@target(javascript)
 /// `mouseenter` event, fires when the mouse enters an element's
 /// boundary. Mapped to `mouseover` with a relatedTarget guard so
 /// delegation works.
 pub const mouse_enter: Event(ElementData) = Event("mouseenter", TypeElement)
 
-@target(javascript)
 /// `mouseleave` event, fires when the mouse leaves an element's
 /// boundary. Mapped to `mouseout` with a relatedTarget guard so
 /// delegation works.
 pub const mouse_leave: Event(ElementData) = Event("mouseleave", TypeElement)
 
-@target(javascript)
 /// `mousemove` event, fires repeatedly while the mouse moves. Consider
 /// pairing with [`throttle_milliseconds`](#throttle_milliseconds).
 pub const mouse_move: Event(#(Int, Int)) = Event("mousemove", TypeCoordinates)
 
-@target(javascript)
 /// `mouseup` event, fires when a mouse button is released.
 pub const mouse_up: Event(#(Int, Int, ElementData)) = Event(
   "mouseup",
   TypeCoordinatesElement,
 )
 
-@target(javascript)
 /// `offline` event (on `window`), fires when the browser loses connectivity.
 pub const offline: Event(Nil) = Event("offline", TypeEmpty)
 
-@target(javascript)
 /// `online` event (on `window`), fires when the browser regains connectivity.
 pub const online: Event(Nil) = Event("online", TypeEmpty)
 
-@target(javascript)
 /// `paste` event, fires when text is pasted from the clipboard.
 pub const paste: Event(Nil) = Event("paste", TypeEmpty)
 
-@target(javascript)
 /// `pointerdown` event, unifies mouse, touch, and pen.
 pub const pointer_down: Event(#(Int, Int)) = Event(
   "pointerdown",
   TypeCoordinates,
 )
 
-@target(javascript)
 /// `pointermove` event, unifies mouse, touch, and pen.
 pub const pointer_move: Event(#(Int, Int)) = Event(
   "pointermove",
   TypeCoordinates,
 )
 
-@target(javascript)
 /// `pointerup` event, unifies mouse, touch, and pen.
 pub const pointer_up: Event(#(Int, Int)) = Event("pointerup", TypeCoordinates)
 
-@target(javascript)
 /// `resize` event, fires when an element (or window) resizes.
 /// Typically used with `selector: "window"`.
 pub const resize: Event(Nil) = Event("resize", TypeEmpty)
 
-@target(javascript)
 /// `scroll` event, payload is `(scroll_top, scroll_left)`. Consider
 /// pairing with [`throttle_milliseconds`](#throttle_milliseconds).
 pub const scroll: Event(#(Int, Int)) = Event("scroll", TypeScroll)
 
-@target(javascript)
 /// `submit` event, no payload. Prevents the browser's default submission. Use
 /// for controlled forms (input state already in the model), for uncontrolled
 /// forms use [`form_submit`](#form_submit).
 pub const submit: Event(Nil) = Event("submit", TypeSubmit)
 
-@target(javascript)
 /// `touchend` event, fires when all touches are removed.
 pub const touch_end: Event(ElementData) = Event("touchend", TypeElement)
 
-@target(javascript)
 /// `touchmove` event, fires repeatedly while a touch point moves.
 /// Consider pairing with [`throttle_milliseconds`](#throttle_milliseconds).
 pub const touch_move: Event(#(Int, Int)) = Event("touchmove", TypeCoordinates)
 
-@target(javascript)
 /// `touchstart` event, fires when a touch point is placed.
 pub const touch_start: Event(#(Int, Int)) = Event("touchstart", TypeCoordinates)
 
-@target(javascript)
 /// `wheel` event, payload is `(delta_x, delta_y)`. Useful for scroll
 /// hijacking and zoom controls.
 pub const wheel: Event(#(Float, Float)) = Event("wheel", TypeWheel)
@@ -925,7 +938,6 @@ pub const wheel: Event(#(Float, Float)) = Event("wheel", TypeWheel)
 // PRIVATE TYPES
 // =============================================================================
 
-@target(javascript)
 type EventType {
   TypeClick
   TypeCoordinates
@@ -1102,10 +1114,6 @@ fn unpack_options(options: EventOptions) -> #(Int, Int, Bool, Bool, Bool) {
 // See event.ffi.mjs for explanations for each function.
 
 @target(javascript)
-@external(javascript, "./event.ffi.mjs", "identity")
-fn unsafe_cast(value: a) -> b
-
-@target(javascript)
 @external(javascript, "./event.ffi.mjs", "releaseFocusGroup")
 fn release_focus_group_ffi(items: String) -> Nil
 
@@ -1231,6 +1239,18 @@ fn setup_wheel_event_with_options(
 ) -> Nil
 
 @target(javascript)
+@external(javascript, "./event.ffi.mjs", "identity")
+fn unsafe_cast(value: a) -> b
+
+@target(javascript)
+@external(javascript, "./event.ffi.mjs", "warnScopeless")
+fn warn_scopeless() -> Nil
+
+@target(javascript)
+@external(javascript, "./event.ffi.mjs", "watchDetailsOpen")
+fn watch_details_open_ffi() -> Nil
+
+@target(javascript)
 @external(javascript, "./event.ffi.mjs", "watchEscapeDismiss")
 fn watch_escape_dismiss_ffi() -> Nil
 
@@ -1243,13 +1263,5 @@ fn watch_file_drops_ffi() -> Nil
 fn watch_focus_traps_ffi() -> Nil
 
 @target(javascript)
-@external(javascript, "./event.ffi.mjs", "watchDetailsOpen")
-fn watch_details_open_ffi() -> Nil
-
-@target(javascript)
 @external(javascript, "./event.ffi.mjs", "watchFocusoutDismiss")
 fn watch_focusout_dismiss_ffi() -> Nil
-
-@target(javascript)
-@external(javascript, "./event.ffi.mjs", "warnScopeless")
-fn warn_scopeless() -> Nil

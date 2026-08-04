@@ -484,16 +484,22 @@ pub fn encode_initial_snapshot(
   model model: model,
 ) -> String {
   let frame = Snapshot(target: Session, sequence: 0, state: model)
-  // Force JSON for the inline payload
-  let json_serialiser = case serialiser {
-    Auto(_, codec) -> Auto(AutoJson, codec)
-    CustomJson(_, _, _, _) -> serialiser
-    CustomBinary(_) -> serialiser
+  // Force JSON for the inline payload. A CustomBinary serialiser has no JSON
+  // form, so its MessagePack bytes cannot round-trip through `to_string` and
+  // are base16-encoded to keep the payload non-empty and match the documented
+  // format.
+  let #(json_serialiser, binary) = case serialiser {
+    Auto(_, codec) -> #(Auto(AutoJson, codec), False)
+    CustomJson(_, _, _, _) -> #(serialiser, False)
+    CustomBinary(_) -> #(serialiser, True)
   }
   let bytes = encode(frame, serialiser: json_serialiser)
-  let json_text = bit_array.to_string(bytes) |> result.unwrap("")
+  let payload_text = case binary {
+    True -> bit_array.base16_encode(bytes)
+    False -> bit_array.to_string(bytes) |> result.unwrap("")
+  }
   "<script type=\"application/json\" id=\"lily-snapshot\">"
-  <> json_text
+  <> payload_text
   <> "</script>"
 }
 
@@ -796,58 +802,28 @@ fn decode_message_pack_envelope(
   entries: List(#(Value, Value)),
   codec: BinaryCodec(model, message),
 ) -> Result(Protocol(model, message), Nil) {
-  use type_value <- result.try(message_pack.lookup_string_key(entries, "type"))
-  use type_name <- result.try(value_string(type_value))
+  use type_name <- result.try(lookup_string(entries, "type"))
   case type_name {
     "acknowledge" -> {
-      use target_value <- result.try(message_pack.lookup_string_key(
-        entries,
-        "target",
-      ))
-      use target <- result.try(decode_target_message_pack(target_value))
-      use sequence_value <- result.try(message_pack.lookup_string_key(
-        entries,
-        "sequence",
-      ))
-      use sequence <- result.try(value_int(sequence_value))
+      use target <- result.try(lookup_target(entries, "target"))
+      use sequence <- result.try(lookup_int(entries, "sequence"))
       Ok(Acknowledge(target:, sequence:))
     }
 
     "connected" -> {
-      use client_id_value <- result.try(message_pack.lookup_string_key(
-        entries,
-        "client_id",
-      ))
-      use client_id <- result.try(value_string(client_id_value))
+      use client_id <- result.try(lookup_string(entries, "client_id"))
       Ok(Connected(client_id:))
     }
 
     "push" -> {
-      use topic_id_value <- result.try(message_pack.lookup_string_key(
-        entries,
-        "topic_id",
-      ))
-      use topic_id <- result.try(value_string(topic_id_value))
-      use payload_value <- result.try(message_pack.lookup_string_key(
-        entries,
-        "payload",
-      ))
-      use payload_bytes <- result.try(value_bytes(payload_value))
-      use payload <- result.try(codec.decode_message(payload_bytes))
+      use topic_id <- result.try(lookup_string(entries, "topic_id"))
+      use payload <- result.try(lookup_message(entries, "payload", codec))
       Ok(Push(topic_id:, payload:))
     }
 
     "rejected" -> {
-      use topic_id_value <- result.try(message_pack.lookup_string_key(
-        entries,
-        "topic_id",
-      ))
-      use topic_id <- result.try(value_string(topic_id_value))
-      use reason_value <- result.try(message_pack.lookup_string_key(
-        entries,
-        "reason",
-      ))
-      use reason <- result.try(value_string(reason_value))
+      use topic_id <- result.try(lookup_string(entries, "topic_id"))
+      use reason <- result.try(lookup_string(entries, "reason"))
       Ok(Rejected(topic_id:, reason:))
     }
 
@@ -865,41 +841,19 @@ fn decode_message_pack_envelope(
     }
 
     "session_message" -> {
-      use payload_value <- result.try(message_pack.lookup_string_key(
-        entries,
-        "payload",
-      ))
-      use payload_bytes <- result.try(value_bytes(payload_value))
-      use payload <- result.try(codec.decode_message(payload_bytes))
+      use payload <- result.try(lookup_message(entries, "payload", codec))
       Ok(SessionMessage(payload:))
     }
 
     "session_update" -> {
-      use sequence_value <- result.try(message_pack.lookup_string_key(
-        entries,
-        "sequence",
-      ))
-      use sequence <- result.try(value_int(sequence_value))
-      use payload_value <- result.try(message_pack.lookup_string_key(
-        entries,
-        "payload",
-      ))
-      use payload_bytes <- result.try(value_bytes(payload_value))
-      use payload <- result.try(codec.decode_message(payload_bytes))
+      use sequence <- result.try(lookup_int(entries, "sequence"))
+      use payload <- result.try(lookup_message(entries, "payload", codec))
       Ok(SessionUpdate(sequence:, payload:))
     }
 
     "snapshot" -> {
-      use target_value <- result.try(message_pack.lookup_string_key(
-        entries,
-        "target",
-      ))
-      use target <- result.try(decode_target_message_pack(target_value))
-      use sequence_value <- result.try(message_pack.lookup_string_key(
-        entries,
-        "sequence",
-      ))
-      use sequence <- result.try(value_int(sequence_value))
+      use target <- result.try(lookup_target(entries, "target"))
+      use sequence <- result.try(lookup_int(entries, "sequence"))
       use state_value <- result.try(message_pack.lookup_string_key(
         entries,
         "state",
@@ -909,65 +863,25 @@ fn decode_message_pack_envelope(
       Ok(Snapshot(target:, sequence:, state:))
     }
 
-    "subscribe" -> {
-      use topic_id_value <- result.try(message_pack.lookup_string_key(
-        entries,
-        "topic_id",
-      ))
-      use topic_id <- result.try(value_string(topic_id_value))
-      Ok(Subscribe(topic_id:))
-    }
+    "subscribe" -> decode_topic_id_variant(entries, Subscribe)
 
     "topic_message" -> {
-      use topic_id_value <- result.try(message_pack.lookup_string_key(
-        entries,
-        "topic_id",
-      ))
-      use topic_id <- result.try(value_string(topic_id_value))
-      use payload_value <- result.try(message_pack.lookup_string_key(
-        entries,
-        "payload",
-      ))
-      use payload_bytes <- result.try(value_bytes(payload_value))
-      use payload <- result.try(codec.decode_message(payload_bytes))
+      use topic_id <- result.try(lookup_string(entries, "topic_id"))
+      use payload <- result.try(lookup_message(entries, "payload", codec))
       Ok(TopicMessage(topic_id:, payload:))
     }
 
     "topic_update" -> {
-      use topic_id_value <- result.try(message_pack.lookup_string_key(
-        entries,
-        "topic_id",
-      ))
-      use topic_id <- result.try(value_string(topic_id_value))
-      use sequence_value <- result.try(message_pack.lookup_string_key(
-        entries,
-        "sequence",
-      ))
-      use sequence <- result.try(value_int(sequence_value))
-      use payload_value <- result.try(message_pack.lookup_string_key(
-        entries,
-        "payload",
-      ))
-      use payload_bytes <- result.try(value_bytes(payload_value))
-      use payload <- result.try(codec.decode_message(payload_bytes))
+      use topic_id <- result.try(lookup_string(entries, "topic_id"))
+      use sequence <- result.try(lookup_int(entries, "sequence"))
+      use payload <- result.try(lookup_message(entries, "payload", codec))
       Ok(TopicUpdate(topic_id:, sequence:, payload:))
     }
 
-    "unsubscribe" -> {
-      use topic_id_value <- result.try(message_pack.lookup_string_key(
-        entries,
-        "topic_id",
-      ))
-      use topic_id <- result.try(value_string(topic_id_value))
-      Ok(Unsubscribe(topic_id:))
-    }
+    "unsubscribe" -> decode_topic_id_variant(entries, Unsubscribe)
 
     "version" -> {
-      use hash_value <- result.try(message_pack.lookup_string_key(
-        entries,
-        "hash",
-      ))
-      use hash <- result.try(value_string(hash_value))
+      use hash <- result.try(lookup_string(entries, "hash"))
       Ok(Version(hash:))
     }
 
@@ -994,19 +908,11 @@ fn decode_message_pack_protocol(
 fn decode_target_message_pack(value: Value) -> Result(Target, Nil) {
   case value {
     ValueMap(entries) -> {
-      use kind_value <- result.try(message_pack.lookup_string_key(
-        entries,
-        "kind",
-      ))
-      use kind <- result.try(value_string(kind_value))
+      use kind <- result.try(lookup_string(entries, "kind"))
       case kind {
         "session" -> Ok(Session)
         "topic" -> {
-          use id_value <- result.try(message_pack.lookup_string_key(
-            entries,
-            "id",
-          ))
-          use id <- result.try(value_string(id_value))
+          use id <- result.try(lookup_string(entries, "id"))
           Ok(Topic(id:))
         }
         _ -> Error(Nil)
@@ -1014,6 +920,17 @@ fn decode_target_message_pack(value: Value) -> Result(Target, Nil) {
     }
     _ -> Error(Nil)
   }
+}
+
+/// Decode a MessagePack envelope carrying a single `topic_id` string, applying
+/// `build` to it. Shared by the byte-identical `subscribe`/`unsubscribe`
+/// variants.
+fn decode_topic_id_variant(
+  entries: List(#(Value, Value)),
+  build: fn(String) -> Protocol(model, message),
+) -> Result(Protocol(model, message), Nil) {
+  use topic_id <- result.try(lookup_string(entries, "topic_id"))
+  Ok(build(topic_id))
 }
 
 fn encode_json(
@@ -1123,6 +1040,42 @@ fn ffi_auto_encode(value: a) -> Json {
 
 fn ffi_auto_encode_message_pack(value: a) -> BitArray {
   auto_codec.encode_message_pack(value)
+}
+
+/// Look up an integer-valued MessagePack field by string key.
+fn lookup_int(entries: List(#(Value, Value)), key: String) -> Result(Int, Nil) {
+  message_pack.lookup_string_key(entries, key)
+  |> result.try(value_int)
+}
+
+/// Look up a bytes-valued MessagePack field by string key and decode it into a
+/// message with the codec.
+fn lookup_message(
+  entries: List(#(Value, Value)),
+  key: String,
+  codec: BinaryCodec(model, message),
+) -> Result(message, Nil) {
+  message_pack.lookup_string_key(entries, key)
+  |> result.try(value_bytes)
+  |> result.try(codec.decode_message)
+}
+
+/// Look up a string-valued MessagePack field by string key.
+fn lookup_string(
+  entries: List(#(Value, Value)),
+  key: String,
+) -> Result(String, Nil) {
+  message_pack.lookup_string_key(entries, key)
+  |> result.try(value_string)
+}
+
+/// Look up a `target`-shaped MessagePack field by string key and decode it.
+fn lookup_target(
+  entries: List(#(Value, Value)),
+  key: String,
+) -> Result(Target, Nil) {
+  message_pack.lookup_string_key(entries, key)
+  |> result.try(decode_target_message_pack)
 }
 
 fn protocol_decoder(
@@ -1369,5 +1322,5 @@ fn ffi_ws_send(_handle: WsHandle, _bytes: BitArray) -> Nil {
 @target(javascript)
 @external(javascript, "./transport.ffi.mjs", "wsUrlFromCurrentLocation")
 fn ffi_ws_url_from_current_location(_path: String) -> String {
-  panic as "JavaScript only"
+  ""
 }

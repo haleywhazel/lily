@@ -9,7 +9,7 @@
 //// an event listener). You never reach for the constructors directly, you call
 //// the builder function for the type you want.
 ////
-//// There are five types, each with its own performance profile:
+//// There are five types, each with its own implementation details:
 ////
 //// 1. [`static`](#static) renders once and never updates
 //// 2. [`simple`](#simple) morphs the subtree in place when the slice changes
@@ -17,25 +17,31 @@
 //// 4. [`each`](#each) handles keyed lists
 //// 5. [`fragment`](#fragment) groups other components into one slot
 ////
-//// `simple` morphs the subtree in place on every slice change, leaving
-//// existing nodes untouched, so focus, selection, and any half-typed input
-//// survive the update. Reach for `simple` almost everywhere. `live` lets you
-//// hand-write the patches instead, the escape hatch for a profiled hot path
-//// where a large subtree updates so often that the morph walk is too costly.
+//// `simple` is usually best for any dynamic component that you want to use
+//// (that reacts to changes in the store), and `live` lets you hand-write
+//// patches if you want smoother patching of dynamic components instead of
+//// having to run through large DOM subtree at every frame. Lily doesn't use a
+//// VDOM so these choices are entirely yours to make for your own performance
+//// reqs.
+////
+//// (The main tradeoff of this design is that it slightly goes against only
+//// one way to do things philosophy of Gleam and Lustre.)
 ////
 //// On top of its type, a component carries decorations, each applied with a
-//// pipe: [`transition`](#transition) adds CSS enter/exit classes timed to a
-//// duration (with deferred DOM removal so the exit animation finishes before
-//// the element leaves), [`event.on`](./event.html#on) and friends attach
-//// listeners, [`scoped`](#scoped) fixes the subtree an event confines itself
-//// to, and [`require_connection`](#require_connection) gates the subtree on
-//// connection status.
+//// pipe:
+//// 1. [`transition`](#transition) adds CSS enter/exit classes timed to a
+////    duration (with deferred DOM removal so the exit animation finishes
+////    before the element leaves)
+//// 2. [`event.on`](./event.html#on) and friends attach listeners
+//// 3. [`scoped`](#scoped) fixes the subtree an event locks itself to
+//// 4. [`require_connection`](#require_connection) gates the subtree on
+////    connection status.
 ////
 //// `static`, `simple`, and `live` hand their content function a `slot`
 //// function as its first argument. Call `slot(child_component)` wherever you
 //// want a child to appear in the parent template, it returns a placeholder of
 //// your `html` type that gets swapped for the rendered child once the parent
-//// serialises. Nest as deep as you like:
+//// serialises. Nest it as deep as you like:
 ////
 //// ```gleam
 //// component.live(
@@ -670,7 +676,6 @@ pub fn scope(component: Component(model, message, html)) -> Option(String) {
 /// Record a component's own CSS selector (usually `#<id>`) as its scope, so the
 /// scoped `event.on*` binders match only within its subtree. Pipe on after
 /// giving the component an `id`, then pipe on `event.on` without a selector.
-/// Component-library builders scope their widget from the `id` they render.
 ///
 /// ```gleam
 /// component.simple(slice: ..., render: ...)
@@ -697,21 +702,15 @@ pub fn walk_to_string(
   from_string: fn(String) -> html,
 ) -> String {
   // Decorations only matter on a live DOM, so delegate to the component type.
+  // The slot filler is identical for the three variants that use it, so build
+  // it once. The Each and Fragment branches recurse without a slotter.
+  let slotter = make_slotter(model, to_html, from_string)
   case component.component_type {
-    Static(content:) -> {
-      let slotter = make_slotter(model, to_html, from_string)
-      to_html(content(slotter))
-    }
+    Static(content:) -> to_html(content(slotter))
 
-    Simple(slice:, render:) -> {
-      let slotter = make_slotter(model, to_html, from_string)
-      to_html(render(slice(model), slotter))
-    }
+    Simple(slice:, render:) -> to_html(render(slice(model), slotter))
 
-    Live(slice: _, initial:, apply: _) -> {
-      let slotter = make_slotter(model, to_html, from_string)
-      to_html(initial(slotter))
-    }
+    Live(slice: _, initial:, apply: _) -> to_html(initial(slotter))
 
     Each(slice:, key: _, render:) -> {
       slice(model)

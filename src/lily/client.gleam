@@ -120,6 +120,8 @@ import gleam/result
 @target(javascript)
 import gleam/uri.{type Uri}
 @target(javascript)
+import lily/internal/id
+@target(javascript)
 import lily/store.{type Store}
 @target(javascript)
 import lily/transport
@@ -353,7 +355,12 @@ pub fn enable_hot_reload(
   runtime: Runtime(model, message),
 ) -> Runtime(model, message) {
   let Runtime(handle) = runtime
-  install_hot_reload(handle, "", 1000, 1500)
+  install_hot_reload(
+    handle,
+    "",
+    hot_reload_reconnect_milliseconds,
+    hot_reload_guard_milliseconds,
+  )
   runtime
 }
 
@@ -370,7 +377,7 @@ pub fn enable_hot_reload(
 /// )
 /// ```
 pub fn generate_session_id() -> String {
-  ffi_generate_session_id()
+  id.random_hex(session_id_bytes)
 }
 
 @target(javascript)
@@ -841,6 +848,22 @@ pub type RuntimeHandle
 // PRIVATE FUNCTIONS
 // =============================================================================
 
+// hot reload settings are currently hardcoded in as consts, might change these
+// afterwards
+
+// Storm guard window before a hot reload is allowed again, so a rebuild loop
+// cannot reload the page in a tight cycle.
+@target(javascript)
+const hot_reload_guard_milliseconds = 1500
+
+// Base delay before the dev-reload socket retries after a drop.
+@target(javascript)
+const hot_reload_reconnect_milliseconds = 1000
+
+// Random bytes behind a session ID, so 32 hex characters.
+@target(javascript)
+const session_id_bytes = 16
+
 @target(javascript)
 fn handle_incoming(
   handle: RuntimeHandle,
@@ -850,11 +873,7 @@ fn handle_incoming(
 ) -> Nil {
   case transport.decode(bytes, serialiser:) {
     Ok(transport.Acknowledge(target:, sequence:)) ->
-      set_last_sequence_for_target(
-        handle,
-        transport.target_key(target),
-        sequence,
-      )
+      record_sequence(handle, target, sequence)
 
     Ok(transport.Connected(client_id:)) -> handle_client_id(handle, client_id)
 
@@ -862,29 +881,17 @@ fn handle_incoming(
       apply_remote_message(handle, payload)
 
     Ok(transport.TopicUpdate(topic_id:, sequence:, payload:)) -> {
-      set_last_sequence_for_target(
-        handle,
-        transport.target_key(transport.Topic(topic_id)),
-        sequence,
-      )
+      record_sequence(handle, transport.Topic(topic_id), sequence)
       apply_remote_message(handle, payload)
     }
 
     Ok(transport.SessionUpdate(sequence:, payload:)) -> {
-      set_last_sequence_for_target(
-        handle,
-        transport.target_key(transport.Session),
-        sequence,
-      )
+      record_sequence(handle, transport.Session, sequence)
       apply_remote_message(handle, payload)
     }
 
     Ok(transport.Snapshot(target:, sequence:, state:)) -> {
-      set_last_sequence_for_target(
-        handle,
-        transport.target_key(target),
-        sequence,
-      )
+      record_sequence(handle, target, sequence)
       handle_snapshot(handle, wiring, target, state)
     }
 
@@ -918,12 +925,23 @@ fn hydrate_session(
   initial: session,
 ) -> session {
   let Persistence(fields) = persistence
+  let prefix = session_storage_prefix()
   list.fold(fields, initial, fn(session, f) {
     let Field(key, _get, set) = f
-    read_field(session_storage_prefix(), key)
+    read_field(prefix, key)
     |> result.try(set(session, _))
     |> result.unwrap(session)
   })
+}
+
+@target(javascript)
+/// Record the server-assigned sequence for a target under its storage key.
+fn record_sequence(
+  handle: RuntimeHandle,
+  target: transport.Target,
+  sequence: Int,
+) -> Nil {
+  set_last_sequence_for_target(handle, transport.target_key(target), sequence)
 }
 
 @target(javascript)
@@ -931,10 +949,10 @@ fn send_resync(
   handle: RuntimeHandle,
   serialiser: transport.Serialiser(model, message),
 ) -> Nil {
-  let raw_seqs = get_all_sequences(handle)
+  let raw_sequences = get_all_sequences(handle)
   let cursors =
-    list.filter_map(raw_seqs, fn(pair) {
-      let #(key, _seq) = pair
+    list.filter_map(raw_sequences, fn(pair) {
+      let #(key, _sequence) = pair
       transport.target_from_key(key)
     })
   let bytes = transport.encode(transport.Resync(cursors:), serialiser:)
@@ -973,20 +991,12 @@ fn create_runtime(
 fn dispatch_model(handle: RuntimeHandle, model: model) -> Nil
 
 @target(javascript)
-@external(javascript, "./client.ffi.mjs", "fireDisconnectHook")
-fn fire_disconnect_hook(handle: RuntimeHandle) -> Nil
-
-@target(javascript)
-@external(javascript, "./client.ffi.mjs", "fireReconnectHook")
-fn fire_reconnect_hook(handle: RuntimeHandle) -> Nil
-
-@target(javascript)
 @external(javascript, "./client.ffi.mjs", "clearSession")
 fn ffi_clear_session(prefix: String) -> Nil
 
 @target(javascript)
-@external(javascript, "./client.ffi.mjs", "generateSessionId")
-fn ffi_generate_session_id() -> String
+@external(javascript, "./client.ffi.mjs", "load")
+fn ffi_load(handle: RuntimeHandle, path: String) -> Nil
 
 @target(javascript)
 @external(javascript, "./client.ffi.mjs", "mergeLocals")
@@ -1012,20 +1022,16 @@ fn ffi_reload() -> Nil
 fn ffi_replace(handle: RuntimeHandle, path: String) -> Nil
 
 @target(javascript)
-@external(javascript, "./client.ffi.mjs", "load")
-fn ffi_load(handle: RuntimeHandle, path: String) -> Nil
-
-@target(javascript)
-@external(javascript, "./client.ffi.mjs", "installLinkInterception")
-fn install_link_interception(
-  handle: RuntimeHandle,
-  within: String,
-  opt_out: String,
-) -> Nil
-
-@target(javascript)
 @external(javascript, "./client.ffi.mjs", "sendMessage")
 fn ffi_send_message(handle: RuntimeHandle, message: message) -> Nil
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "fireDisconnectHook")
+fn fire_disconnect_hook(handle: RuntimeHandle) -> Nil
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "fireReconnectHook")
+fn fire_reconnect_hook(handle: RuntimeHandle) -> Nil
 
 @target(javascript)
 @external(javascript, "./client.ffi.mjs", "getAllSequences")
@@ -1034,6 +1040,10 @@ fn get_all_sequences(handle: RuntimeHandle) -> List(#(String, Int))
 @target(javascript)
 @external(javascript, "./client.ffi.mjs", "getModel")
 fn get_model(handle: RuntimeHandle) -> model
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "getSerialiser")
+fn get_serialiser(handle: RuntimeHandle) -> transport.Serialiser(model, message)
 
 @target(javascript)
 @external(javascript, "./client.ffi.mjs", "getSnapshotHook")
@@ -1046,16 +1056,16 @@ fn get_snapshot_hook(
 fn get_wiring(handle: RuntimeHandle) -> store.Wiring(model, message)
 
 @target(javascript)
-@external(javascript, "./client.ffi.mjs", "getSerialiser")
-fn get_serialiser(handle: RuntimeHandle) -> transport.Serialiser(model, message)
-
-@target(javascript)
 @external(javascript, "./client.ffi.mjs", "handleClientId")
 fn handle_client_id(handle: RuntimeHandle, client_id: String) -> Nil
 
 @target(javascript)
 @external(javascript, "./client.ffi.mjs", "handleVersion")
 fn handle_version(handle: RuntimeHandle, hash: String) -> Nil
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "initialNotify")
+fn initial_notify(handle: RuntimeHandle) -> Nil
 
 @target(javascript)
 @external(javascript, "./client.ffi.mjs", "installHotReload")
@@ -1067,8 +1077,12 @@ fn install_hot_reload(
 ) -> Nil
 
 @target(javascript)
-@external(javascript, "./client.ffi.mjs", "initialNotify")
-fn initial_notify(handle: RuntimeHandle) -> Nil
+@external(javascript, "./client.ffi.mjs", "installLinkInterception")
+fn install_link_interception(
+  handle: RuntimeHandle,
+  within: String,
+  opt_out: String,
+) -> Nil
 
 @target(javascript)
 @external(javascript, "./client.ffi.mjs", "readEmbeddedSnapshot")
@@ -1129,6 +1143,13 @@ fn set_on_message_hook(handle: RuntimeHandle, hook: fn(message) -> Nil) -> Nil
 fn set_on_reconnect_hook(handle: RuntimeHandle, hook: fn() -> Nil) -> Nil
 
 @target(javascript)
+@external(javascript, "./client.ffi.mjs", "setSerialiser")
+fn set_serialiser(
+  handle: RuntimeHandle,
+  serialiser: transport.Serialiser(model, message),
+) -> Nil
+
+@target(javascript)
 @external(javascript, "./client.ffi.mjs", "setSessionConfig")
 fn set_session_config(
   handle: RuntimeHandle,
@@ -1146,20 +1167,16 @@ fn set_snapshot_hook(
 ) -> Nil
 
 @target(javascript)
-@external(javascript, "./client.ffi.mjs", "setVersionMismatchHook")
-fn set_version_mismatch_hook(handle: RuntimeHandle, hook: fn() -> Nil) -> Nil
-
-@target(javascript)
-@external(javascript, "./client.ffi.mjs", "setUrlSetter")
-fn set_url_setter(handle: RuntimeHandle, set: fn(model, Uri) -> model) -> Nil
-
-@target(javascript)
 @external(javascript, "./client.ffi.mjs", "setStore")
 fn set_store(handle: RuntimeHandle, store: Store(model, message)) -> Nil
 
 @target(javascript)
 @external(javascript, "./client.ffi.mjs", "setTransport")
 fn set_transport(handle: RuntimeHandle, transport: transport.Transport) -> Nil
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "setUrlSetter")
+fn set_url_setter(handle: RuntimeHandle, set: fn(model, Uri) -> model) -> Nil
 
 @target(javascript)
 @external(javascript, "./client.ffi.mjs", "setUserMessageHook")
@@ -1169,17 +1186,14 @@ fn set_user_message_hook(
 ) -> Nil
 
 @target(javascript)
+@external(javascript, "./client.ffi.mjs", "setVersionMismatchHook")
+fn set_version_mismatch_hook(handle: RuntimeHandle, hook: fn() -> Nil) -> Nil
+
+@target(javascript)
 @external(javascript, "./client.ffi.mjs", "setWiring")
 fn set_wiring(
   handle: RuntimeHandle,
   wiring: store.Wiring(model, message),
-) -> Nil
-
-@target(javascript)
-@external(javascript, "./client.ffi.mjs", "setSerialiser")
-fn set_serialiser(
-  handle: RuntimeHandle,
-  serialiser: transport.Serialiser(model, message),
 ) -> Nil
 
 @target(javascript)

@@ -52,12 +52,6 @@ pub type Reflected {
 // INTERNAL FUNCTIONS
 // =============================================================================
 
-/// Inspect a Gleam runtime value and produce a [`Reflected`](#Reflected) tree.
-@external(erlang, "lily_reflection_ffi", "reflect")
-@external(javascript, "./reflection.ffi.mjs", "reflect")
-@internal
-pub fn reflect(value: a) -> Reflected
-
 /// Rebuild a Gleam value from a [`Reflected`](#Reflected) tree. On JavaScript
 /// every constructor name must be in the registry or this returns `Error(Nil)`.
 /// Returns `Dynamic` because the call site supplies the type via the
@@ -75,3 +69,9 @@ pub fn construct(reflected: Reflected) -> Result(Dynamic, Nil)
 @external(javascript, "./reflection.ffi.mjs", "passthrough")
 @internal
 pub fn passthrough(value: Dynamic) -> a
+
+/// Inspect a Gleam runtime value and produce a [`Reflected`](#Reflected) tree.
+@external(erlang, "lily_reflection_ffi", "reflect")
+@external(javascript, "./reflection.ffi.mjs", "reflect")
+@internal
+pub fn reflect(value: a) -> Reflected

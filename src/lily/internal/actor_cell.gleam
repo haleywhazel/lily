@@ -52,6 +52,11 @@ pub opaque type Cell(state, event, reply) {
 // INTERNAL FUNCTIONS
 // =============================================================================
 
+// Ceiling in milliseconds for a synchronous call to the Erlang actor. A stuck
+// reducer surfaces as a timeout rather than blocking the caller forever.
+@target(erlang)
+const call_timeout_milliseconds = 5000
+
 @target(erlang)
 /// Synchronously send `event`, returning the reducer's `Reply` value or
 /// `default` when the cell has stopped or the event does not reply. Erlang
@@ -62,7 +67,9 @@ pub fn call(
   event: event,
   default _default: reply,
 ) -> reply {
-  process.call(cell.subject, 5000, fn(reply_to) { Sync(event:, reply_to:) })
+  process.call(cell.subject, call_timeout_milliseconds, fn(reply_to) {
+    Sync(event:, reply_to:)
+  })
 }
 
 @target(javascript)
