@@ -24,7 +24,7 @@ import lily/transport.{
 // =============================================================================
 
 fn ser() {
-  transport.automatic() |> transport.use_message_pack
+  transport.automatic(format: transport.MessagePack, max_decode_depth: 128)
 }
 
 fn assert_encoded(p: Protocol(Model, Message), expected_hex: String) -> Nil {
@@ -41,13 +41,14 @@ fn assert_roundtrip(p: Protocol(Model, Message)) -> Nil {
 }
 
 // Generic variants for tests that wrap non-Model types (tuple/dict/set).
-// transport.automatic() is parametric, so the serialiser specialises to
+// transport.automatic is parametric, so the serialiser specialises to
 // whatever model/message types the caller uses.
 fn assert_encoded_generic(
   p: Protocol(model, message),
   expected_hex: String,
 ) -> Nil {
-  let s = transport.automatic() |> transport.use_message_pack
+  let s =
+    transport.automatic(format: transport.MessagePack, max_decode_depth: 128)
   let bytes = transport.encode(p, serialiser: s)
   let actual_hex = bit_array.base16_encode(bytes)
   actual_hex
@@ -55,7 +56,8 @@ fn assert_encoded_generic(
 }
 
 fn assert_roundtrip_generic(p: Protocol(model, message)) -> Nil {
-  let s = transport.automatic() |> transport.use_message_pack
+  let s =
+    transport.automatic(format: transport.MessagePack, max_decode_depth: 128)
   transport.encode(p, serialiser: s)
   |> transport.decode(serialiser: s)
   |> should.equal(Ok(p))
@@ -239,7 +241,10 @@ pub fn roundtrip_version_test() {
 pub fn encode_initial_snapshot_wraps_in_script_tag_test() {
   let snapshot =
     transport.encode_initial_snapshot(
-      serialiser: transport.automatic(),
+      serialiser: transport.automatic(
+        format: transport.Json,
+        max_decode_depth: 128,
+      ),
       model: test_support.initial_model(),
     )
   let expected_prefix =
@@ -256,7 +261,10 @@ pub fn encode_initial_snapshot_round_trips_via_decode_test() {
   let model = test_support.initial_model()
   let embed =
     transport.encode_initial_snapshot(
-      serialiser: transport.automatic(),
+      serialiser: transport.automatic(
+        format: transport.Json,
+        max_decode_depth: 128,
+      ),
       model: model,
     )
   let prefix = "<script type=\"application/json\" id=\"lily-snapshot\">"
@@ -268,7 +276,10 @@ pub fn encode_initial_snapshot_round_trips_via_decode_test() {
 
   transport.decode(
     bit_array.from_string(json_only),
-    serialiser: transport.automatic(),
+    serialiser: transport.automatic(
+      format: transport.Json,
+      max_decode_depth: 128,
+    ),
   )
   |> should.equal(Ok(Snapshot(target: Session, sequence: 0, state: model)))
 }

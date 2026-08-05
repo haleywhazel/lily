@@ -20,7 +20,7 @@ import lily/transport.{
 
 @target(javascript)
 fn ser() {
-  transport.automatic()
+  transport.automatic(format: transport.Json, max_decode_depth: 128)
 }
 
 @target(javascript)
@@ -179,13 +179,14 @@ pub fn auto_js_register_enables_decode_test() {
 }
 
 // =============================================================================
-// ROUNDTRIPS, JSON PATH (use_json toggle)
+// ROUNDTRIPS, JSON PATH (Json format)
 // =============================================================================
 
 @target(javascript)
 pub fn auto_js_json_roundtrip_test() {
   register_test_fixtures()
-  let json_ser = transport.automatic() |> transport.use_json()
+  let json_ser =
+    transport.automatic(format: transport.Json, max_decode_depth: 128)
   let json_bytes =
     bit_array.from_string(
       "{\"type\":\"session_message\",\"payload\":{\"_\":\"SetName\",\"0\":\"JsonPath\"}}",
@@ -209,7 +210,7 @@ pub fn auto_js_roundtrip_nested_test() {
     )
   let nested = test_support.Nested(inner:)
   let nested_ser: transport.Serialiser(test_support.Nested, Message) =
-    transport.automatic()
+    transport.automatic(format: transport.Json, max_decode_depth: 128)
   let encoded =
     transport.encode(
       Snapshot(target: Session, sequence: 1, state: nested),
@@ -223,7 +224,7 @@ pub fn auto_js_roundtrip_nested_test() {
 pub fn auto_js_roundtrip_list_field_test() {
   let with_list = test_support.WithList(items: [1, 2, 3])
   let list_ser: transport.Serialiser(test_support.WithList, Message) =
-    transport.automatic()
+    transport.automatic(format: transport.Json, max_decode_depth: 128)
   let encoded =
     transport.encode(
       Snapshot(target: Session, sequence: 0, state: with_list),
@@ -242,20 +243,25 @@ pub fn auto_js_message_pack_bytes_fail_under_json_test() {
   let mp_bytes =
     transport.encode(
       Acknowledge(target: Session, sequence: 1),
-      serialiser: transport.automatic() |> transport.use_message_pack(),
+      serialiser: transport.automatic(
+        format: transport.MessagePack,
+        max_decode_depth: 128,
+      ),
     )
-  let json_ser = transport.automatic()
+  let json_ser =
+    transport.automatic(format: transport.Json, max_decode_depth: 128)
   transport.decode(mp_bytes, serialiser: json_ser)
   |> should.be_error
 }
 
 // =============================================================================
-// TOGGLE BEHAVIOUR
+// FORMAT SELECTION
 // =============================================================================
 
 @target(javascript)
-pub fn auto_js_use_json_roundtrip_test() {
-  let json_ser = transport.automatic() |> transport.use_json()
+pub fn auto_js_json_format_roundtrip_test() {
+  let json_ser =
+    transport.automatic(format: transport.Json, max_decode_depth: 128)
   let encoded =
     transport.encode(
       Acknowledge(target: Session, sequence: 9),
@@ -266,11 +272,9 @@ pub fn auto_js_use_json_roundtrip_test() {
 }
 
 @target(javascript)
-pub fn auto_js_use_message_pack_after_json_roundtrip_test() {
+pub fn auto_js_message_pack_format_roundtrip_test() {
   let mp_ser =
-    transport.automatic()
-    |> transport.use_json()
-    |> transport.use_message_pack()
+    transport.automatic(format: transport.MessagePack, max_decode_depth: 128)
   let encoded =
     transport.encode(
       Acknowledge(target: Session, sequence: 5),

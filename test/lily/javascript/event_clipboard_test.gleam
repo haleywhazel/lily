@@ -25,7 +25,7 @@ pub fn event_on_copy_fires_test() {
       event: event.copy,
       selector: "#copy-el",
       handler: fn(_) { Increment },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.simple_event("#copy-el", "copy")
@@ -44,7 +44,7 @@ pub fn event_on_cut_fires_test() {
       event: event.cut,
       selector: "#cut-el",
       handler: fn(_) { Increment },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.simple_event("#cut-el", "cut")
@@ -63,7 +63,7 @@ pub fn event_on_paste_fires_test() {
       event: event.paste,
       selector: "#paste-el",
       handler: fn(_) { Increment },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.simple_event("#paste-el", "paste")
@@ -86,7 +86,7 @@ pub fn event_on_resize_fires_test() {
         test_support.set(fired, True)
         Noop
       },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.simple_event("#resize-el", "resize")
@@ -104,7 +104,7 @@ pub fn event_on_resize_with_once_fires_only_once_test() {
       component,
       event: event.resize,
       selector: "#resize-w-el",
-      options: event.options() |> event.once,
+      options: event.EventOptions(..event.defaults, once: True),
       handler: fn(_) { Increment },
     )
   })

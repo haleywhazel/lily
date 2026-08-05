@@ -695,12 +695,12 @@ export function setUrlSetter(runtime, set) {
   runtime.setUrlSetter(set);
 }
 
-export function setSessionConfig(runtime, persistence, prefix, get, set) {
-  const fields = persistence.fields.toArray().map((field) => ({
+export function setSessionConfig(runtime, sessionFields, prefix, get, set) {
+  const fields = sessionFields.toArray().map((field) => ({
     ...field,
     storageKey: prefix + field.key,
   }));
-  runtime.setSessionConfig({ persistence, get, set, fields });
+  runtime.setSessionConfig({ get, set, fields });
 }
 
 export function setSnapshotHook(runtime, hook) {

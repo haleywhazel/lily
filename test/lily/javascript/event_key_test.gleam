@@ -32,7 +32,7 @@ pub fn event_on_key_down_extracts_key_test() {
         test_support.set(captured, key_event.key)
         Noop
       },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.key_event("#key-tgt", "keydown", "Enter")
@@ -58,7 +58,7 @@ pub fn event_on_key_up_extracts_key_test() {
         test_support.set(captured, key_event.key)
         Noop
       },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.key_event("#key-up", "keyup", "Escape")
@@ -83,7 +83,7 @@ pub fn event_on_key_down_with_once_fires_only_once_test() {
       component,
       event: event.key_down,
       selector: "#kdown-w-el",
-      options: event.options() |> event.once,
+      options: event.EventOptions(..event.defaults, once: True),
       handler: fn(_key_event) { Increment },
     )
   })

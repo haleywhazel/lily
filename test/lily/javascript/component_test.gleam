@@ -416,7 +416,13 @@ pub fn component_each_renders_keyed_list_test() {
       test_support.WithList(items: [1, 2, 3]),
       with: fn(model, _message) { model },
     )
-    |> client.start(store.wiring(), serialiser: transport.automatic())
+    |> client.start(
+      store.wiring(),
+      serialiser: transport.automatic(
+        format: transport.Json,
+        max_decode_depth: 128,
+      ),
+    )
   let _r =
     mount(runtime, fn(_model) {
       component.each(
@@ -434,48 +440,6 @@ pub fn component_each_renders_keyed_list_test() {
   html
   |> string.contains("<span>1</span>")
   |> should.be_true
-}
-
-// =============================================================================
-// REQUIRE_CONNECTION
-// =============================================================================
-
-@target(javascript)
-pub fn component_require_connection_adds_disabled_when_disconnected_test() {
-  test_support.reset_dom()
-  let runtime = test_support.new_runtime()
-  let _r =
-    mount(runtime, fn(_model) {
-      component.simple(slice: fn(m: Model) { m.count }, render: fn(count, _) {
-        int.to_string(count)
-      })
-      |> component.require_connection(fn(m: Model) { m.connected })
-    })
-  test_support.has_attribute("[data-lily-component]", "data-lily-disabled")
-  |> should.be_true
-}
-
-@target(javascript)
-pub fn component_require_connection_removes_disabled_when_connected_test() {
-  test_support.reset_dom()
-  let runtime =
-    store.new(
-      test_support.Model(..test_support.initial_model(), connected: True),
-      with: test_support.update,
-    )
-    |> client.start(
-      store.wiring(),
-      serialiser: test_support.custom_serialiser(),
-    )
-  let _r =
-    mount(runtime, fn(_model) {
-      component.simple(slice: fn(m: Model) { m.count }, render: fn(count, _) {
-        int.to_string(count)
-      })
-      |> component.require_connection(fn(m: Model) { m.connected })
-    })
-  test_support.has_attribute("[data-lily-component]", "data-lily-disabled")
-  |> should.be_false
 }
 
 // =============================================================================
@@ -705,25 +669,6 @@ pub fn simple_switch_inside_fragment_test() {
   |> should.be_true
 }
 
-@target(javascript)
-pub fn simple_switch_inside_require_connection_test() {
-  test_support.reset_dom()
-  let runtime = test_support.new_runtime()
-  let _r =
-    mount(runtime, fn(_model) {
-      component.simple(
-        slice: fn(m: Model) { m.active_tab },
-        render: fn(_tab, _) { "inner" },
-      )
-      |> component.require_connection(fn(m: Model) { m.connected })
-    })
-  // Default initial_model has connected: False, so the connection wrapper
-  // should be marked disabled. Select by the marker attribute itself rather
-  // than a fixed component id, so the assertion survives id-allocation order.
-  test_support.has_attribute("[data-lily-disabled]", "data-lily-disabled")
-  |> should.be_true
-}
-
 // =============================================================================
 // EVENT CORNER CASES
 // =============================================================================
@@ -745,61 +690,10 @@ pub fn event_on_fragment_root_test() {
         event: event.click,
         selector: "#frag",
         decoder: fn(_) { Ok(Increment) },
-        options: event.options(),
+        options: event.defaults,
       )
     })
   test_support.click("#frag")
-  client.get_current_model(runtime).count
-  |> should.equal(1)
-}
-
-@target(javascript)
-pub fn event_pipe_order_event_then_require_connection_test() {
-  // `simple |> event.on |> require_connection` produces
-  // RequireConnection(WithEvents(Simple, [event])), the binding still
-  // gets registered (register_bindings recurses through RequireConnection
-  // into WithEvents).
-  test_support.reset_dom()
-  let runtime = test_support.new_runtime()
-  let _r =
-    mount(runtime, fn(_model) {
-      component.static(fn(_) {
-        "<button id=\"pipe-a\" data-message=\"go\">+</button>"
-      })
-      |> event.on_global_decoded(
-        event: event.click,
-        selector: "#pipe-a",
-        decoder: fn(_) { Ok(Increment) },
-        options: event.options(),
-      )
-      |> component.require_connection(fn(_) { True })
-    })
-  test_support.click("#pipe-a")
-  client.get_current_model(runtime).count
-  |> should.equal(1)
-}
-
-@target(javascript)
-pub fn event_pipe_order_require_connection_then_event_test() {
-  // The reverse pipe order: `simple |> require_connection |> event.on`.
-  // Produces WithEvents(RequireConnection(Simple), [event]), registration
-  // is at the WithEvents wrapper, so the binding is still attached.
-  test_support.reset_dom()
-  let runtime = test_support.new_runtime()
-  let _r =
-    mount(runtime, fn(_model) {
-      component.static(fn(_) {
-        "<button id=\"pipe-b\" data-message=\"go\">+</button>"
-      })
-      |> component.require_connection(fn(_) { True })
-      |> event.on_global_decoded(
-        event: event.click,
-        selector: "#pipe-b",
-        decoder: fn(_) { Ok(Increment) },
-        options: event.options(),
-      )
-    })
-  test_support.click("#pipe-b")
   client.get_current_model(runtime).count
   |> should.equal(1)
 }
@@ -824,7 +718,7 @@ pub fn event_on_slot_child_of_live_test() {
           event: event.click,
           selector: "#slotted",
           decoder: fn(_) { Ok(Increment) },
-          options: event.options(),
+          options: event.defaults,
         )
       component.live(
         slice: fn(_m: Model) { 0 },
@@ -855,7 +749,7 @@ pub fn event_inside_each_render_ignored_test() {
             event: event.click,
             selector: "#inner",
             handler: fn(_) { Increment },
-            options: event.options(),
+            options: event.defaults,
           )
         },
       )
@@ -954,7 +848,7 @@ pub fn multi_mount_events_globally_delegated_test() {
           event: event.click,
           selector: "#global-btn",
           decoder: fn(_) { Ok(Increment) },
-          options: event.options(),
+          options: event.defaults,
         )
       },
     )
@@ -1142,7 +1036,7 @@ pub fn transition_events_on_outer_wrapper_test() {
         event: event.click,
         selector: "#tx-btn",
         decoder: fn(_) { Ok(Increment) },
-        options: event.options(),
+        options: event.defaults,
       )
     })
   test_support.click("#tx-btn")

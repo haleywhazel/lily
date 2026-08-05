@@ -35,7 +35,7 @@ pub fn event_on_click_with_data_message_test() {
           _ -> Error(Nil)
         }
       },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.click("[data-message=\"increment\"]")
@@ -57,7 +57,7 @@ pub fn event_on_click_disabled_ignored_test() {
       event: event.click,
       selector: "#app",
       decoder: fn(_name) { Ok(Increment) },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.click("[data-message=\"increment\"]")
@@ -76,7 +76,7 @@ pub fn event_on_click_without_data_message_ignored_test() {
       event: event.click,
       selector: "#app",
       decoder: fn(_name) { Ok(Increment) },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.click("#no-msg")
@@ -101,7 +101,7 @@ pub fn event_on_click_with_once_fires_only_once_test() {
       component,
       event: event.click,
       selector: "#app",
-      options: event.options() |> event.once,
+      options: event.EventOptions(..event.defaults, once: True),
       decoder: fn(name) {
         case name {
           "increment" -> Ok(Increment)
@@ -129,7 +129,7 @@ pub fn event_on_click_with_stop_propagation_blocks_parent_test() {
     |> event.on_global_decoded(
       event: event.click,
       selector: "#sp-inner",
-      options: event.options() |> event.stop_propagation,
+      options: event.EventOptions(..event.defaults, stop_propagation: True),
       decoder: fn(name) {
         case name {
           "increment" -> Ok(Increment)
@@ -146,7 +146,7 @@ pub fn event_on_click_with_stop_propagation_blocks_parent_test() {
           _ -> Error(Nil)
         }
       },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.click("[data-message=\"increment\"]")
@@ -172,13 +172,13 @@ pub fn event_on_click_stop_propagation_scoped_to_selector_test() {
     |> event.on_global_decoded(
       event: event.click,
       selector: "#sp-a",
-      options: event.options() |> event.stop_propagation,
+      options: event.EventOptions(..event.defaults, stop_propagation: True),
       decoder: fn(_name) { Ok(Increment) },
     )
     |> event.on_global_decoded(
       event: event.click,
       selector: "#sp-b",
-      options: event.options(),
+      options: event.defaults,
       decoder: fn(_name) { Ok(SetName("b")) },
     )
   })
@@ -209,7 +209,7 @@ pub fn event_on_blur_fires_test() {
       event: event.blur,
       selector: "#blur-in",
       handler: fn(_element) { Increment },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.simple_event("#blur-in", "blur")
@@ -228,7 +228,7 @@ pub fn event_on_submit_fires_test() {
       event: event.submit,
       selector: "#test-form",
       handler: fn(_) { Increment },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.simple_event("#test-form", "submit")
@@ -252,7 +252,7 @@ pub fn event_on_scoped_fires_only_within_scope_test() {
   test_support.mount_event(runtime, fn(component) {
     component
     |> component.scoped("#scope-in")
-    |> event.on(event: event.input, handler: SetName, options: event.options())
+    |> event.on(event: event.input, handler: SetName, options: event.defaults)
   })
   // An input inside the scope dispatches.
   test_support.input_event("#inner-field", "Inside")
@@ -285,7 +285,7 @@ pub fn event_duplicate_registration_replaces_not_stacks_test() {
           _ -> Error(Nil)
         }
       },
-      options: event.options(),
+      options: event.defaults,
     )
   }
   test_support.mount_event(runtime, attach)
@@ -322,7 +322,7 @@ pub fn event_binding_registers_when_it_appears_on_rerender_test() {
                   |> event.on(
                     event: event.input,
                     handler: SetName,
-                    options: event.options(),
+                    options: event.defaults,
                   ),
                 )
                 <> "</div>"

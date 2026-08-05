@@ -281,29 +281,19 @@ pub fn decode_unknown_type_returns_error_test() {
 pub fn json_bytes_decode_fails_under_message_pack_test() {
   let json_bytes =
     transport.encode(SessionMessage(payload: Increment), serialiser: ser())
-  let message_pack_ser = transport.automatic() |> transport.use_message_pack()
+  let message_pack_ser =
+    transport.automatic(format: transport.MessagePack, max_decode_depth: 128)
   transport.decode(json_bytes, serialiser: message_pack_ser)
   |> should.be_error
 }
 
 // =============================================================================
-// TOGGLE BEHAVIOUR (automatic serialiser)
+// FORMAT SELECTION (automatic serialiser)
 // =============================================================================
 
-pub fn custom_json_use_json_is_noop_test() {
-  let serialiser = ser()
-  let after_toggle = transport.use_json(serialiser)
-  let bytes =
-    transport.encode(
-      Acknowledge(target: Session, sequence: 5),
-      serialiser: after_toggle,
-    )
-  transport.decode(bytes, serialiser: after_toggle)
-  |> should.equal(Ok(Acknowledge(target: Session, sequence: 5)))
-}
-
-pub fn use_json_forces_json_path_test() {
-  let serialiser = transport.automatic() |> transport.use_json()
+pub fn automatic_json_format_roundtrips_test() {
+  let serialiser =
+    transport.automatic(format: transport.Json, max_decode_depth: 128)
   let bytes =
     transport.encode(
       Acknowledge(target: Session, sequence: 1),
@@ -313,11 +303,9 @@ pub fn use_json_forces_json_path_test() {
   |> should.equal(Ok(Acknowledge(target: Session, sequence: 1)))
 }
 
-pub fn use_message_pack_restores_message_pack_path_test() {
+pub fn automatic_message_pack_format_roundtrips_test() {
   let serialiser =
-    transport.automatic()
-    |> transport.use_json()
-    |> transport.use_message_pack()
+    transport.automatic(format: transport.MessagePack, max_decode_depth: 128)
   let bytes =
     transport.encode(
       Acknowledge(target: Session, sequence: 1),
@@ -410,6 +398,7 @@ fn binary_serialiser() -> transport.Serialiser(Model, Message) {
         _ -> Error(Nil)
       }
     },
+    max_decode_depth: 128,
   )
 }
 
@@ -463,28 +452,6 @@ pub fn custom_binary_roundtrip_resync_test() {
   transport.encode(Resync(cursors: [Session]), serialiser: ser)
   |> transport.decode(serialiser: ser)
   |> should.equal(Ok(Resync(cursors: [Session])))
-}
-
-pub fn custom_binary_use_json_is_noop_test() {
-  let ser = binary_serialiser()
-  let ser_after = transport.use_json(ser)
-  transport.encode(
-    Acknowledge(target: Session, sequence: 9),
-    serialiser: ser_after,
-  )
-  |> transport.decode(serialiser: ser_after)
-  |> should.equal(Ok(Acknowledge(target: Session, sequence: 9)))
-}
-
-pub fn custom_binary_use_message_pack_is_noop_test() {
-  let ser = binary_serialiser()
-  let ser_after = transport.use_message_pack(ser)
-  transport.encode(
-    Acknowledge(target: Session, sequence: 9),
-    serialiser: ser_after,
-  )
-  |> transport.decode(serialiser: ser_after)
-  |> should.equal(Ok(Acknowledge(target: Session, sequence: 9)))
 }
 
 // =============================================================================
@@ -599,7 +566,11 @@ pub fn target_from_key_topic_empty_id_roundtrips_test() {
 // =============================================================================
 
 fn mp() -> transport.Serialiser(Model, Message) {
-  transport.automatic() |> transport.use_message_pack()
+  transport.automatic(format: transport.MessagePack, max_decode_depth: 128)
+}
+
+fn mp_capped(depth: Int) -> transport.Serialiser(Model, Message) {
+  transport.automatic(format: transport.MessagePack, max_decode_depth: depth)
 }
 
 pub fn max_decode_depth_session_message_within_cap_decodes_test() {
@@ -612,7 +583,7 @@ pub fn max_decode_depth_session_message_within_cap_decodes_test() {
 pub fn max_decode_depth_zero_rejects_session_message_test() {
   let bytes =
     transport.encode(SessionMessage(payload: Increment), serialiser: mp())
-  let capped = mp() |> transport.max_decode_depth(0)
+  let capped = mp_capped(0)
   transport.decode(bytes, serialiser: capped)
   |> should.be_error
 }
@@ -620,7 +591,7 @@ pub fn max_decode_depth_zero_rejects_session_message_test() {
 pub fn max_decode_depth_one_allows_session_message_test() {
   let bytes =
     transport.encode(SessionMessage(payload: Increment), serialiser: mp())
-  let capped = mp() |> transport.max_decode_depth(1)
+  let capped = mp_capped(1)
   transport.decode(bytes, serialiser: capped)
   |> should.equal(Ok(SessionMessage(payload: Increment)))
 }
@@ -632,7 +603,7 @@ pub fn max_decode_depth_one_rejects_deeper_snapshot_test() {
       Snapshot(target: Session, sequence: 1, state: model),
       serialiser: mp(),
     )
-  let capped = mp() |> transport.max_decode_depth(1)
+  let capped = mp_capped(1)
   transport.decode(bytes, serialiser: capped)
   |> should.be_error
 }
@@ -644,7 +615,7 @@ pub fn max_decode_depth_high_allows_snapshot_test() {
       Snapshot(target: Session, sequence: 1, state: model),
       serialiser: mp(),
     )
-  let uncapped = mp() |> transport.max_decode_depth(128)
+  let uncapped = mp_capped(128)
   transport.decode(bytes, serialiser: uncapped)
   |> should.equal(Ok(Snapshot(target: Session, sequence: 1, state: model)))
 }

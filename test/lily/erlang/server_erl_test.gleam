@@ -8,6 +8,8 @@ import gleam/erlang/process
 @target(erlang)
 import gleam/int
 @target(erlang)
+import gleam/option
+@target(erlang)
 import gleam/string
 @target(erlang)
 import gleeunit/should
@@ -45,7 +47,14 @@ fn connect_client(
   client_id: String,
 ) -> process.Subject(BitArray) {
   let subj = process.new_subject()
-  server.connect(srv, client_id: client_id, send: process.send(subj, _))
+  let assert Ok(Nil) =
+    server.connect(
+      srv,
+      client_id: client_id,
+      origin: option.None,
+      send: process.send(subj, _),
+      session: [],
+    )
   let _ = recv(subj)
   subj
 }
@@ -74,7 +83,7 @@ fn encode_resync_session(_seq: Int) -> BitArray {
 
 @target(erlang)
 pub fn server_start_returns_ok_test() {
-  server.new(
+  server.start(
     initial: test_support.initial_model(),
     serialiser: ser(),
     wiring: store.wiring()
@@ -84,8 +93,8 @@ pub fn server_start_returns_ok_test() {
         field_get: fn(model) { model },
         field_set: fn(_, model) { model },
       ),
+    origins: server.AnyOrigin,
   )
-  |> server.start
   |> should.be_ok
 }
 
@@ -116,7 +125,14 @@ pub fn server_connect_single_client_test() {
 pub fn server_connect_sends_connected_frame_test() {
   let srv = test_support.new_server()
   let subj = process.new_subject()
-  server.connect(srv, client_id: "c1", send: process.send(subj, _))
+  let assert Ok(Nil) =
+    server.connect(
+      srv,
+      client_id: "c1",
+      origin: option.None,
+      send: process.send(subj, _),
+      session: [],
+    )
   case recv(subj) {
     Ok(bytes) ->
       transport.decode(bytes, serialiser: ser())
@@ -232,6 +248,63 @@ pub fn server_session_state_is_per_connection_test() {
   let _ = recv(s1)
   server.incoming(srv, client_id: "c2", bytes: encode_resync_session(0))
   case recv(s2) {
+    Ok(bytes) ->
+      transport.decode(bytes, serialiser: ser())
+      |> should.equal(
+        Ok(transport.Snapshot(
+          target: transport.Session,
+          sequence: 0,
+          state: test_support.initial_model(),
+        )),
+      )
+    Error(_) -> should.fail()
+  }
+}
+
+// =============================================================================
+// SESSION SEEDING
+// =============================================================================
+
+@target(erlang)
+/// Messages handed to `connect(session:)` are applied to the new client's
+/// session store before anything else, so the seeded model is what a resync
+/// snapshot reports.
+pub fn server_connect_seeds_session_model_test() {
+  let srv = test_support.new_server()
+  let subj = process.new_subject()
+  let assert Ok(Nil) =
+    server.connect(
+      srv,
+      client_id: "c1",
+      origin: option.None,
+      send: process.send(subj, _),
+      session: [Increment, Increment],
+    )
+  // Drain the Connected frame, then one SessionUpdate per seed message. The
+  // client has to receive the seeds to stay in step with the server.
+  let _ = recv(subj)
+  let _ = recv(subj)
+  let _ = recv(subj)
+  server.incoming(srv, client_id: "c1", bytes: encode_resync_session(0))
+  case recv(subj) {
+    Ok(bytes) ->
+      case transport.decode(bytes, serialiser: ser()) {
+        Ok(transport.Snapshot(state: state, ..)) ->
+          state.count
+          |> should.equal(2)
+        _ -> should.fail()
+      }
+    Error(_) -> should.fail()
+  }
+}
+
+@target(erlang)
+/// An empty seed leaves the initial model untouched.
+pub fn server_connect_with_empty_session_keeps_initial_model_test() {
+  let srv = test_support.new_server()
+  let s1 = connect_client(srv, "c1")
+  server.incoming(srv, client_id: "c1", bytes: encode_resync_session(0))
+  case recv(s1) {
     Ok(bytes) ->
       transport.decode(bytes, serialiser: ser())
       |> should.equal(
@@ -548,7 +621,7 @@ pub fn server_stop_silently_drops_further_calls_test() {
 @target(erlang)
 fn server_with_max_topics(maximum: Int) -> server.Server(Model, Message) {
   let assert Ok(srv) =
-    server.new(
+    server.start(
       initial: test_support.initial_model(),
       serialiser: ser(),
       wiring: store.wiring()
@@ -558,9 +631,9 @@ fn server_with_max_topics(maximum: Int) -> server.Server(Model, Message) {
           field_get: fn(model) { model },
           field_set: fn(_, model) { model },
         ),
+      origins: server.AnyOrigin,
     )
-    |> server.max_topics(maximum)
-    |> server.start
+  server.max_topics(srv, maximum)
   srv
 }
 

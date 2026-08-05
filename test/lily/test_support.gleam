@@ -276,8 +276,15 @@ pub fn new_runtime() -> client.Runtime(Model, Message) {
 }
 
 pub fn new_server() -> server.Server(Model, Message) {
+  new_server_with_origins(server.AnyOrigin)
+}
+
+/// A server whose connections are gated by an explicit origins policy.
+pub fn new_server_with_origins(
+  origins: server.Origins,
+) -> server.Server(Model, Message) {
   let assert Ok(srv) =
-    server.new(
+    server.start(
       initial: initial_model(),
       serialiser: custom_serialiser(),
       wiring: store.wiring()
@@ -287,8 +294,8 @@ pub fn new_server() -> server.Server(Model, Message) {
           field_get: fn(model) { model },
           field_set: fn(_, model) { model },
         ),
+      origins: origins,
     )
-    |> server.start
   srv
 }
 
@@ -301,9 +308,14 @@ pub fn connect_client(
   client_id: String,
 ) -> fn() -> List(BitArray) {
   let ref = new([])
-  server.connect(srv, client_id: client_id, send: fn(bytes) {
-    set(ref, [bytes, ..get(ref)])
-  })
+  let assert Ok(Nil) =
+    server.connect(
+      srv,
+      client_id: client_id,
+      origin: None,
+      send: fn(bytes) { set(ref, [bytes, ..get(ref)]) },
+      session: [],
+    )
   set(ref, [])
   fn() {
     let msgs = list.reverse(get(ref))

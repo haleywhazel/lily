@@ -61,21 +61,21 @@ pub fn store_apply_with_different_messages_test() {
 // LOCAL
 // =============================================================================
 
-pub fn unwrap_local_returns_inner_value_test() {
-  store.Local("hello")
-  |> store.unwrap_local
+pub fn local_destructure_returns_inner_value_test() {
+  let store.Local(value) = store.Local("hello")
+  value
   |> should.equal("hello")
 }
 
-pub fn unwrap_local_with_integer_test() {
-  store.Local(42)
-  |> store.unwrap_local
+pub fn local_destructure_with_integer_test() {
+  let store.Local(value) = store.Local(42)
+  value
   |> should.equal(42)
 }
 
-pub fn unwrap_local_nested_unwraps_one_level_test() {
-  // unwrap_local unwraps exactly one layer, the result is still a Local.
-  store.Local(store.Local(99))
-  |> store.unwrap_local
+pub fn local_destructure_unwraps_one_level_test() {
+  // Destructuring peels exactly one layer, the result is still a Local.
+  let store.Local(value) = store.Local(store.Local(99))
+  value
   |> should.equal(store.Local(99))
 }

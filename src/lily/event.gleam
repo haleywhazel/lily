@@ -53,20 +53,20 @@
 ////     |> event.on(
 ////       event: event.input,
 ////       handler: Search,
-////       options: event.options(),
+////       options: event.defaults,
 ////     ),
 ////   ])
 ////   |> event.on_global_decoded(
 ////     event: event.click,
 ////     selector: "#app",
 ////     decoder: parse_click,
-////     options: event.options(),
+////     options: event.defaults,
 ////   )
 ////   |> event.on_global(
 ////     event: event.key_down,
 ////     selector: "document",
 ////     handler: fn(ke) { KeyPressed(ke.key) },
-////     options: event.options(),
+////     options: event.defaults,
 ////   )
 //// }
 ////
@@ -110,13 +110,13 @@
 ////   event: event.click,
 ////   selector: ".lily-ui-root",
 ////   decoder: event.decode_message,
-////   options: event.options(),
+////   options: event.defaults,
 //// )
 //// ```
 ////
-//// The `options` argument carries debouncing, throttling, or `preventDefault`.
-//// Pass [`options()`](#options) for the defaults, or build modifiers onto it
-//// with the builder functions:
+//// The `options` argument carries debouncing, throttling, or
+//// `preventDefault`. Pass [`defaults`](#defaults) for no modifiers, or update
+//// one field of it with a record update:
 ////
 //// ```gleam
 //// component.simple(slice: ..., render: ...)
@@ -124,15 +124,18 @@
 //// |> event.on(
 ////   event: event.input,
 ////   handler: Search,
-////   options: event.options() |> event.debounce_milliseconds(200),
+////   options: event.EventOptions(
+////     ..event.defaults,
+////     debounce_milliseconds: option.Some(200),
+////   ),
 //// )
 //// ```
 ////
 //// A handful of helpers cover keyboard accessibility. Because they act on the
-//// live DOM imperatively, they take a [`Runtime`](./client.html#Runtime) and
-//// are driven from a [`client.on_message`](./client.html#on_message) hook
-//// rather than piped onto a component. [`focus`](#focus) moves focus to a
-//// selector, [`focus_trap`](#focus_trap) confines Tab cycling to an overlay
+//// live DOM imperatively, they are driven from a
+//// [`client.on_message`](./client.html#on_message) hook rather than piped onto
+//// a component. [`focus`](#focus) moves focus to a selector,
+//// [`focus_trap`](#focus_trap) confines Tab cycling to an overlay
 //// (stacked, so a dialog inside a drawer each keep their own scope), and
 //// [`arrow_group`](#arrow_group) / [`arrow_grid`](#arrow_grid) turn a set of
 //// elements into an arrow-navigable roving-tabindex group or grid. These scope
@@ -178,7 +181,7 @@
 //// |> event.on_decoded(
 ////   event: event.form_submit,
 ////   decoder: login_decoder,
-////   options: event.options(),
+////   options: event.defaults,
 //// )
 //// ```
 ////
@@ -192,6 +195,8 @@
 // =============================================================================
 
 import gleam/bit_array
+@target(javascript)
+import gleam/list
 import gleam/option.{type Option}
 import gleam/result
 
@@ -204,6 +209,38 @@ import lily/internal/reflection
 // =============================================================================
 // PUBLIC TYPES
 // =============================================================================
+
+/// A document-level behaviour that Lily can install for you, passed to
+/// [`watch`](#watch). Each one is driven by `data-*` attributes a component
+/// library renders, so nothing needs wiring per component.
+///
+/// ```gleam
+/// event.watch([event.EscapeDismiss, event.FocusTraps])
+/// ```
+pub type Behaviour {
+  /// Manage native `<details>` popups carrying `data-lily-focus-on-open`,
+  /// seeding focus on the selected option or the first focusable so an
+  /// [`arrow_group`](#arrow_group) works with no manual tab in.
+  DetailsOpen
+
+  /// Escape clicks the target named by `data-lily-escape-dismiss`, so
+  /// dismissal flows through ordinary `data-message` delegation. Does not trap
+  /// focus, so it suits non-modal overlays.
+  EscapeDismiss
+
+  /// Drag-and-drop files onto a `data-lily-file-drop="<input selector>"` zone,
+  /// which assigns them to that input and fires `change`.
+  FileDrops
+
+  /// Activate a focus trap for any element carrying `data-lily-focus-trap`,
+  /// for as long as it is in the DOM. The hands-off counterpart to
+  /// [`focus_trap`](#focus_trap).
+  FocusTraps
+
+  /// Click the trigger named by `data-lily-focusout-dismiss` when focus leaves
+  /// the panel, so a tab never lands behind an open panel.
+  FocusoutDismiss
+}
 
 /// Data from the DOM element that matched the handler's selector. `dataset`
 /// holds all `data-*` attributes as name/value pairs in their original
@@ -220,16 +257,20 @@ pub opaque type Event(payload) {
   Event(name: String, event_type: EventType)
 }
 
-/// Modifiers for an event handler (debounce, throttle, fire-once,
-/// stop-propagation, prevent-default). Build with [`options()`](#options)
-/// and the dedicated builder functions.
+/// Modifiers for an event handler. `debounce_milliseconds` collapses a burst
+/// into one dispatch fired after the gap, `throttle_milliseconds` caps
+/// dispatches to one per interval, `once` fires only the first matching event,
+/// and the last two call `stopPropagation` and `preventDefault` on every
+/// matching event. Start from [`defaults`](#defaults) and update the one field
+/// you need.
 ///
 /// ```gleam
-/// event.options()
-/// |> event.debounce_milliseconds(200)
-/// |> event.stop_propagation
+/// event.EventOptions(
+///   ..event.defaults,
+///   debounce_milliseconds: option.Some(200),
+/// )
 /// ```
-pub opaque type EventOptions {
+pub type EventOptions {
   EventOptions(
     debounce_milliseconds: Option(Int),
     throttle_milliseconds: Option(Int),
@@ -334,15 +375,6 @@ pub fn arrow_group(
   })
 }
 
-/// Set the debounce delay in milliseconds. Events within the window collapse to
-/// one dispatch fired after the gap.
-pub fn debounce_milliseconds(
-  options: EventOptions,
-  value: Int,
-) -> EventOptions {
-  EventOptions(..options, debounce_milliseconds: option.Some(value))
-}
-
 /// Recover a message encoded by [`encode_message`](#encode_message). Returns
 /// `Error(Nil)` for any string this module did not produce, so it drops into
 /// [`on_decoded()`](#on_decoded) as the `decoder` and coexists with handlers
@@ -393,13 +425,13 @@ pub fn encode_message(message: a) -> String {
 /// ```gleam
 /// client.on_message(runtime, fn(message, _model) {
 ///   case message {
-///     OpenDialog -> event.focus(runtime, "#dialog-cancel")
-///     CloseDialog -> event.focus(runtime, "#dialog-trigger")
+///     OpenDialog -> event.focus("#dialog-cancel")
+///     CloseDialog -> event.focus("#dialog-trigger")
 ///     _ -> Nil
 ///   }
 /// })
 /// ```
-pub fn focus(_runtime: Runtime(model, message), selector: String) -> Nil {
+pub fn focus(selector: String) -> Nil {
   setup_focus(selector)
 }
 
@@ -475,8 +507,8 @@ pub fn on(
 /// [`each`](./component.html#each) item bodies are ignored, so attach them to
 /// the wrapper or a static ancestor.
 ///
-/// Pass `options: event.options()` for the defaults, or build modifiers with
-/// [`debounce_milliseconds`](#debounce_milliseconds) and friends.
+/// Pass `options: event.defaults` for no modifiers, or update one field of it
+/// with a record update.
 ///
 /// ```gleam
 /// component.simple(slice: ..., render: ...)
@@ -484,7 +516,10 @@ pub fn on(
 /// |> event.on(
 ///   event: event.input,
 ///   handler: Search,
-///   options: event.options() |> event.debounce_milliseconds(200),
+///   options: event.EventOptions(
+///     ..event.defaults,
+///     debounce_milliseconds: option.Some(200),
+///   ),
 /// )
 /// ```
 pub fn on(
@@ -525,7 +560,7 @@ pub fn on_decoded(
 /// |> event.on_decoded(
 ///   event: event.form_submit,
 ///   decoder: submit_todo,
-///   options: event.options(),
+///   options: event.defaults,
 /// )
 /// ```
 pub fn on_decoded(
@@ -576,7 +611,7 @@ pub fn on_global(
 ///   event: event.key_down,
 ///   selector: "document",
 ///   handler: fn(ke) { KeyPressed(ke.key) },
-///   options: event.options(),
+///   options: event.defaults,
 /// )
 /// ```
 pub fn on_global(
@@ -618,7 +653,7 @@ pub fn on_global_decoded(
 ///   event: event.click,
 ///   selector: ".lily-ui-root",
 ///   decoder: event.decode_message,
-///   options: event.options(),
+///   options: event.defaults,
 /// )
 /// ```
 pub fn on_global_decoded(
@@ -640,133 +675,34 @@ pub fn on_global_decoded(
   component.attach_event(component, binding)
 }
 
-/// Fire only on the first matching event, ignore the rest.
-pub fn once(options: EventOptions) -> EventOptions {
-  EventOptions(..options, once: True)
-}
-
-/// Build an [`EventOptions`](#EventOptions) with all modifiers off: no
-/// debounce, no throttle, fires every time, no stop-propagation or
-/// prevent-default. Compose with the builder functions to enable modifiers.
-pub fn options() -> EventOptions {
-  EventOptions(
-    debounce_milliseconds: option.None,
-    throttle_milliseconds: option.None,
-    once: False,
-    stop_propagation: False,
-    prevent_default: False,
-  )
-}
-
-/// Fire `event.preventDefault()` on every matching event, regardless of
-/// debounce or throttle. Use to suppress browser defaults (drop-target
-/// behaviour, native form submission).
-pub fn prevent_default(options: EventOptions) -> EventOptions {
-  EventOptions(..options, prevent_default: True)
-}
-
-@target(javascript)
-/// Remove a focus group registered with [`arrow_group`](#arrow_group), matched
-/// by the same `items` selector. No-op if none is registered. Call when a
-/// transient group (a menu) closes, persistent groups (an always-present radio
-/// group) need never release.
-pub fn release_arrow_group(
-  _runtime: Runtime(model, message),
-  items items: String,
-) -> Nil {
-  release_focus_group_ffi(items)
-}
-
 @target(javascript)
 /// Pop the top focus trap from the stack, reactivating the one below if any.
 /// No-op when empty. Does not dispatch the popped trap's `on_exit`, call this
 /// when the caller runs its own close logic and just needs the trap unhooked
 /// (a Cancel click that dispatches `CloseDialog` and restores focus
 /// separately).
-pub fn release_focus_trap(_runtime: Runtime(model, message)) -> Nil {
+pub fn release_focus_trap() -> Nil {
   release_focus_trap_ffi()
 }
 
-/// Fire `event.stopPropagation()` before the inner handler. Useful for
-/// delegated events that shouldn't bubble further up.
-pub fn stop_propagation(options: EventOptions) -> EventOptions {
-  EventOptions(..options, stop_propagation: True)
-}
-
-/// Set the throttle interval in milliseconds. Events fire at most once per
-/// interval, the rest within the window are dropped.
-pub fn throttle_milliseconds(
-  options: EventOptions,
-  value: Int,
-) -> EventOptions {
-  EventOptions(..options, throttle_milliseconds: option.Some(value))
-}
-
 @target(javascript)
-/// Manage native `<details>` popups carrying `data-lily-focus-on-open`. Opening
-/// seeds focus on the selected option (`aria-selected="true"`) or first
-/// focusable, so an [`arrow_group`](#arrow_group) and typeahead work with no
-/// manual tab in. Escape closes it back to the summary, and focus leaving it
-/// closes it so it never blocks the next tab stop. Idempotent.
-pub fn watch_details_open() -> Nil {
-  watch_details_open_ffi()
-}
-
-@target(javascript)
-/// Install a document-level Escape-to-dismiss handler. On Escape, the topmost
-/// element carrying `data-lily-escape-dismiss` (a CSS selector) has that
-/// selector's target clicked, so dismissal flows through the ordinary
-/// `data-message` delegation. Unlike [`watch_focus_traps`](#watch_focus_traps)
-/// it does not trap focus, so it suits non-modal overlays (popover, menu,
-/// select, date picker) that close on Escape while staying non-modal.
+/// Install the global document behaviours the components rely on, described on
+/// [`Behaviour`](#Behaviour). Call once at startup. Each is idempotent, so a
+/// repeated call still installs one handler.
 ///
-/// A component library renders the data attribute on its overlays and calls
-/// this once at startup. Idempotent, repeated calls install one handler.
-pub fn watch_escape_dismiss() -> Nil {
-  watch_escape_dismiss_ffi()
-}
-
-@target(javascript)
-/// Install a document-level drag-and-drop handler for file dropzones. A
-/// dropzone opts in with `data-lily-file-drop="<input selector>"`, dropping
-/// files onto it assigns them to that input and fires a `change` event, so
-/// drops flow through the same path as picking files. While a drag is over the
-/// zone it carries a `data-lily-file-dragover` attribute for styling.
-///
-/// A component library renders the data attribute on its dropzones and calls
-/// this once at startup. Idempotent, repeated calls install one handler.
-pub fn watch_file_drops() -> Nil {
-  watch_file_drops_ffi()
-}
-
-@target(javascript)
-/// Install a document-level observer that activates a focus trap on any element
-/// carrying `data-lily-focus-trap`, declaratively, for as long as it is in the
-/// DOM. The hands-off counterpart to [`focus_trap`](#focus_trap), an element
-/// declares its own trap and this manages the lifecycle. While present, Tab and
-/// Shift+Tab are confined to it and focus is seeded to
-/// `data-lily-focus-trap-initial` (or the first focusable descendant), when it
-/// leaves the DOM focus returns to whatever was focused before. If it also
-/// carries `data-lily-focus-trap-dismiss` (a CSS selector), Escape clicks that
-/// element so dismissal flows through `data-message` delegation, without it
-/// Escape is inert.
-///
-/// No notion of dialogs or modals, any element can declare a trap (a wizard
-/// step, a command palette, a modal recipe). A component library renders the
-/// data attributes and calls this once at startup. Idempotent, repeated calls
-/// install one observer.
-pub fn watch_focus_traps() -> Nil {
-  watch_focus_traps_ffi()
-}
-
-@target(javascript)
-/// Install a document-level handler that dismisses a model-controlled popup
-/// when focus leaves it. A panel opts in with `data-lily-focusout-dismiss` set
-/// to its trigger selector, and the trigger is clicked (its toggle message
-/// closes the popup) only if still open, so the tab moves on and never lands
-/// behind an open panel. Idempotent.
-pub fn watch_focusout_dismiss() -> Nil {
-  watch_focusout_dismiss_ffi()
+/// ```gleam
+/// event.watch([event.DetailsOpen, event.EscapeDismiss, event.FocusTraps])
+/// ```
+pub fn watch(behaviours behaviours: List(Behaviour)) -> Nil {
+  list.each(behaviours, fn(behaviour) {
+    case behaviour {
+      DetailsOpen -> watch_details_open_ffi()
+      EscapeDismiss -> watch_escape_dismiss_ffi()
+      FileDrops -> watch_file_drops_ffi()
+      FocusTraps -> watch_focus_traps_ffi()
+      FocusoutDismiss -> watch_focusout_dismiss_ffi()
+    }
+  })
 }
 
 /// `blur` event, fires when an element loses focus.
@@ -794,18 +730,30 @@ pub const copy: Event(Nil) = Event("copy", TypeEmpty)
 /// `cut` event, fires when text is cut to the clipboard.
 pub const cut: Event(Nil) = Event("cut", TypeEmpty)
 
+/// Event options with nothing enabled, no debounce, no throttle, fires every
+/// time, and neither `stopPropagation` nor `preventDefault`. Use a record
+/// update to change one field,
+/// `EventOptions(..event.defaults, debounce_milliseconds: option.Some(200))`.
+pub const defaults: EventOptions = EventOptions(
+  debounce_milliseconds: option.None,
+  throttle_milliseconds: option.None,
+  once: False,
+  stop_propagation: False,
+  prevent_default: False,
+)
+
 /// `dblclick` event, fires on a double click.
 pub const double_click: Event(ElementData) = Event("dblclick", TypeElement)
 
 /// `drag` event, fires repeatedly while an element is being dragged.
-/// Consider pairing with [`throttle_milliseconds`](#throttle_milliseconds).
+/// Consider throttling it via [`EventOptions`](#EventOptions).
 pub const drag: Event(#(Int, Int)) = Event("drag", TypeCoordinates)
 
 /// `dragend` event, fires once when a drag operation ends.
 pub const drag_end: Event(ElementData) = Event("dragend", TypeElement)
 
 /// `dragover` event, fires repeatedly while a dragged element is over a
-/// valid drop target. Pair with `prevent_default(options)` to enable
+/// valid drop target. Set `prevent_default` in the options to enable
 /// dropping.
 pub const drag_over: Event(#(Int, Int, ElementData)) = Event(
   "dragover",
@@ -874,7 +822,7 @@ pub const mouse_enter: Event(ElementData) = Event("mouseenter", TypeElement)
 pub const mouse_leave: Event(ElementData) = Event("mouseleave", TypeElement)
 
 /// `mousemove` event, fires repeatedly while the mouse moves. Consider
-/// pairing with [`throttle_milliseconds`](#throttle_milliseconds).
+/// throttling it via [`EventOptions`](#EventOptions).
 pub const mouse_move: Event(#(Int, Int)) = Event("mousemove", TypeCoordinates)
 
 /// `mouseup` event, fires when a mouse button is released.
@@ -912,7 +860,7 @@ pub const pointer_up: Event(#(Int, Int)) = Event("pointerup", TypeCoordinates)
 pub const resize: Event(Nil) = Event("resize", TypeEmpty)
 
 /// `scroll` event, payload is `(scroll_top, scroll_left)`. Consider
-/// pairing with [`throttle_milliseconds`](#throttle_milliseconds).
+/// throttling it via [`EventOptions`](#EventOptions).
 pub const scroll: Event(#(Int, Int)) = Event("scroll", TypeScroll)
 
 /// `submit` event, no payload. Prevents the browser's default submission. Use
@@ -924,7 +872,7 @@ pub const submit: Event(Nil) = Event("submit", TypeSubmit)
 pub const touch_end: Event(ElementData) = Event("touchend", TypeElement)
 
 /// `touchmove` event, fires repeatedly while a touch point moves.
-/// Consider pairing with [`throttle_milliseconds`](#throttle_milliseconds).
+/// Consider throttling it via [`EventOptions`](#EventOptions).
 pub const touch_move: Event(#(Int, Int)) = Event("touchmove", TypeCoordinates)
 
 /// `touchstart` event, fires when a touch point is placed.
@@ -1059,7 +1007,8 @@ fn register_event(
     TypeSubmit -> {
       // Bake prevent-default in regardless of caller options
       let typed: fn(Nil) -> Nil = unsafe_cast(dispatch)
-      let with_prevent_default = unpack_options(prevent_default(options))
+      let with_prevent_default =
+        unpack_options(EventOptions(..options, prevent_default: True))
       setup_simple_event_with_options(
         selector,
         "submit",
@@ -1112,10 +1061,6 @@ fn unpack_options(options: EventOptions) -> #(Int, Int, Bool, Bool, Bool) {
 // =============================================================================
 
 // See event.ffi.mjs for explanations for each function.
-
-@target(javascript)
-@external(javascript, "./event.ffi.mjs", "releaseFocusGroup")
-fn release_focus_group_ffi(items: String) -> Nil
 
 @target(javascript)
 @external(javascript, "./event.ffi.mjs", "releaseFocusTrap")

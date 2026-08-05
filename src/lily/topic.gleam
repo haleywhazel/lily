@@ -24,7 +24,7 @@
 //// let chat =
 ////   chat
 ////   |> topic.with_store
-////   |> topic.with_on_subscribe(fn(client_id) {
+////   |> topic.on_subscribe(fn(client_id) {
 ////     [Chat(UserJoined(client_id))]
 ////   })
 //// ```
@@ -90,8 +90,8 @@
 ////     configure: fn(room_id, topic) {
 ////       topic
 ////       |> topic.with_store
-////       |> topic.with_can_subscribe(fn(client_id, _topic_id) {
-////         auth.may_join_room(client_id, room_id) // your own helper
+////       |> topic.can_subscribe(fn(client_id, _topic_id, session) {
+////         auth.may_join_room(session, room_id) // your own helper
 ////       })
 ////     },
 ////   )
@@ -174,6 +174,26 @@ pub fn broadcast_from(
   )
 }
 
+/// Set an authorisation predicate for client-initiated subscribes. It receives
+/// the client id, the topic id, and that connection's session model, which is
+/// where whatever the transport seeded at connect time lives, so the decision
+/// can read the signed-in user rather than the id alone. Server-side
+/// `topic.subscribe` is trusted and unaffected. On `False`, the server replies
+/// with `Rejected(topic_id, "denied")`.
+///
+/// ```gleam
+/// topic.can_subscribe(chat_topic, fn(_client_id, _topic_id, session) {
+///   session.user != option.None
+/// })
+/// ```
+pub fn can_subscribe(
+  topic: Topic(model, message, kind),
+  predicate predicate: fn(String, String, model) -> Bool,
+) -> Topic(model, message, kind) {
+  actor_cell.send(topic.handle, SetCanSubscribe(predicate:))
+  topic
+}
+
 /// Apply a message to the topic's store and emit
 /// `TopicUpdate(id, seq, payload)` to every subscriber. Stateful topics only
 /// (`with_store`), ephemeral topics fail at compile time.
@@ -193,7 +213,7 @@ pub fn dispatch(
 /// parses the suffix via `parse_id` and calls `configure(parsed, topic)` on a
 /// pre-started `Topic`.
 ///
-/// Call `with_store`, `with_can_subscribe`, etc. inside `configure` and return
+/// Call `with_store`, `can_subscribe`, etc. inside `configure` and return
 /// the result. Don't call `topic.new`, the actor is already started.
 ///
 /// A stateful kind reads its store from the
@@ -259,6 +279,37 @@ pub fn new(
   Ok(Topic(id:, handle:, server:))
 }
 
+/// Set a join hook. Returned messages are broadcast (ephemeral) or dispatched
+/// (stateful) right after the joiner receives its `Snapshot`, so it sees them
+/// too.
+///
+/// ```gleam
+/// topic.on_subscribe(chat_topic, fn(client_id) {
+///   [Chat(UserJoined(client_id))]
+/// })
+/// ```
+pub fn on_subscribe(
+  topic: Topic(model, message, kind),
+  hook: fn(String) -> List(message),
+) -> Topic(model, message, kind) {
+  actor_cell.send(topic.handle, SetOnSubscribe(hook:))
+  topic
+}
+
+/// Set a leave hook. Symmetric to `on_subscribe` and fires after the
+/// subscriber is removed.
+///
+/// ```gleam
+/// topic.on_unsubscribe(chat_topic, fn(_client_id) { [] })
+/// ```
+pub fn on_unsubscribe(
+  topic: Topic(model, message, kind),
+  hook: fn(String) -> List(message),
+) -> Topic(model, message, kind) {
+  actor_cell.send(topic.handle, SetOnUnsubscribe(hook:))
+  topic
+}
+
 /// Stop the topic actor and remove it from the server registry. Subscribers
 /// stop receiving updates, last slice value left as-is. Further subscribes to
 /// this id either error (fixed topic) or lazily reinstantiate (parametric
@@ -273,7 +324,8 @@ pub fn stop(topic: Topic(model, message, kind)) -> Nil {
 }
 
 /// Add a subscriber (server-initiated). Client counterpart is
-/// `client.subscribe`.
+/// `client.subscribe`. This path is trusted, so any `can_subscribe` predicate
+/// is skipped, the server has already decided.
 ///
 /// ```gleam
 /// topic.subscribe(chat_topic, client_id)
@@ -294,57 +346,9 @@ pub fn unsubscribe(
   actor_cell.send(topic.handle, ClientUnsubscribe(client_id:))
 }
 
-/// Set an authorisation predicate for client-initiated subscribes.
-/// Server-side `topic.subscribe` is trusted and unaffected. On `False`, the
-/// server replies with `Rejected(topic_id, "denied")`.
-///
-/// ```gleam
-/// topic.with_can_subscribe(chat_topic, fn(client_id, _topic_id) {
-///   auth.is_authenticated(client_id)
-/// })
-/// ```
-pub fn with_can_subscribe(
-  topic: Topic(model, message, kind),
-  predicate: fn(String, String) -> Bool,
-) -> Topic(model, message, kind) {
-  actor_cell.send(topic.handle, SetCanSubscribe(predicate:))
-  topic
-}
-
-/// Set a join hook. Returned messages are broadcast (ephemeral) or dispatched
-/// (stateful) right after the joiner receives its `Snapshot`, so it sees them
-/// too.
-///
-/// ```gleam
-/// topic.with_on_subscribe(chat_topic, fn(client_id) {
-///   [Chat(UserJoined(client_id))]
-/// })
-/// ```
-pub fn with_on_subscribe(
-  topic: Topic(model, message, kind),
-  hook: fn(String) -> List(message),
-) -> Topic(model, message, kind) {
-  actor_cell.send(topic.handle, SetOnSubscribe(hook:))
-  topic
-}
-
-/// Set a leave hook. Symmetric to `with_on_subscribe` and fires after the
-/// subscriber is removed.
-///
-/// ```gleam
-/// topic.with_on_unsubscribe(chat_topic, fn(_client_id) { [] })
-/// ```
-pub fn with_on_unsubscribe(
-  topic: Topic(model, message, kind),
-  hook: fn(String) -> List(message),
-) -> Topic(model, message, kind) {
-  actor_cell.send(topic.handle, SetOnUnsubscribe(hook:))
-  topic
-}
-
 /// Upgrade an ephemeral topic to stateful by attaching a store. Update logic
 /// and initial state come from the `store.topic(id: topic.id, ...)` entry in
-/// the `store.Wiring` passed to `server.new`.
+/// the `store.Wiring` passed to `server.start`.
 ///
 /// ```gleam
 /// topic.new(server, id: "chat")
@@ -367,12 +371,14 @@ pub fn with_store(
 // =============================================================================
 
 type InternalEvent(model, message) {
-  ClientSubscribe(client_id: String, send: fn(BitArray) -> Nil)
+  ClientSubscribe(client_id: String, session: model, send: fn(BitArray) -> Nil)
   ClientUnsubscribe(client_id: String)
   Dispatch(from: Option(String), message: message)
   Broadcast(message: message, exclude: Option(String))
   SendSnapshot(send: fn(BitArray) -> Nil)
-  SetCanSubscribe(predicate: fn(String, String) -> Bool)
+  // no session field, the trusted path has nothing to authorise against
+  ServerSubscribe(client_id: String, send: fn(BitArray) -> Nil)
+  SetCanSubscribe(predicate: fn(String, String, model) -> Bool)
   SetOnSubscribe(hook: fn(String) -> List(message))
   SetOnUnsubscribe(hook: fn(String) -> List(message))
   UpgradeToStateful(initial: model, apply_message: fn(model, message) -> model)
@@ -385,7 +391,7 @@ type TopicActorState(model, message) {
     serialiser: Serialiser(model, message),
     subscribers: Dict(String, fn(BitArray) -> Nil),
     store: Option(TopicStore(model, message)),
-    can_subscribe: fn(String, String) -> Bool,
+    can_subscribe: fn(String, String, model) -> Bool,
     on_subscribe: fn(String) -> List(message),
     on_unsubscribe: fn(String) -> List(message),
   )
@@ -405,6 +411,20 @@ type TopicStore(model, message) {
 // =============================================================================
 // PRIVATE FUNCTIONS
 // =============================================================================
+
+/// Add a subscriber unconditionally, send it the snapshot, then run the join
+/// hook. Shared by the gated client path and the trusted server path, which
+/// differ only in whether `can_subscribe` runs first.
+fn admit_subscriber(
+  state: TopicActorState(model, message),
+  client_id: String,
+  send: fn(BitArray) -> Nil,
+) -> TopicActorState(model, message) {
+  let subscribers = dict.insert(state.subscribers, client_id, send)
+  let state = TopicActorState(..state, subscribers:)
+  maybe_send_snapshot(state, send)
+  handle_hook_messages(state, state.on_subscribe(client_id), option.None)
+}
 
 /// Encode a protocol frame with the topic actor's serialiser.
 fn encode_frame(
@@ -520,9 +540,19 @@ fn handle_send_snapshot_logic(
   state
 }
 
+/// The server-initiated subscribe. Identical to the client one except that
+/// `can_subscribe` never runs, since the server has already made the call.
+fn handle_server_subscribe_logic(
+  state: TopicActorState(model, message),
+  client_id: String,
+  send: fn(BitArray) -> Nil,
+) -> TopicActorState(model, message) {
+  admit_subscriber(state, client_id, send)
+}
+
 fn handle_set_can_subscribe_logic(
   state: TopicActorState(model, message),
-  predicate: fn(String, String) -> Bool,
+  predicate: fn(String, String, model) -> Bool,
 ) -> TopicActorState(model, message) {
   TopicActorState(..state, can_subscribe: predicate)
 }
@@ -557,10 +587,10 @@ fn handle_stop_logic(state: TopicActorState(model, message)) -> Nil {
 fn handle_subscribe_logic(
   state: TopicActorState(model, message),
   client_id: String,
+  session: model,
   send: fn(BitArray) -> Nil,
 ) -> TopicActorState(model, message) {
-  let authorised = state.can_subscribe(client_id, state.id)
-  case authorised {
+  case state.can_subscribe(client_id, state.id, session) {
     False -> {
       let rejected_frame =
         encode_frame(
@@ -570,12 +600,7 @@ fn handle_subscribe_logic(
       send(rejected_frame)
       state
     }
-    True -> {
-      let subscribers = dict.insert(state.subscribers, client_id, send)
-      let state = TopicActorState(..state, subscribers:)
-      maybe_send_snapshot(state, send)
-      handle_hook_messages(state, state.on_subscribe(client_id), option.None)
-    }
+    True -> admit_subscriber(state, client_id, send)
   }
 }
 
@@ -604,8 +629,11 @@ fn make_entry_from_handle(
     handle_incoming: fn(client_id, message) {
       actor_cell.send(handle, Dispatch(from: option.Some(client_id), message:))
     },
-    subscribe: fn(client_id, send) {
-      actor_cell.send(handle, ClientSubscribe(client_id:, send:))
+    subscribe: fn(client_id, session, send) {
+      actor_cell.send(handle, ClientSubscribe(client_id:, session:, send:))
+    },
+    subscribe_trusted: fn(client_id, _session, send) {
+      actor_cell.send(handle, ServerSubscribe(client_id:, send:))
     },
     unsubscribe: fn(client_id) {
       actor_cell.send(handle, ClientUnsubscribe(client_id:))
@@ -624,7 +652,7 @@ fn make_initial_state(
     serialiser:,
     subscribers: dict.new(),
     store: option.None,
-    can_subscribe: fn(_, _) { True },
+    can_subscribe: fn(_, _, _) { True },
     on_subscribe: fn(_) { [] },
     on_unsubscribe: fn(_) { [] },
   )
@@ -646,8 +674,8 @@ fn reduce(
   state: TopicActorState(model, message),
 ) -> actor_cell.Reduction(TopicActorState(model, message), Nil) {
   case event {
-    ClientSubscribe(client_id:, send:) ->
-      Continue(handle_subscribe_logic(state, client_id, send))
+    ClientSubscribe(client_id:, session:, send:) ->
+      Continue(handle_subscribe_logic(state, client_id, session, send))
 
     ClientUnsubscribe(client_id:) ->
       Continue(handle_unsubscribe_logic(state, client_id))
@@ -659,6 +687,9 @@ fn reduce(
       Continue(handle_broadcast_logic(state, message, exclude))
 
     SendSnapshot(send:) -> Continue(handle_send_snapshot_logic(state, send))
+
+    ServerSubscribe(client_id:, send:) ->
+      Continue(handle_server_subscribe_logic(state, client_id, send))
 
     SetCanSubscribe(predicate:) ->
       Continue(handle_set_can_subscribe_logic(state, predicate))

@@ -6,6 +6,8 @@
 @target(erlang)
 import gleam/erlang/process
 @target(erlang)
+import gleam/option
+@target(erlang)
 import gleeunit/should
 @target(erlang)
 import lily/server
@@ -36,7 +38,14 @@ fn connect_client(
   client_id: String,
 ) -> process.Subject(BitArray) {
   let subj = process.new_subject()
-  server.connect(srv, client_id: client_id, send: process.send(subj, _))
+  let assert Ok(Nil) =
+    server.connect(
+      srv,
+      client_id: client_id,
+      origin: option.None,
+      send: process.send(subj, _),
+      session: [],
+    )
   let _ = recv(subj)
   subj
 }

@@ -32,7 +32,7 @@ pub fn event_on_wheel_extracts_deltas_test() {
         test_support.set(dy_ref, delta_y)
         Noop
       },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.wheel_event("#wheel-tgt", 5.0, 10.0)
@@ -56,7 +56,7 @@ pub fn event_on_wheel_with_once_fires_only_once_test() {
       component,
       event: event.wheel,
       selector: "#wheel-w-el",
-      options: event.options() |> event.once,
+      options: event.EventOptions(..event.defaults, once: True),
       handler: fn(_payload) { Increment },
     )
   })
@@ -88,7 +88,7 @@ pub fn event_on_scroll_fires_test() {
         test_support.set(fired, True)
         Noop
       },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.simple_event("#scroll-el", "scroll")
@@ -109,7 +109,7 @@ pub fn event_on_scroll_with_once_fires_only_once_test() {
       component,
       event: event.scroll,
       selector: "#scroll-w-el",
-      options: event.options() |> event.once,
+      options: event.EventOptions(..event.defaults, once: True),
       handler: fn(_payload) { Increment },
     )
   })

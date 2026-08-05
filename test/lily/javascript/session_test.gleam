@@ -17,16 +17,17 @@ import lily/test_support.{type Model}
 // =============================================================================
 
 @target(javascript)
-/// Persistence that tracks the `name` field in localStorage.
-fn name_persistence() -> client.Persistence(Model) {
-  client.session_persistence()
-  |> client.session_field(
-    key: "name",
-    get: fn(model: Model) { model.name },
-    set: fn(model: Model, value) { test_support.Model(..model, name: value) },
-    encode: json.string,
-    decoder: decode.string,
-  )
+/// Session fields that track the `name` field in localStorage.
+fn name_fields() -> List(client.SessionField(Model)) {
+  [
+    client.session_field(
+      key: "name",
+      get: fn(model: Model) { model.name },
+      set: fn(model: Model, value) { test_support.Model(..model, name: value) },
+      encode: json.string,
+      decoder: decode.string,
+    ),
+  ]
 }
 
 // =============================================================================
@@ -40,7 +41,7 @@ pub fn session_attach_with_empty_localstorage_test() {
   let _r =
     client.attach_session(
       runtime,
-      persistence: name_persistence(),
+      fields: name_fields(),
       get: fn(m) { m },
       set: fn(_model, session) { session },
     )
@@ -61,7 +62,7 @@ pub fn session_attach_hydrates_from_localstorage_test() {
   let _r =
     client.attach_session(
       runtime,
-      persistence: name_persistence(),
+      fields: name_fields(),
       get: fn(m) { m },
       set: fn(_model, session) { session },
     )
@@ -79,7 +80,7 @@ pub fn session_attach_with_invalid_json_test() {
   let _r =
     client.attach_session(
       runtime,
-      persistence: name_persistence(),
+      fields: name_fields(),
       get: fn(m) { m },
       set: fn(_model, session) { session },
     )
@@ -96,26 +97,26 @@ pub fn session_attach_with_invalid_json_test() {
 pub fn session_only_writes_changed_fields_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
-  let persistence =
-    client.session_persistence()
-    |> client.session_field(
+  let fields = [
+    client.session_field(
       key: "name",
       get: fn(m: Model) { m.name },
       set: fn(m: Model, v) { test_support.Model(..m, name: v) },
       encode: json.string,
       decoder: decode.string,
-    )
-    |> client.session_field(
+    ),
+    client.session_field(
       key: "count",
       get: fn(m: Model) { m.count },
       set: fn(m: Model, v) { test_support.Model(..m, count: v) },
       encode: json.int,
       decoder: decode.int,
-    )
+    ),
+  ]
   let _r =
     client.attach_session(
       runtime,
-      persistence: persistence,
+      fields: fields,
       get: fn(m) { m },
       set: fn(_model, session) { session },
     )
@@ -133,19 +134,19 @@ pub fn session_only_writes_changed_fields_test() {
 pub fn session_skips_write_when_field_unchanged_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
-  let persistence =
-    client.session_persistence()
-    |> client.session_field(
+  let fields = [
+    client.session_field(
       key: "name",
       get: fn(m: Model) { m.name },
       set: fn(m: Model, v) { test_support.Model(..m, name: v) },
       encode: json.string,
       decoder: decode.string,
-    )
+    ),
+  ]
   let _r =
     client.attach_session(
       runtime,
-      persistence: persistence,
+      fields: fields,
       get: fn(m) { m },
       set: fn(_model, session) { session },
     )

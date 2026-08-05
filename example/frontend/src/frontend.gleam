@@ -31,7 +31,7 @@ pub fn main() {
 
   runtime
   |> client.attach_session(
-    persistence: theme_persistence(),
+    fields: theme_fields(),
     get: fn(model: shared.Model) { model.session.theme },
     set: fn(model, theme) {
       shared.Model(
@@ -41,7 +41,7 @@ pub fn main() {
     },
   )
   |> client.attach_session(
-    persistence: username_persistence(),
+    fields: username_fields(),
     get: fn(model: shared.Model) { model.session.username },
     set: fn(model, username) {
       shared.Model(
@@ -71,7 +71,7 @@ pub fn main() {
         message: shared.SendMessage(body:, sender_id:),
       ) ->
         case sender_id == model.session.username {
-          True -> event.focus(runtime, "#room-input")
+          True -> event.focus("#room-input")
           False ->
             dispatch(
               shared.Session(shared.AddPopup(
@@ -81,7 +81,7 @@ pub fn main() {
         }
       shared.Session(shared.JoinRoom(room_id:)) -> {
         let _ = client.subscribe(runtime, "room:" <> room_id)
-        event.focus(runtime, "#room-input")
+        event.focus("#room-input")
       }
       _ -> handle_focus(runtime, message)
     }
@@ -92,14 +92,15 @@ pub fn main() {
       session: shared.SessionState(..model.session, session_id: id),
     )
   })
-  |> client.connect(
-    with: transport.websocket(url: transport.url_from_current_location(
-      path: "/ws",
-    ))
-    |> transport.reconnect_base_milliseconds(250)
-    |> transport.reconnect_max_milliseconds(5000)
-    |> transport.websocket_connect,
-  )
+  |> client.connect(with: transport.websocket(
+    url: transport.url_from_current_location(path: "/ws"),
+    reconnect: transport.Backoff(
+      base_milliseconds: 250,
+      max_milliseconds: 5000,
+      jitter_ratio: 0.25,
+      multiplier: 2.0,
+    ),
+  ))
 
   Nil
 }
@@ -108,26 +109,28 @@ pub fn main() {
 // SESSION PERSISTENCE
 // =============================================================================
 
-fn theme_persistence() -> client.Persistence(shared.Theme) {
-  client.session_persistence()
-  |> client.session_field(
-    key: "theme",
-    get: fn(theme: shared.Theme) { theme },
-    set: fn(_theme, value) { value },
-    encode: shared.encode_theme,
-    decoder: shared.decode_theme(),
-  )
+fn theme_fields() -> List(client.SessionField(shared.Theme)) {
+  [
+    client.session_field(
+      key: "theme",
+      get: fn(theme: shared.Theme) { theme },
+      set: fn(_theme, value) { value },
+      encode: shared.encode_theme,
+      decoder: shared.decode_theme(),
+    ),
+  ]
 }
 
-fn username_persistence() -> client.Persistence(String) {
-  client.session_persistence()
-  |> client.session_field(
-    key: "username",
-    get: fn(name: String) { name },
-    set: fn(_old, new) { new },
-    encode: json.string,
-    decoder: decode.string,
-  )
+fn username_fields() -> List(client.SessionField(String)) {
+  [
+    client.session_field(
+      key: "username",
+      get: fn(name: String) { name },
+      set: fn(_old, new) { new },
+      encode: json.string,
+      decoder: decode.string,
+    ),
+  ]
 }
 
 // =============================================================================
@@ -212,7 +215,7 @@ fn handle_focus(
 ) -> Nil {
   case message {
     shared.Session(shared.OpenClearDialog) -> {
-      event.focus(runtime, "#clear-dialog-cancel")
+      event.focus("#clear-dialog-cancel")
       event.focus_trap(
         runtime,
         within: "#clear-dialog",
@@ -221,16 +224,15 @@ fn handle_focus(
       )
     }
     shared.Session(shared.ClearNotifications) -> {
-      event.release_focus_trap(runtime)
-      event.focus(runtime, "#clear-button")
+      event.release_focus_trap()
+      event.focus("#clear-button")
     }
     shared.Session(shared.CloseClearDialog) -> {
-      event.release_focus_trap(runtime)
-      event.focus(runtime, "#clear-button")
+      event.release_focus_trap()
+      event.focus("#clear-button")
     }
-    shared.Session(shared.SelectRoom(_)) -> event.focus(runtime, "#room-input")
-    shared.Session(shared.SetUsername(_)) ->
-      event.focus(runtime, "#room-name-input")
+    shared.Session(shared.SelectRoom(_)) -> event.focus("#room-input")
+    shared.Session(shared.SetUsername(_)) -> event.focus("#room-name-input")
     shared.Session(shared.JoinRoom(_)) -> Nil
     shared.Session(shared.DismissPopup(_id)) -> Nil
     shared.Session(shared.ToggleTheme) -> Nil
@@ -302,7 +304,7 @@ fn app(
     event: event.click,
     selector: "#app",
     decoder: parse_click,
-    options: event.options(),
+    options: event.defaults,
   )
 }
 
@@ -655,25 +657,25 @@ fn room_composer() -> component.Component(
     event: event.input,
     selector: "#room-input",
     handler: fn(text) { shared.Session(shared.UpdateDraft(text)) },
-    options: event.options(),
+    options: event.defaults,
   )
   |> event.on_global_decoded(
     event: event.form_submit,
     selector: "#username-form",
     decoder: parse_username_submit,
-    options: event.options(),
+    options: event.defaults,
   )
   |> event.on_global_decoded(
     event: event.form_submit,
     selector: "#join-room-form",
     decoder: parse_join_room,
-    options: event.options(),
+    options: event.defaults,
   )
   |> event.on_global_decoded(
     event: event.form_submit,
     selector: "#room-form",
     decoder: parse_room_submit,
-    options: event.options(),
+    options: event.defaults,
   )
 }
 

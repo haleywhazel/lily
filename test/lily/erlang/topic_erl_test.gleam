@@ -6,6 +6,8 @@ import gleam/erlang/process
 @target(erlang)
 import gleam/int
 @target(erlang)
+import gleam/option
+@target(erlang)
 import gleeunit/should
 @target(erlang)
 import lily/server
@@ -38,7 +40,14 @@ fn connect_client(
   client_id: String,
 ) -> process.Subject(BitArray) {
   let subj = process.new_subject()
-  server.connect(srv, client_id: client_id, send: process.send(subj, _))
+  let assert Ok(Nil) =
+    server.connect(
+      srv,
+      client_id: client_id,
+      origin: option.None,
+      send: process.send(subj, _),
+      session: [],
+    )
   let _ = recv(subj)
   subj
 }
@@ -318,12 +327,14 @@ pub fn topic_subscribe_to_unknown_topic_sends_rejected_test() {
 // =============================================================================
 
 @target(erlang)
-pub fn topic_with_can_subscribe_false_sends_rejected_test() {
+pub fn topic_can_subscribe_false_sends_rejected_test() {
   let srv = test_support.new_server()
   let assert Ok(t) = topic.new(srv, id: "private")
   let _ =
     t
-    |> topic.with_can_subscribe(fn(_client_id, _topic_id) { False })
+    |> topic.can_subscribe(predicate: fn(_client_id, _topic_id, _session) {
+      False
+    })
   let s1 = connect_client(srv, "c1")
   server.incoming(srv, client_id: "c1", bytes: encode_subscribe("private"))
   process.sleep(20)
@@ -358,17 +369,66 @@ pub fn topic_message_from_non_subscriber_is_dropped_test() {
   |> should.be_error
 }
 
+@target(erlang)
+/// Server-side `topic.subscribe` is trusted: it bypasses `can_subscribe`,
+/// which only gates client-initiated Subscribe frames.
+pub fn topic_can_subscribe_does_not_gate_server_side_subscribe_test() {
+  let srv = test_support.new_server()
+  let assert Ok(t) = topic.new(srv, id: "private")
+  let t =
+    t
+    |> topic.can_subscribe(predicate: fn(_client_id, _topic_id, _session) {
+      False
+    })
+  let s1 = connect_client(srv, "c1")
+  // The server puts c1 into the topic itself, no Subscribe frame involved.
+  topic.subscribe(t, "c1")
+  process.sleep(20)
+  topic.broadcast(t, Increment)
+  process.sleep(20)
+  case recv(s1) {
+    Ok(bytes) ->
+      decode(bytes)
+      |> should.equal(transport.Push(topic_id: "private", payload: Increment))
+    Error(_) -> should.fail()
+  }
+}
+
+@target(erlang)
+/// The same topic still refuses a client-initiated subscribe.
+pub fn topic_can_subscribe_still_rejects_client_frame_after_trusted_subscribe_test() {
+  let srv = test_support.new_server()
+  let assert Ok(t) = topic.new(srv, id: "private")
+  let t =
+    t
+    |> topic.can_subscribe(predicate: fn(_client_id, _topic_id, _session) {
+      False
+    })
+  let _s1 = connect_client(srv, "c1")
+  let s2 = connect_client(srv, "c2")
+  topic.subscribe(t, "c1")
+  process.sleep(20)
+  server.incoming(srv, client_id: "c2", bytes: encode_subscribe("private"))
+  process.sleep(20)
+  case recv(s2) {
+    Ok(bytes) ->
+      decode(bytes)
+      |> should.equal(transport.Rejected(topic_id: "private", reason: "denied"))
+    Error(_) -> should.fail()
+  }
+}
+
 // =============================================================================
 // ON SUBSCRIBE / ON UNSUBSCRIBE
 // =============================================================================
 
 @target(erlang)
-pub fn topic_with_on_subscribe_broadcasts_hook_messages_test() {
+pub fn topic_on_subscribe_broadcasts_hook_messages_test() {
   let srv = test_support.new_server()
   let assert Ok(t) = topic.new(srv, id: "announce")
   let _ =
     t
-    |> topic.with_on_subscribe(fn(_client_id) { [Increment] })
+    |> topic.on_subscribe(fn(_client_id) { [Increment] })
   let s1 = connect_client(srv, "c1")
   server.incoming(srv, client_id: "c1", bytes: encode_subscribe("announce"))
   process.sleep(20)
@@ -382,12 +442,12 @@ pub fn topic_with_on_subscribe_broadcasts_hook_messages_test() {
 }
 
 @target(erlang)
-pub fn topic_with_on_unsubscribe_broadcasts_hook_messages_test() {
+pub fn topic_on_unsubscribe_broadcasts_hook_messages_test() {
   let srv = test_support.new_server()
   let assert Ok(t) = topic.new(srv, id: "announce")
   let _ =
     t
-    |> topic.with_on_unsubscribe(fn(_client_id) { [Decrement] })
+    |> topic.on_unsubscribe(fn(_client_id) { [Decrement] })
   let _s1 = connect_client(srv, "c1")
   let s2 = connect_client(srv, "c2")
   server.incoming(srv, client_id: "c1", bytes: encode_subscribe("announce"))

@@ -4,6 +4,8 @@
 @target(javascript)
 import gleam/list
 @target(javascript)
+import gleam/option
+@target(javascript)
 import gleeunit/should
 @target(javascript)
 import lily/client
@@ -27,7 +29,7 @@ pub fn event_on_change_extracts_value_test() {
       event: event.change,
       selector: "#name-ch",
       handler: SetName,
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.input_event("#name-ch", "Bob")
@@ -46,7 +48,7 @@ pub fn event_on_input_extracts_value_test() {
       event: event.input,
       selector: "#name-in",
       handler: SetName,
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.input_event("#name-in", "Alice")
@@ -69,7 +71,7 @@ pub fn event_on_input_with_no_options_fires_normally_test() {
       component,
       event: event.input,
       selector: "#in-with",
-      options: event.options(),
+      options: event.defaults,
       handler: fn(value) {
         test_support.set(captured, value)
         SetName(value)
@@ -91,7 +93,10 @@ pub fn event_on_input_with_throttle_limits_rate_test() {
       component,
       event: event.input,
       selector: "#throttle-in",
-      options: event.options() |> event.throttle_milliseconds(10_000),
+      options: event.EventOptions(
+        ..event.defaults,
+        throttle_milliseconds: option.Some(10_000),
+      ),
       handler: fn(_value) { Increment },
     )
   })
@@ -129,7 +134,7 @@ pub fn event_on_form_submit_passes_fields_test() {
           Error(_) -> Error(Nil)
         }
       },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.input_event("#sub-input", "hello")
@@ -160,7 +165,7 @@ pub fn event_on_form_change_fires_on_input_test() {
         test_support.set(fired, True)
         Ok(Noop)
       },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.input_event("#chg-q", "abc")
@@ -191,7 +196,7 @@ pub fn event_on_form_change_passes_fields_test() {
           Error(_) -> Error(Nil)
         }
       },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.input_event("#chg2-in", "alice")

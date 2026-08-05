@@ -34,8 +34,6 @@
 ////    before the element leaves)
 //// 2. [`event.on`](./event.html#on) and friends attach listeners
 //// 3. [`scoped`](#scoped) fixes the subtree an event locks itself to
-//// 4. [`require_connection`](#require_connection) gates the subtree on
-////    connection status.
 ////
 //// `static`, `simple`, and `live` hand their content function a `slot`
 //// function as its first argument. Call `slot(child_component)` wherever you
@@ -428,28 +426,6 @@ pub fn render_to_string(
   walk_to_string(view(model), model, to_html, from_string)
 }
 
-/// Disables a component while the transport is disconnected. `connected` reads
-/// connection status from the model, and when it returns `False` Lily adds
-/// `data-lily-disabled="true"`, `aria-disabled="true"`, and a
-/// `lily-disconnected` class to the root and stops event handlers firing.
-/// Style the disconnected state with CSS. Pipe on after building a component.
-///
-/// ```gleam
-/// component.simple(
-///   slice: fn(model) { model.transfer_amount },
-///   render: fn(amount, _) {
-///     html.button([], [html.text("Transfer $" <> int.to_string(amount))])
-///   },
-/// )
-/// |> component.require_connection(fn(model) { model.connected })
-/// ```
-pub fn require_connection(
-  component: Component(model, message, html),
-  connected connected: fn(model) -> Bool,
-) -> Component(model, message, html) {
-  add_decoration(component, Connection(connected))
-}
-
 /// The default component. Subscribes to a slice and re-renders on change,
 /// morphing onto the live DOM so existing nodes survive (focus, cursor,
 /// in-progress input, and nested reactive children all kept).
@@ -588,10 +564,9 @@ pub type ComponentType(model, message, html) {
 }
 
 /// A cross-cutting attribute layered onto a [`Component`](#Component) via the
-/// decoration list. Each appended by a constructor: [`transition`](#transition)
-/// adds `Transition`, `event.on*` (via `attach_event`) adds `Listener`, and
-/// [`require_connection`](#require_connection) adds `Connection`. Applied
-/// innermost-first in list order.
+/// decoration list. Each appended by a constructor, [`transition`](#transition)
+/// adds `Transition` and `event.on*` (via `attach_event`) adds `Listener`.
+/// Applied innermost-first in list order.
 @internal
 pub type Decoration(model) {
   /// Duration-timed CSS enter/exit classes on a wrapper element (see
@@ -605,7 +580,8 @@ pub type Decoration(model) {
 
   /// Gates the subtree on connection status. When `connected` returns `False`
   /// the wrapper is marked disabled (`data-lily-disabled`, `aria-disabled`,
-  /// `lily-disconnected`).
+  /// `lily-disconnected`). No public constructor builds this at present, the
+  /// runtime still honours it.
   Connection(connected: fn(model) -> Bool)
 }
 

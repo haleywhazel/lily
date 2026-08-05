@@ -10,10 +10,11 @@
 //// aren't leveraging BEAM's model and a full-stack JS model might be better
 //// suited.
 ////
-//// You build a server with [`new`](#new), handing it the same three values
-//// your client gets, the initial model, the serialiser, and the shared
-//// [`Wiring`](./store.html#Wiring), then [`start`](#start) it and register
-//// your topics with [`topic.new`](./topic.html#new):
+//// You [`start`](#start) a server with the same three values your client
+//// gets, the initial model, the serialiser, and the shared
+//// [`Wiring`](./store.html#Wiring), plus an [`Origins`](#Origins) policy
+//// saying which browser origins may open a connection. Register your topics
+//// afterwards with [`topic.new`](./topic.html#new):
 ////
 //// ```gleam
 //// import gleam/result
@@ -23,12 +24,12 @@
 ////
 //// pub fn main() {
 ////   let assert Ok(server) =
-////     server.new(
+////     server.start(
 ////       initial: shared.initial_model(),
 ////       serialiser: shared.serialiser(),
 ////       wiring: shared.wiring(),
+////       origins: server.AllowedOrigins(["https://example.com"]),
 ////     )
-////     |> server.start
 ////
 ////   let assert Ok(_) =
 ////     topic.new(server, id: "chat")
@@ -47,14 +48,23 @@
 //// you wire it into whatever WebSocket or HTTP handler you're running with
 //// three calls. Create a stable id for each connection with
 //// [`generate_client_id`](#generate_client_id), register it with
-//// [`connect`](#connect) (handing over the `send` callback the server uses to
-//// push frames back to that one client), feed every inbound frame to
+//// [`connect`](#connect) (handing over the request's `Origin` header, the
+//// `send` callback the server uses to push frames back to that one client,
+//// and any messages that should seed this connection's session before the
+//// first frame arrives), feed every inbound frame to
 //// [`incoming`](#incoming), and call [`disconnect`](#disconnect) when the
 //// socket closes:
 ////
 //// ```gleam
 //// let client_id = server.generate_client_id()
-//// server.connect(server, client_id:, send: process.send(outgoing_subject, _))
+//// let assert Ok(Nil) =
+////   server.connect(
+////     server,
+////     client_id:,
+////     origin: request.get_header(req, "origin") |> option.from_result,
+////     send: process.send(outgoing_subject, _),
+////     session: [SignedInAs(user)],
+////   )
 ////
 //// // for every frame the socket receives:
 //// server.incoming(server, client_id:, bytes:)
@@ -62,6 +72,10 @@
 //// // when it closes:
 //// server.disconnect(server, client_id:)
 //// ```
+////
+//// A transport that wants to refuse the upgrade outright, with a 403 rather
+//// than an accepted socket that immediately closes, can run the same policy
+//// ahead of time with [`check_origin`](#check_origin).
 ////
 //// From there most apps just need the lifecycle hooks.
 //// [`on_connect`](#on_connect) and [`on_disconnect`](#on_disconnect) fire with
@@ -128,28 +142,42 @@ import lily/transport.{type Serialiser}
 // PUBLIC TYPES
 // =============================================================================
 
-/// Builder returned by [`server.new`](#new). Pipe through
-/// [`server.start`](#start).
-@internal
-pub opaque type Builder(model, message) {
-  Builder(
-    initial_model: model,
-    serialiser: Serialiser(model, message),
-    wiring: store.Wiring(model, message),
-    max_topics: Int,
-  )
+/// Why a connection was refused before it was ever registered.
+pub type ConnectError {
+  /// The `Origin` header did not match the configured allowlist.
+  OriginNotAllowed(origin: String)
+  /// The request carried no `Origin` header and the policy requires one.
+  OriginMissing
+}
+
+/// Which browser origins may open a connection to this server. Passed to
+/// [`start`](#start) and evaluated by [`connect`](#connect) and
+/// [`check_origin`](#check_origin).
+///
+/// ```gleam
+/// server.AllowedOrigins(["https://example.com", "http://localhost:1234"])
+/// ```
+pub type Origins {
+  /// Only these exact origins may open a connection. A request with no
+  /// `Origin` header, such as curl or a native app, is refused.
+  AllowedOrigins(List(String))
+  /// Every origin may connect, including requests with no `Origin` header.
+  /// Only safe when the socket carries no cookie or other ambient credential.
+  AnyOrigin
 }
 
 /// Handle to a running Lily server, backed by an
 /// [`actor_cell`](./internal/actor_cell.html) (OTP actor on Erlang, `Reference`
-/// cell on JavaScript). Also carries `serialiser` and `initial_model` for
-/// zero-copy access by `topic.new`.
+/// cell on JavaScript). Also carries `serialiser`, `initial_model`, and the
+/// `origins` policy for zero-copy access by `topic.new` and by the origin
+/// checks, neither of which needs an actor round trip.
 pub opaque type Server(model, message) {
   Server(
     handle: ServerHandle(model, message),
     serialiser: Serialiser(model, message),
     initial_model: model,
     wiring: store.Wiring(model, message),
+    origins: Origins,
   )
 }
 
@@ -159,11 +187,17 @@ pub opaque type Server(model, message) {
 
 /// Callbacks a topic actor registers so the server can route frames to it.
 /// Created in `topic.gleam`, stored in the server's topic registry.
+///
+/// `subscribe` is the client-initiated path and runs the topic's
+/// `can_subscribe` predicate. `subscribe_trusted` is the server-initiated path
+/// used by `topic.subscribe` and skips that predicate. Both receive the
+/// client's session model so authorisation can read the connection context.
 @internal
 pub type ServerTopicEntry(model, message) {
   ServerTopicEntry(
     handle_incoming: fn(String, message) -> Nil,
-    subscribe: fn(String, fn(BitArray) -> Nil) -> Nil,
+    subscribe: fn(String, model, fn(BitArray) -> Nil) -> Nil,
+    subscribe_trusted: fn(String, model, fn(BitArray) -> Nil) -> Nil,
     unsubscribe: fn(String) -> Nil,
     send_snapshot: fn(fn(BitArray) -> Nil) -> Nil,
     stop: fn() -> Nil,
@@ -174,18 +208,53 @@ pub type ServerTopicEntry(model, message) {
 // PUBLIC FUNCTIONS
 // =============================================================================
 
-/// Register a client connection. The `send` callback pushes frames back to
-/// this specific client.
+/// Check an origin without connecting, so a transport can refuse the upgrade
+/// with a 403 instead of accepting a socket and closing it. Runs the exact
+/// same policy [`connect`](#connect) does.
 ///
 /// ```gleam
-/// server.connect(server, client_id: id, send: process.send(outgoing_subject, _))
+/// case server.check_origin(server, origin:) {
+///   Ok(Nil) -> accept_websocket(req)
+///   Error(_) -> forbidden()
+/// }
+/// ```
+pub fn check_origin(
+  server: Server(model, message),
+  origin origin: Option(String),
+) -> Result(Nil, ConnectError) {
+  validate_origin(server.origins, origin)
+}
+
+/// Register a client connection. `origin` is the request's `Origin` header, if
+/// any, and is checked against the server's [`Origins`](#Origins) policy
+/// before anything is registered, so a refused connection leaves no trace. The
+/// `send` callback pushes frames back to this specific client.
+///
+/// `session` seeds this connection's session store. Each message is applied
+/// and streamed back as a `SessionUpdate` before any inbound frame can be
+/// processed, which is how a transport hands the server what it learnt from
+/// the request, like the signed-in user. Pass `[]` for none.
+///
+/// ```gleam
+/// server.connect(
+///   server,
+///   client_id: id,
+///   origin: option.Some("https://example.com"),
+///   send: process.send(outgoing_subject, _),
+///   session: [SignedInAs(user)],
+/// )
 /// ```
 pub fn connect(
   server: Server(model, message),
   client_id client_id: String,
+  origin origin: Option(String),
   send send: fn(BitArray) -> Nil,
-) -> Nil {
-  actor_cell.send(server.handle, ClientConnected(client_id:, send:))
+  session session: List(message),
+) -> Result(Nil, ConnectError) {
+  // validated up front so a refused origin never reaches the actor at all
+  use _ <- result.try(validate_origin(server.origins, origin))
+  actor_cell.send(server.handle, ClientConnected(client_id:, send:, session:))
+  Ok(Nil)
 }
 
 /// Unregister a client connection from the server and all subscribed topics.
@@ -260,38 +329,10 @@ pub fn incoming(
 /// if your app legitimately needs more concurrent topics.
 ///
 /// ```gleam
-/// server.new(initial:, serialiser:, wiring:)
-/// |> server.max_topics(500_000)
+/// server.max_topics(server, 500_000)
 /// ```
-pub fn max_topics(
-  builder: Builder(model, message),
-  maximum: Int,
-) -> Builder(model, message) {
-  Builder(..builder, max_topics: maximum)
-}
-
-/// Start building a server. Provide the shared initial model (the zero-state
-/// for per-connection session stores and for topic snapshots) and the
-/// serialiser.
-///
-/// ```gleam
-/// server.new(
-///   initial: shared.initial_model(),
-///   serialiser: shared.serialiser(),
-///   wiring: shared.wiring(),
-/// )
-/// ```
-pub fn new(
-  initial initial: model,
-  serialiser serialiser: Serialiser(model, message),
-  wiring wiring: store.Wiring(model, message),
-) -> Builder(model, message) {
-  Builder(
-    initial_model: initial,
-    serialiser:,
-    wiring:,
-    max_topics: default_max_topics,
-  )
+pub fn max_topics(server: Server(model, message), maximum: Int) -> Nil {
+  actor_cell.send(server.handle, SetMaxTopics(maximum:))
 }
 
 /// Register a hook that runs after a client connects, receiving the
@@ -362,26 +403,31 @@ pub fn on_topic_message(
   actor_cell.send(server.handle, SetTopicMessageHook(hook:))
 }
 
-/// Start the configured server. Add topics afterwards via
-/// `topic.new(server, ...)`.
+/// Start a server. Provide the shared initial model (the zero-state for
+/// per-connection session stores and for topic snapshots), the serialiser, the
+/// shared wiring, and the [`Origins`](#Origins) policy every connection is
+/// checked against. Add topics afterwards via `topic.new(server, ...)`.
 ///
 /// ```gleam
 /// let assert Ok(server) =
-///   server.new(
+///   server.start(
 ///     initial: shared.initial_model(),
 ///     serialiser: shared.serialiser(),
 ///     wiring: shared.wiring(),
+///     origins: server.AllowedOrigins(["https://example.com"]),
 ///   )
-///   |> server.start
 /// ```
 pub fn start(
-  builder: Builder(model, message),
+  initial initial: model,
+  serialiser serialiser: Serialiser(model, message),
+  wiring wiring: store.Wiring(model, message),
+  origins origins: Origins,
 ) -> Result(Server(model, message), Nil) {
   let initial_state =
     ServerState(
-      initial_model: builder.initial_model,
-      serialiser: builder.serialiser,
-      session_apply: store.session_apply(builder.wiring),
+      initial_model: initial,
+      serialiser:,
+      session_apply: store.session_apply(wiring),
       clients: dict.new(),
       client_topics: dict.new(),
       sessions: dict.new(),
@@ -391,17 +437,12 @@ pub fn start(
       on_disconnect_hook: fn(_) { Nil },
       on_message_hook: fn(_, _, _) { Nil },
       on_topic_message_hook: fn(_, _, _) { Nil },
-      max_topics: builder.max_topics,
+      max_topics: default_max_topics,
     )
 
   actor_cell.start(initial_state, reduce:)
   |> result.map(fn(handle) {
-    Server(
-      handle:,
-      serialiser: builder.serialiser,
-      initial_model: builder.initial_model,
-      wiring: builder.wiring,
-    )
+    Server(handle:, serialiser:, initial_model: initial, wiring:, origins:)
   })
 }
 
@@ -486,7 +527,11 @@ type ConnectionState(model, message) {
 }
 
 type InternalEvent(model, message) {
-  ClientConnected(client_id: String, send: fn(BitArray) -> Nil)
+  ClientConnected(
+    client_id: String,
+    send: fn(BitArray) -> Nil,
+    session: List(message),
+  )
   ClientDisconnected(client_id: String)
   DispatchToClient(client_id: String, message: message)
   DispatchToAllClients(message: message)
@@ -494,6 +539,7 @@ type InternalEvent(model, message) {
   SetConnectHook(hook: fn(String) -> Nil)
   SetDisconnectHook(hook: fn(String) -> Nil)
   SetHook(hook: fn(message, model, String) -> Nil)
+  SetMaxTopics(maximum: Int)
   SetTopicMessageHook(hook: fn(message, String, String) -> Nil)
   RegisterTopic(id: String, entry: ServerTopicEntry(model, message))
   RegisterTopicKind(
@@ -613,6 +659,7 @@ fn handle_connect_logic(
   state: ServerState(model, message),
   client_id: String,
   send: fn(BitArray) -> Nil,
+  session: List(message),
 ) -> ServerState(model, message) {
   let clients = dict.insert(state.clients, client_id, send)
   let connection = ConnectionState(model: state.initial_model, sequence: 0)
@@ -621,8 +668,16 @@ fn handle_connect_logic(
     transport.Connected(client_id:),
     serialiser: state.serialiser,
   ))
+  let state = ServerState(..state, clients:, sessions:)
+  // seeds are applied inside the actor, so they land before any inbound frame
+  // from this client can be processed. `handle_dispatch_to_logic` already
+  // isolates a crashing update and drops just that message.
+  let state =
+    list.fold(session, state, fn(acc, message) {
+      handle_dispatch_to_logic(acc, client_id, message)
+    })
   state.on_connect_hook(client_id)
-  ServerState(..state, clients:, sessions:)
+  state
 }
 
 fn handle_disconnect_logic(
@@ -690,12 +745,17 @@ fn handle_do_subscribe_logic(
   client_id: String,
   topic_id: String,
 ) -> ServerState(model, message) {
-  case dict.get(state.clients, client_id), dict.get(state.topics, topic_id) {
-    Ok(send), Ok(entry) -> {
-      entry.subscribe(client_id, send)
+  case
+    dict.get(state.clients, client_id),
+    dict.get(state.topics, topic_id),
+    dict.get(state.sessions, client_id)
+  {
+    // server-initiated, so it takes the trusted path and skips `can_subscribe`
+    Ok(send), Ok(entry), Ok(connection) -> {
+      entry.subscribe_trusted(client_id, connection.model, send)
       track_subscription(state, client_id, topic_id)
     }
-    _, _ -> state
+    _, _, _ -> state
   }
 }
 
@@ -877,6 +937,13 @@ fn handle_set_hook_logic(
   ServerState(..state, on_message_hook: hook)
 }
 
+fn handle_set_max_topics_logic(
+  state: ServerState(model, message),
+  maximum: Int,
+) -> ServerState(model, message) {
+  ServerState(..state, max_topics: maximum)
+}
+
 fn handle_set_topic_message_hook_logic(
   state: ServerState(model, message),
   hook: fn(message, String, String) -> Nil,
@@ -896,12 +963,14 @@ fn handle_subscribe_logic(
   client_id: String,
   topic_id: String,
 ) -> ServerState(model, message) {
-  case dict.get(state.clients, client_id) {
-    Error(_) -> state
-    Ok(send) ->
+  case dict.get(state.clients, client_id), dict.get(state.sessions, client_id) {
+    // no session means no connection context to authorise against, so skip
+    // rather than crash
+    Error(_), _ | _, Error(_) -> state
+    Ok(send), Ok(connection) ->
       case find_or_create_topic(state, topic_id) {
         #(state, option.Some(entry)) -> {
-          entry.subscribe(client_id, send)
+          entry.subscribe(client_id, connection.model, send)
           track_subscription(state, client_id, topic_id)
         }
         #(state, option.None) -> {
@@ -953,13 +1022,27 @@ fn handle_unsubscribe_logic(
   untrack_subscription(state, client_id, topic_id)
 }
 
+/// Put an origin into the form used for the allowlist comparison. Scheme and
+/// host are case-insensitive so the whole value is lowercased, and one
+/// trailing '/' is dropped because some clients send `https://example.com/`.
+/// Nothing else is rewritten, so the literal 'null' origin an opaque or
+/// sandboxed document sends only ever matches an allowlist that names it
+/// verbatim.
+fn normalise_origin(origin: String) -> String {
+  let lowered = string.lowercase(origin)
+  case string.ends_with(lowered, "/") {
+    True -> string.drop_end(lowered, 1)
+    False -> lowered
+  }
+}
+
 fn reduce(
   event: InternalEvent(model, message),
   state: ServerState(model, message),
 ) -> actor_cell.Reduction(ServerState(model, message), Result(Nil, Nil)) {
   case event {
-    ClientConnected(client_id:, send:) ->
-      Continue(handle_connect_logic(state, client_id, send))
+    ClientConnected(client_id:, send:, session:) ->
+      Continue(handle_connect_logic(state, client_id, send, session))
 
     ClientDisconnected(client_id:) ->
       Continue(handle_disconnect_logic(state, client_id))
@@ -980,6 +1063,9 @@ fn reduce(
       Continue(handle_set_disconnect_hook_logic(state, hook))
 
     SetHook(hook:) -> Continue(handle_set_hook_logic(state, hook))
+
+    SetMaxTopics(maximum:) ->
+      Continue(handle_set_max_topics_logic(state, maximum))
 
     SetTopicMessageHook(hook:) ->
       Continue(handle_set_topic_message_hook_logic(state, hook))
@@ -1039,6 +1125,27 @@ fn untrack_subscription(
           set.delete(topics, topic_id),
         )
       ServerState(..state, client_topics:)
+    }
+  }
+}
+
+/// Run the configured origin policy over a request's `Origin` header.
+/// `AnyOrigin` accepts everything, including a missing header. An allowlist
+/// compares normalised values exactly and refuses a missing header outright,
+/// since a request with no origin cannot be attributed to a page.
+fn validate_origin(
+  origins: Origins,
+  origin: Option(String),
+) -> Result(Nil, ConnectError) {
+  case origins, origin {
+    AnyOrigin, _ -> Ok(Nil)
+    AllowedOrigins(_), option.None -> Error(OriginMissing)
+    AllowedOrigins(allowed), option.Some(value) -> {
+      let candidate = normalise_origin(value)
+      case list.any(allowed, fn(one) { normalise_origin(one) == candidate }) {
+        True -> Ok(Nil)
+        False -> Error(OriginNotAllowed(origin: value))
+      }
     }
   }
 }

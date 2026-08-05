@@ -273,7 +273,7 @@ pub fn decode_theme() -> decode.Decoder(Theme) {
 
 pub fn serialiser() -> transport.Serialiser(Model, Message) {
   let _ = register_types()
-  transport.automatic()
+  transport.automatic(format: transport.Json, max_decode_depth: 128)
 }
 
 @target(javascript)

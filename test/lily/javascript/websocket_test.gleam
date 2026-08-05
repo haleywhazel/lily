@@ -42,31 +42,38 @@ fn new_runtime() -> client.Runtime(Model, Message) {
 // =============================================================================
 
 @target(javascript)
-pub fn websocket_config_has_default_jitter_ratio_test() {
-  get_jitter_ratio(transport.websocket(url: "ws://localhost/ws"))
-  |> should.equal(0.25)
+pub fn websocket_default_backoff_connects_test() {
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let runtime = new_runtime()
+  let connector =
+    transport.websocket(
+      url: "ws://localhost/ws",
+      reconnect: transport.DefaultBackoff,
+    )
+  let _r = client.connect(runtime, with: connector)
+  is_null(test_support.get_last_websocket())
+  |> should.be_false
 }
 
 @target(javascript)
-pub fn websocket_config_has_default_multiplier_test() {
-  get_multiplier(transport.websocket(url: "ws://localhost/ws"))
-  |> should.equal(2.0)
-}
-
-@target(javascript)
-pub fn websocket_reconnect_jitter_ratio_sets_value_test() {
-  transport.websocket(url: "ws://localhost/ws")
-  |> transport.reconnect_jitter_ratio(0.1)
-  |> get_jitter_ratio
-  |> should.equal(0.1)
-}
-
-@target(javascript)
-pub fn websocket_reconnect_multiplier_sets_value_test() {
-  transport.websocket(url: "ws://localhost/ws")
-  |> transport.reconnect_multiplier(1.5)
-  |> get_multiplier
-  |> should.equal(1.5)
+pub fn websocket_custom_backoff_connects_test() {
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let runtime = new_runtime()
+  let connector =
+    transport.websocket(
+      url: "ws://localhost/ws",
+      reconnect: transport.Backoff(
+        base_milliseconds: 1000,
+        max_milliseconds: 30_000,
+        jitter_ratio: 0.1,
+        multiplier: 1.5,
+      ),
+    )
+  let _r = client.connect(runtime, with: connector)
+  is_null(test_support.get_last_websocket())
+  |> should.be_false
 }
 
 // =============================================================================
@@ -74,19 +81,22 @@ pub fn websocket_reconnect_multiplier_sets_value_test() {
 // =============================================================================
 
 @target(javascript)
-pub fn websocket_connect_creates_websocket_test() {
+pub fn websocket_creates_websocket_test() {
   test_support.reset_dom()
   test_support.reset_mocks()
   let runtime = new_runtime()
   let connector =
-    transport.websocket(url: "ws://localhost/ws") |> transport.websocket_connect
+    transport.websocket(
+      url: "ws://localhost/ws",
+      reconnect: transport.DefaultBackoff,
+    )
   let _r = client.connect(runtime, with: connector)
   is_null(test_support.get_last_websocket())
   |> should.be_false
 }
 
 @target(javascript)
-pub fn websocket_connect_calls_on_reconnect_test() {
+pub fn websocket_calls_on_reconnect_test() {
   test_support.reset_dom()
   test_support.reset_mocks()
   let runtime = new_runtime()
@@ -103,7 +113,7 @@ pub fn websocket_connect_calls_on_reconnect_test() {
 }
 
 @target(javascript)
-pub fn websocket_connect_calls_on_disconnect_test() {
+pub fn websocket_calls_on_disconnect_test() {
   test_support.reset_dom()
   test_support.reset_mocks()
   let runtime = new_runtime()
@@ -120,13 +130,16 @@ pub fn websocket_connect_calls_on_disconnect_test() {
 }
 
 @target(javascript)
-pub fn websocket_connect_receives_messages_test() {
+pub fn websocket_receives_messages_test() {
   test_support.reset_dom()
   test_support.reset_mocks()
   let runtime = new_runtime()
   // Use the real websocket connector and trigger open on the mock WS
   let connector =
-    transport.websocket(url: "ws://localhost/ws") |> transport.websocket_connect
+    transport.websocket(
+      url: "ws://localhost/ws",
+      reconnect: transport.DefaultBackoff,
+    )
   let _r = client.connect(runtime, with: connector)
   let ws = test_support.get_last_websocket()
   test_support.trigger_websocket_open(ws)
@@ -147,7 +160,10 @@ pub fn websocket_send_when_open_sends_directly_test() {
   test_support.reset_mocks()
   let runtime = new_runtime()
   let connector =
-    transport.websocket(url: "ws://localhost/ws") |> transport.websocket_connect
+    transport.websocket(
+      url: "ws://localhost/ws",
+      reconnect: transport.DefaultBackoff,
+    )
   let _r = client.connect(runtime, with: connector)
   let ws = test_support.get_last_websocket()
   test_support.trigger_websocket_open(ws)
@@ -163,7 +179,10 @@ pub fn websocket_send_when_closed_queues_to_sessionstorage_test() {
   test_support.reset_mocks()
   let runtime = new_runtime()
   let connector =
-    transport.websocket(url: "ws://localhost/ws") |> transport.websocket_connect
+    transport.websocket(
+      url: "ws://localhost/ws",
+      reconnect: transport.DefaultBackoff,
+    )
   let _r = client.connect(runtime, with: connector)
   // Do NOT open the WS, remains in CONNECTING state
   // Dispatch a message, should be queued in sessionStorage
@@ -188,7 +207,10 @@ pub fn websocket_flush_pending_on_reconnect_test() {
   )
   let runtime = new_runtime()
   let connector =
-    transport.websocket(url: "ws://localhost/ws") |> transport.websocket_connect
+    transport.websocket(
+      url: "ws://localhost/ws",
+      reconnect: transport.DefaultBackoff,
+    )
   let _r = client.connect(runtime, with: connector)
   let ws = test_support.get_last_websocket()
   test_support.trigger_websocket_open(ws)
@@ -205,16 +227,4 @@ pub fn websocket_flush_pending_on_reconnect_test() {
 @external(javascript, "./websocket_test.ffi.mjs", "isNull")
 fn is_null(_value: dynamic.Dynamic) -> Bool {
   False
-}
-
-@target(javascript)
-@external(javascript, "./websocket_test.ffi.mjs", "getJitterRatio")
-fn get_jitter_ratio(_config: transport.WebSocketConfig) -> Float {
-  0.0
-}
-
-@target(javascript)
-@external(javascript, "./websocket_test.ffi.mjs", "getMultiplier")
-fn get_multiplier(_config: transport.WebSocketConfig) -> Float {
-  0.0
 }

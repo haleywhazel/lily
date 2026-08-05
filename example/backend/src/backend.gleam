@@ -1,3 +1,4 @@
+import gleam/bytes_tree
 import gleam/erlang/process
 import gleam/http/request
 import gleam/http/response
@@ -19,12 +20,13 @@ pub fn main() {
   logging.set_level(logging.Info)
 
   let assert Ok(server) =
-    server.new(
+    server.start(
       initial: shared.initial_model(),
       serialiser: shared.serialiser(),
       wiring: shared.wiring(),
+      // TODO: add your production origin here.
+      origins: server.AllowedOrigins(["http://localhost:8080"]),
     )
-    |> server.start
 
   server.on_message(server, fn(message, _model, _client_id) {
     logging.auto_log(logging.Info, message)
@@ -95,16 +97,30 @@ fn handle_websocket(
   request: request.Request(Connection),
   server: server.Server(shared.Model, shared.Message),
 ) -> response.Response(ResponseData) {
-  mist.websocket(
-    request:,
-    handler: handle_ws_message,
-    on_init: fn(_connection) { ws_init(server) },
-    on_close: fn(state) { ws_close(state) },
-  )
+  // Refuse the upgrade outright when the origin is not allowed. A
+  // WebSocket handshake is not subject to CORS and still carries
+  // cookies, so this is what stops a cross-site socket.
+  let origin = request.get_header(request, "origin") |> option.from_result
+  case server.check_origin(server, origin:) {
+    Error(_) -> forbidden()
+    Ok(Nil) ->
+      mist.websocket(
+        request:,
+        handler: handle_ws_message,
+        on_init: fn(_connection) { ws_init(server, origin) },
+        on_close: fn(state) { ws_close(state) },
+      )
+  }
+}
+
+fn forbidden() -> response.Response(ResponseData) {
+  response.new(403)
+  |> response.set_body(mist.Bytes(bytes_tree.new()))
 }
 
 fn ws_init(
   server: server.Server(shared.Model, shared.Message),
+  origin: Option(String),
 ) -> #(WsState, Option(process.Selector(OutgoingMessage))) {
   let client_id = server.generate_client_id()
   let outgoing_subject = process.new_subject()
@@ -112,7 +128,8 @@ fn ws_init(
     process.send(outgoing_subject, OutgoingMessage(bytes:))
   }
 
-  server.connect(server, client_id:, send:)
+  let assert Ok(Nil) =
+    server.connect(server, client_id:, origin:, send:, session: [])
 
   let selector =
     process.new_selector()

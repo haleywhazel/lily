@@ -13,14 +13,13 @@
 //// - Serialisation: [`Serialiser`](#Serialiser) with automatic
 ////   ([`automatic`](#automatic)) and custom ([`custom_json`](#custom_json),
 ////   [`custom_binary`](#custom_binary)) variants.
-//// - WebSocket transport: [`websocket`](#websocket) config builder and
-////   [`websocket_connect`](#websocket_connect) connector, with automatic
-////   reconnection and offline queueing.
-//// - HTTP/SSE transport: [`http`](#http) config builder and
-////   [`http_connect`](#http_connect) connector using EventSource + POST.
+//// - WebSocket transport: the [`websocket`](#websocket) connector, with
+////   automatic reconnection and offline queueing.
+//// - HTTP/SSE transport: the [`http_connect`](#http_connect) connector using
+////   EventSource + POST.
 ////
 //// For most apps, use [`transport.automatic`](#automatic) for
-//// zero-configuration serialisation, then pick a transport. WebSockets
+//// serialisation, then pick a transport. WebSockets
 //// suit most cases, although switch to HTTP if corporate firewalls block them.
 ////
 //// ```gleam
@@ -31,13 +30,17 @@
 ////   let runtime = client.start(
 ////     app_store,
 ////     wiring: shared.wiring(),
-////     serialiser: transport.automatic(),
+////     serialiser: transport.automatic(
+////       format: transport.Json,
+////       max_decode_depth: 128,
+////     ),
 ////   )
 ////
 ////   client.connect(runtime,
-////     with: transport.websocket(url: "ws://localhost:8080/ws")
-////       |> transport.reconnect_base_milliseconds(1000)
-////       |> transport.websocket_connect,
+////     with: transport.websocket(
+////       url: "ws://localhost:8080/ws",
+////       reconnect: transport.DefaultBackoff,
+////     ),
 ////   )
 //// }
 //// ```
@@ -46,20 +49,23 @@
 ////
 //// ```gleam
 //// client.connect(runtime,
-////   with: transport.http(
+////   with: transport.http_connect(
 ////     post_url: "/api/messages",
 ////     events_url: "/api/events",
-////   ) |> transport.http_connect,
+////     flush_batch_size: 10,
+////   ),
 //// )
 //// ```
 ////
-//// `automatic()` defaults to JSON so frames are more easily debuggable within
-//// DevTools. You can (and probably should) use MessagePack for production
-//// for smaller transport packages with
-//// [`transport.use_message_pack`](#use_message_pack).
+//// JSON frames are more easily debuggable within DevTools. You can (and
+//// probably should) use MessagePack for production for smaller transport
+//// packages.
 ////
 //// ```gleam
-//// transport.automatic() |> transport.use_message_pack()
+//// transport.automatic(
+////   format: transport.MessagePack,
+////   max_decode_depth: 128,
+//// )
 //// ```
 ////
 //// The automatic serialiser uses positional encoding:
@@ -82,7 +88,7 @@
 //// // my_shared.gleam
 //// pub fn serialiser() -> transport.Serialiser(Model, Message) {
 ////   let _ = register_types()
-////   transport.automatic()
+////   transport.automatic(format: transport.Json, max_decode_depth: 128)
 //// }
 ////
 //// @target(javascript)
@@ -133,12 +139,26 @@ import lily/internal/reflection
 // PUBLIC TYPES
 // =============================================================================
 
-/// Opaque transport connector. Built by
-/// [`websocket_connect`](#websocket_connect) and
+/// Opaque transport connector. Built by [`websocket`](#websocket) and
 /// [`http_connect`](#http_connect), passed to
 /// [`client.connect`](./client.html#connect).
 pub opaque type Connector {
   Connector(connect: fn(Handler) -> Transport)
+}
+
+/// Wire format the [`automatic`](#automatic) serialiser encodes frames in.
+///
+/// ```gleam
+/// transport.automatic(format: transport.Json, max_decode_depth: 128)
+/// ```
+pub type Format {
+  /// Text frames, readable in browser DevTools, the friendlier choice while
+  /// developing.
+  Json
+
+  /// Compact binary frames, smaller and faster, the friendlier choice in
+  /// production.
+  MessagePack
 }
 
 /// Callbacks the runtime provides to the transport. `on_receive` fires on a
@@ -151,13 +171,6 @@ pub type Handler {
     on_reconnect: fn() -> Nil,
     on_disconnect: fn() -> Nil,
   )
-}
-
-@target(javascript)
-/// HTTP/SSE connection config. A POST URL for client-to-server messages and an
-/// SSE events URL for server-to-client.
-pub opaque type HttpConfig {
-  HttpConfig(post_url: String, events_url: String, flush_batch_size: Int)
 }
 
 /// Wire-format envelope between client and server. Sequence numbers are
@@ -232,17 +245,53 @@ pub type Protocol(model, message) {
   Version(hash: String)
 }
 
+/// How the WebSocket connector waits between reconnection attempts.
+///
+/// ```gleam
+/// transport.websocket(
+///   url: "ws://localhost:8080/ws",
+///   reconnect: transport.DefaultBackoff,
+/// )
+/// ```
+pub type Reconnect {
+  /// Exponential backoff with the built-in settings, suitable for most apps.
+  /// Equivalent to `Backoff(1000, 30_000, 0.25, 2.0)`.
+  DefaultBackoff
+
+  /// Tuned exponential backoff. `base_milliseconds` is the first delay,
+  /// multiplied by `multiplier` after each failed attempt and capped at
+  /// `max_milliseconds`. `jitter_ratio` randomises each delay by plus or minus
+  /// that fraction, between 0.0 (none) and 1.0 (full), so a mass disconnect
+  /// does not stampede the server.
+  ///
+  /// ```gleam
+  /// transport.websocket(
+  ///   url: "ws://localhost:8080/ws",
+  ///   reconnect: transport.Backoff(
+  ///     base_milliseconds: 2000,
+  ///     max_milliseconds: 60_000,
+  ///     jitter_ratio: 0.25,
+  ///     multiplier: 2.0,
+  ///   ),
+  /// )
+  /// ```
+  Backoff(
+    base_milliseconds: Int,
+    max_milliseconds: Int,
+    jitter_ratio: Float,
+    multiplier: Float,
+  )
+}
+
 /// Serialises `Protocol` values to and from bytes. `Auto` uses positional
 /// encoding, works for any Gleam custom type without config, its `format`
-/// field selecting JSON or MessagePack at runtime. `CustomJson` and
-/// `CustomBinary` carry user-supplied codecs at a fixed format.
+/// field selecting JSON or MessagePack. `CustomJson` and `CustomBinary` carry
+/// user-supplied codecs at a fixed format.
 ///
 /// Construct via [`automatic`](#automatic), [`custom_json`](#custom_json), or
-/// [`custom_binary`](#custom_binary). Toggle the auto format via
-/// [`use_json`](#use_json) and [`use_message_pack`](#use_message_pack), no-ops
-/// on custom serialisers.
+/// [`custom_binary`](#custom_binary).
 pub opaque type Serialiser(model, message) {
-  Auto(format: AutoFormat, codec: BinaryCodec(model, message))
+  Auto(format: Format, codec: BinaryCodec(model, message))
   CustomJson(
     encode_message: fn(message) -> Json,
     decode_message: decode.Decoder(message),
@@ -261,36 +310,16 @@ pub type Target {
 }
 
 /// Transport handle returned by a [`Connector`](#Connector). Carries `send`
-/// and `close`. Constructed by [`websocket_connect`](#websocket_connect) and
+/// and `close`. Constructed by [`websocket`](#websocket) and
 /// [`http_connect`](#http_connect), not user-facing.
 @internal
 pub opaque type Transport {
   Transport(send: fn(BitArray) -> Nil, close: fn() -> Nil)
 }
 
-@target(javascript)
-/// WebSocket connection config. Use the builder functions to customise
-/// reconnection.
-pub opaque type WebSocketConfig {
-  WebSocketConfig(
-    url: String,
-    reconnect_base_milliseconds: Int,
-    reconnect_max_milliseconds: Int,
-    reconnect_jitter_ratio: Float,
-    reconnect_multiplier: Float,
-  )
-}
-
 // =============================================================================
 // PRIVATE TYPES
 // =============================================================================
-
-/// Format selector for the [`Auto`](#Serialiser) variant. Toggled by
-/// [`use_json`](#use_json) and [`use_message_pack`](#use_message_pack).
-type AutoFormat {
-  AutoJson
-  AutoMessagePack
-}
 
 type BinaryCodec(model, message) {
   BinaryCodec(
@@ -323,17 +352,13 @@ type WsHandle
 // PUBLIC FUNCTIONS
 // =============================================================================
 
-/// Create an automatic serialiser. Uses JSON by default.
-///
-/// Switch to MessagePack for production (smaller, faster binary frames)
-/// with [`transport.use_message_pack`](#use_message_pack):
+/// Create an automatic serialiser. `format` picks the wire encoding, and
+/// `max_decode_depth` caps how deeply the MessagePack decoder will nest so a
+/// hostile frame can't blow the stack. 128 is generous, and the depth is
+/// ignored under `Json`.
 ///
 /// ```gleam
-/// // dev (JSON)
-/// transport.automatic()
-///
-/// // prod (MessagePack)
-/// transport.automatic() |> transport.use_message_pack()
+/// transport.automatic(format: transport.MessagePack, max_decode_depth: 128)
 /// ```
 ///
 /// On JavaScript, register constructors before connecting, else the decoder
@@ -373,11 +398,11 @@ type WsHandle
 ///
 /// Then provide custom encode/decode functions that base64-encode the inner
 /// field.
-pub fn automatic() -> Serialiser(model, message) {
-  Auto(
-    format: AutoJson,
-    codec: auto_binary_codec(message_pack.default_max_depth),
-  )
+pub fn automatic(
+  format format: Format,
+  max_decode_depth max_decode_depth: Int,
+) -> Serialiser(model, message) {
+  Auto(format:, codec: auto_binary_codec(max_decode_depth))
 }
 
 /// Close the transport connection. Cleans up resources and stops reconnecting.
@@ -387,28 +412,30 @@ pub fn close(transport: Transport) -> Nil {
 }
 
 /// Create a serialiser from explicit binary encode/decode functions, for a
-/// custom binary codec (MessagePack, CBOR, any binary format). Format fixed to
-/// binary, the [`use_json`](#use_json) and
-/// [`use_message_pack`](#use_message_pack) toggles are no-ops here.
+/// custom binary codec (MessagePack, CBOR, any binary format). The format is
+/// fixed to binary.
+///
+/// `max_decode_depth` bounds how deeply the MessagePack envelope around your
+/// payloads may nest, capping stack use on a hostile frame. 128 is generous.
 pub fn custom_binary(
   encode_message encode_message: fn(message) -> BitArray,
   decode_message decode_message: fn(BitArray) -> Result(message, Nil),
   encode_model encode_model: fn(model) -> BitArray,
   decode_model decode_model: fn(BitArray) -> Result(model, Nil),
+  max_decode_depth max_decode_depth: Int,
 ) -> Serialiser(model, message) {
   CustomBinary(BinaryCodec(
     encode_message:,
     decode_message:,
     encode_model:,
     decode_model:,
-    max_decode_depth: message_pack.default_max_depth,
+    max_decode_depth:,
   ))
 }
 
 /// Create a serialiser from explicit JSON encode/decode functions, when the
 /// auto format is not suitable (third-party APIs, human-readable JSON,
-/// backwards compatibility). Format fixed to JSON, the [`use_json`](#use_json)
-/// and [`use_message_pack`](#use_message_pack) toggles are no-ops here.
+/// backwards compatibility). The format is fixed to JSON.
 pub fn custom_json(
   encode_message encode_message: fn(message) -> Json,
   decode_message decode_message: decode.Decoder(message),
@@ -424,13 +451,13 @@ pub fn decode(
   serialiser serialiser: Serialiser(model, message),
 ) -> Result(Protocol(model, message), Nil) {
   case serialiser {
-    Auto(format: AutoJson, ..) ->
+    Auto(format: Json, ..) ->
       decode_json(
         bytes,
         decode.new_primitive_decoder("Auto", ffi_auto_decode),
         decode.new_primitive_decoder("Auto", ffi_auto_decode),
       )
-    Auto(format: AutoMessagePack, codec:) ->
+    Auto(format: MessagePack, codec:) ->
       decode_message_pack_protocol(bytes, codec)
     CustomJson(decode_message:, decode_model:, ..) ->
       decode_json(bytes, decode_message, decode_model)
@@ -439,17 +466,16 @@ pub fn decode(
 }
 
 /// Encode a `Protocol` into bytes. MessagePack for a binary serialiser
-/// (`custom_binary`, or [`automatic`](#automatic) after
-/// [`use_message_pack`](#use_message_pack)), JSON otherwise.
-/// [`automatic`](#automatic) defaults to JSON.
+/// (`custom_binary`, or [`automatic`](#automatic) with the `MessagePack`
+/// format), JSON otherwise.
 pub fn encode(
   protocol: Protocol(model, message),
   serialiser serialiser: Serialiser(model, message),
 ) -> BitArray {
   case serialiser {
-    Auto(format: AutoJson, ..) ->
+    Auto(format: Json, ..) ->
       encode_json(protocol, ffi_auto_encode, ffi_auto_encode)
-    Auto(format: AutoMessagePack, codec:) ->
+    Auto(format: MessagePack, codec:) ->
       encode_message_pack_protocol(protocol, codec)
     CustomJson(encode_message:, encode_model:, ..) ->
       encode_json(protocol, encode_message, encode_model)
@@ -464,7 +490,8 @@ pub fn encode(
 /// state, saving a round-trip on first paint. A fixed initial state baked into
 /// the page, not per-request data.
 ///
-/// Always JSON regardless of the format toggle, since binary MessagePack isn't
+/// Always JSON regardless of the serialiser format, since binary MessagePack
+/// isn't
 /// safe to inline in HTML. A `CustomBinary` serialiser produces a
 /// base16-encoded payload, so prefer `automatic` or `custom_json` here.
 ///
@@ -489,7 +516,7 @@ pub fn encode_initial_snapshot(
   // are base16-encoded to keep the payload non-empty and match the documented
   // format.
   let #(json_serialiser, binary) = case serialiser {
-    Auto(_, codec) -> #(Auto(AutoJson, codec), False)
+    Auto(_, codec) -> #(Auto(Json, codec), False)
     CustomJson(_, _, _, _) -> #(serialiser, False)
     CustomBinary(_) -> #(serialiser, True)
   }
@@ -504,52 +531,31 @@ pub fn encode_initial_snapshot(
 }
 
 @target(javascript)
-/// Max queued messages POSTed in parallel on HTTP/SSE reconnect. Lower limits
-/// concurrent POSTs during a reconnect burst, higher flushes faster. Default
-/// 10.
-pub fn flush_batch_size(config: HttpConfig, size: Int) -> HttpConfig {
-  HttpConfig(..config, flush_batch_size: size)
-}
-
-@target(javascript)
-/// Create an HTTP/SSE transport configuration. `post_url` sends messages to
-/// the server, `events_url` receives Server-Sent Events.
-///
-/// ```gleam
-/// transport.http(
-///   post_url: "/api/messages",
-///   events_url: "/api/events",
-/// )
-/// ```
-pub fn http(
-  post_url post_url: String,
-  events_url events_url: String,
-) -> HttpConfig {
-  HttpConfig(post_url: post_url, events_url: events_url, flush_batch_size: 10)
-}
-
-@target(javascript)
 /// Returns a connector establishing an HTTP/SSE connection. Pass to
-/// `client.connect`.
+/// `client.connect`. `post_url` sends messages to the server, `events_url`
+/// receives Server-Sent Events.
+///
+/// `flush_batch_size` is the most queued messages POSTed in parallel on
+/// reconnect. Lower limits concurrent POSTs during a burst, higher flushes
+/// faster. 10 is a reasonable starting point.
 ///
 /// ```gleam
 /// client.connect(runtime,
-///   with: transport.http(
+///   with: transport.http_connect(
 ///     post_url: "/api/messages",
 ///     events_url: "/api/events",
-///   ) |> transport.http_connect,
-///   serialiser: transport.automatic(),
+///     flush_batch_size: 10,
+///   ),
 /// )
 /// ```
-pub fn http_connect(config: HttpConfig) -> Connector {
+pub fn http_connect(
+  post_url post_url: String,
+  events_url events_url: String,
+  flush_batch_size flush_batch_size: Int,
+) -> Connector {
   Connector(connect: fn(handler: Handler) {
     let handle =
-      ffi_http_connect(
-        config.post_url,
-        config.events_url,
-        config.flush_batch_size,
-        handler,
-      )
+      ffi_http_connect(post_url, events_url, flush_batch_size, handler)
     new(send: fn(bytes) { ffi_http_send(handle, bytes) }, close: fn() {
       ffi_http_close(handle)
     })
@@ -557,32 +563,11 @@ pub fn http_connect(config: HttpConfig) -> Connector {
 }
 
 /// Wrap a `connect` function as a [`Connector`](#Connector). Used by
-/// [`websocket_connect`](#websocket_connect), [`http_connect`](#http_connect),
-/// and transport fakes in tests.
+/// [`websocket`](#websocket), [`http_connect`](#http_connect), and transport
+/// fakes in tests.
 @internal
 pub fn make_connector(connect: fn(Handler) -> Transport) -> Connector {
   Connector(connect:)
-}
-
-/// Max nesting depth the MessagePack decoder will parse, bounding stack use on
-/// hostile deeply-nested frames. Default is generous, raise it only if your
-/// model legitimately nests beyond it. No-op on `custom_json`.
-///
-/// ```gleam
-/// transport.automatic()
-/// |> transport.use_message_pack()
-/// |> transport.max_decode_depth(256)
-/// ```
-pub fn max_decode_depth(
-  serialiser: Serialiser(model, message),
-  depth: Int,
-) -> Serialiser(model, message) {
-  case serialiser {
-    Auto(format:, ..) -> Auto(format:, codec: auto_binary_codec(depth))
-    CustomBinary(codec:) ->
-      CustomBinary(codec: BinaryCodec(..codec, max_decode_depth: depth))
-    CustomJson(..) -> serialiser
-  }
 }
 
 /// Create a [`Transport`](#Transport) from send and close functions. Used by
@@ -594,49 +579,6 @@ pub fn new(
   close close: fn() -> Nil,
 ) -> Transport {
   Transport(send:, close:)
-}
-
-@target(javascript)
-/// Base delay in milliseconds for WebSocket reconnection. Doubles on each
-/// failed attempt up to the maximum.
-pub fn reconnect_base_milliseconds(
-  config: WebSocketConfig,
-  milliseconds: Int,
-) -> WebSocketConfig {
-  WebSocketConfig(..config, reconnect_base_milliseconds: milliseconds)
-}
-
-@target(javascript)
-/// Jitter ratio applied to each WebSocket reconnection delay. `0.25` gives
-/// plus or minus 25% randomisation, spreading reconnects after a mass
-/// disconnect so the server isn't stampeded. Between 0.0 (none) and 1.0
-/// (full). Default 0.25.
-pub fn reconnect_jitter_ratio(
-  config: WebSocketConfig,
-  ratio: Float,
-) -> WebSocketConfig {
-  WebSocketConfig(..config, reconnect_jitter_ratio: ratio)
-}
-
-@target(javascript)
-/// Max delay in milliseconds between WebSocket reconnection attempts.
-pub fn reconnect_max_milliseconds(
-  config: WebSocketConfig,
-  milliseconds: Int,
-) -> WebSocketConfig {
-  WebSocketConfig(..config, reconnect_max_milliseconds: milliseconds)
-}
-
-@target(javascript)
-/// Backoff multiplier for WebSocket reconnection. Delay after each failed
-/// attempt is multiplied by this, up to
-/// [`reconnect_max_milliseconds`](#reconnect_max_milliseconds). Default 2.0
-/// (standard exponential backoff).
-pub fn reconnect_multiplier(
-  config: WebSocketConfig,
-  multiplier: Float,
-) -> WebSocketConfig {
-  WebSocketConfig(..config, reconnect_multiplier: multiplier)
 }
 
 /// Run a connector with the runtime's handler. Used by
@@ -689,63 +631,39 @@ pub fn url_from_current_location(path path: String) -> String {
   ffi_ws_url_from_current_location(path)
 }
 
-/// Switch the serialiser to JSON encoding. Only meaningful on
-/// [`automatic`](#automatic), no-op on `custom_json` or `custom_binary`.
-pub fn use_json(
-  serialiser: Serialiser(model, message),
-) -> Serialiser(model, message) {
-  case serialiser {
-    Auto(format: AutoMessagePack, codec:) -> Auto(format: AutoJson, codec:)
-    Auto(..) | CustomJson(..) | CustomBinary(..) -> serialiser
-  }
-}
-
-/// Switch the serialiser back to MessagePack after [`use_json`](#use_json).
-/// Only meaningful on [`automatic`](#automatic), no-op on `custom_json` or
-/// `custom_binary`.
-pub fn use_message_pack(
-  serialiser: Serialiser(model, message),
-) -> Serialiser(model, message) {
-  case serialiser {
-    Auto(format: AutoJson, codec:) -> Auto(format: AutoMessagePack, codec:)
-    Auto(..) | CustomJson(..) | CustomBinary(..) -> serialiser
-  }
-}
-
 @target(javascript)
-/// Create a WebSocket configuration for the given URL. Defaults 1000ms base
-/// delay, 30000ms maximum (exponential backoff).
-pub fn websocket(url url: String) -> WebSocketConfig {
-  WebSocketConfig(
-    url: url,
-    reconnect_base_milliseconds: 1000,
-    reconnect_max_milliseconds: 30_000,
-    reconnect_jitter_ratio: 0.25,
-    reconnect_multiplier: 2.0,
-  )
-}
-
-@target(javascript)
-/// Returns a connector establishing a WebSocket connection. Pass to
-/// `client.connect`.
+/// Returns a connector establishing a WebSocket connection to `url`. Pass to
+/// `client.connect`. `reconnect` controls the delay between reconnection
+/// attempts, see [`Reconnect`](#Reconnect).
 ///
 /// ```gleam
 /// client.connect(runtime,
-///   with: transport.websocket(url: "ws://localhost:8080/ws")
-///     |> transport.reconnect_base_milliseconds(2000)
-///     |> transport.websocket_connect,
-///   serialiser: transport.automatic(),
+///   with: transport.websocket(
+///     url: "ws://localhost:8080/ws",
+///     reconnect: transport.DefaultBackoff,
+///   ),
 /// )
 /// ```
-pub fn websocket_connect(config: WebSocketConfig) -> Connector {
+pub fn websocket(url url: String, reconnect reconnect: Reconnect) -> Connector {
+  let #(base_milliseconds, max_milliseconds, jitter_ratio, multiplier) = case
+    reconnect
+  {
+    DefaultBackoff -> #(1000, 30_000, 0.25, 2.0)
+    Backoff(base_milliseconds:, max_milliseconds:, jitter_ratio:, multiplier:) -> #(
+      base_milliseconds,
+      max_milliseconds,
+      jitter_ratio,
+      multiplier,
+    )
+  }
   Connector(connect: fn(handler: Handler) {
     let handle =
       ffi_ws_connect(
-        config.url,
-        config.reconnect_base_milliseconds,
-        config.reconnect_max_milliseconds,
-        config.reconnect_jitter_ratio,
-        config.reconnect_multiplier,
+        url,
+        base_milliseconds,
+        max_milliseconds,
+        jitter_ratio,
+        multiplier,
         handler,
       )
     new(send: fn(bytes) { ffi_ws_send(handle, bytes) }, close: fn() {

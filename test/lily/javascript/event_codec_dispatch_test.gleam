@@ -44,7 +44,7 @@ pub fn slotted_encoded_message_dispatches_via_root_decoder_test() {
         event: event.click,
         selector: "#app",
         decoder: event.decode_message,
-        options: event.options(),
+        options: event.defaults,
       )
     },
   )
@@ -82,7 +82,7 @@ pub fn slotted_value_carrying_message_dispatches_via_root_decoder_test() {
         event: event.click,
         selector: "#app",
         decoder: event.decode_message,
-        options: event.options(),
+        options: event.defaults,
       )
     },
   )

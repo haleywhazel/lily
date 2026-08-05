@@ -262,12 +262,14 @@ pub fn topic_subscribe_to_unknown_topic_sends_rejected_test() {
 // =============================================================================
 
 @target(javascript)
-pub fn topic_with_can_subscribe_false_sends_rejected_test() {
+pub fn topic_can_subscribe_false_sends_rejected_test() {
   let srv = test_support.new_server()
   let assert Ok(t) = topic.new(srv, id: "private")
   let _ =
     t
-    |> topic.with_can_subscribe(fn(_client_id, _topic_id) { False })
+    |> topic.can_subscribe(predicate: fn(_client_id, _topic_id, _session) {
+      False
+    })
   let drain1 = test_support.connect_client(srv, "c1")
   server.incoming(srv, client_id: "c1", bytes: encode_subscribe("private"))
   drain1()
@@ -277,17 +279,56 @@ pub fn topic_with_can_subscribe_false_sends_rejected_test() {
   ])
 }
 
+@target(javascript)
+/// Server-side `topic.subscribe` is trusted: it bypasses `can_subscribe`,
+/// which only gates client-initiated Subscribe frames.
+pub fn topic_can_subscribe_does_not_gate_server_side_subscribe_test() {
+  let srv = test_support.new_server()
+  let assert Ok(t) = topic.new(srv, id: "private")
+  let t =
+    t
+    |> topic.can_subscribe(predicate: fn(_client_id, _topic_id, _session) {
+      False
+    })
+  let drain1 = test_support.connect_client(srv, "c1")
+  // The server puts c1 into the topic itself, no Subscribe frame involved.
+  topic.subscribe(t, "c1")
+  topic.broadcast(t, Increment)
+  drain1()
+  |> list.map(decode)
+  |> should.equal([transport.Push(topic_id: "private", payload: Increment)])
+}
+
+@target(javascript)
+/// The same topic still refuses a client-initiated subscribe.
+pub fn topic_can_subscribe_still_rejects_client_frame_after_trusted_subscribe_test() {
+  let srv = test_support.new_server()
+  let assert Ok(t) = topic.new(srv, id: "private")
+  let t =
+    t
+    |> topic.can_subscribe(predicate: fn(_client_id, _topic_id, _session) {
+      False
+    })
+  let _drain1 = test_support.connect_client(srv, "c1")
+  let drain2 = test_support.connect_client(srv, "c2")
+  topic.subscribe(t, "c1")
+  server.incoming(srv, client_id: "c2", bytes: encode_subscribe("private"))
+  drain2()
+  |> list.map(decode)
+  |> should.equal([transport.Rejected(topic_id: "private", reason: "denied")])
+}
+
 // =============================================================================
 // ON SUBSCRIBE / ON UNSUBSCRIBE
 // =============================================================================
 
 @target(javascript)
-pub fn topic_with_on_subscribe_broadcasts_hook_messages_test() {
+pub fn topic_on_subscribe_broadcasts_hook_messages_test() {
   let srv = test_support.new_server()
   let assert Ok(t) = topic.new(srv, id: "announce")
   let _ =
     t
-    |> topic.with_on_subscribe(fn(_client_id) { [Increment] })
+    |> topic.on_subscribe(fn(_client_id) { [Increment] })
   let drain1 = test_support.connect_client(srv, "c1")
   server.incoming(srv, client_id: "c1", bytes: encode_subscribe("announce"))
   drain1()
@@ -296,12 +337,12 @@ pub fn topic_with_on_subscribe_broadcasts_hook_messages_test() {
 }
 
 @target(javascript)
-pub fn topic_with_on_unsubscribe_broadcasts_hook_messages_test() {
+pub fn topic_on_unsubscribe_broadcasts_hook_messages_test() {
   let srv = test_support.new_server()
   let assert Ok(t) = topic.new(srv, id: "announce")
   let _ =
     t
-    |> topic.with_on_unsubscribe(fn(_client_id) { [Decrement] })
+    |> topic.on_unsubscribe(fn(_client_id) { [Decrement] })
   let drain1 = test_support.connect_client(srv, "c1")
   let drain2 = test_support.connect_client(srv, "c2")
   server.incoming(srv, client_id: "c1", bytes: encode_subscribe("announce"))

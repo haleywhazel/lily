@@ -106,10 +106,14 @@ import lily/transport.{type Target}
 /// holds them at their initial values and the client preserves them when
 /// applying a snapshot on reconnect.
 ///
+/// A single-variant type, so pattern matching gets the value back out.
+///
 /// ```gleam
 /// pub type Model {
 ///   Model(count: Int, theme: store.Local(String))
 /// }
+///
+/// let store.Local(theme) = model.theme
 /// ```
 pub type Local(a) {
   Local(a)
@@ -253,12 +257,6 @@ pub fn topic_kind(
 ) -> Wiring(model, message) {
   let config = make_kind_config(prefix, extract, update, field_get, field_set)
   Wiring(..wiring, kinds: [config, ..wiring.kinds])
-}
-
-/// Unwrap a [`Local`](#Local) field to get the inner value.
-pub fn unwrap_local(local: Local(a)) -> a {
-  let Local(value) = local
-  value
 }
 
 /// Create an empty wiring. Pipe through [`session`](#session),

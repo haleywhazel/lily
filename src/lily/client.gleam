@@ -35,8 +35,10 @@
 ////     decoder: parse_message,
 ////   )
 ////   |> client.connect(
-////     with: transport.websocket(url: "ws://localhost:8080/ws")
-////       |> transport.websocket_connect,
+////     with: transport.websocket(
+////       url: "ws://localhost:8080/ws",
+////       reconnect: transport.DefaultBackoff,
+////     ),
 ////   )
 ////   |> client.subscribe("chat")
 //// }
@@ -84,9 +86,8 @@
 ////
 //// Because the wire only ever carries messages, an offline client keeps
 //// working and catches up on reconnect. For state that should outlive a reload
-//// or a navigation, describe it once with
-//// [`session_persistence`](#session_persistence) plus
-//// [`session_field`](#session_field) and switch it on with
+//// or a navigation, describe each value with
+//// [`session_field`](#session_field) and switch the list on with
 //// [`attach_session`](#attach_session), each field is mirrored to
 //// localStorage. Model fields wrapped in [`store.Local`](./store.html#Local)
 //// stay client-only and are preserved when a reconnect snapshot lands.
@@ -120,8 +121,6 @@ import gleam/result
 @target(javascript)
 import gleam/uri.{type Uri}
 @target(javascript)
-import lily/internal/id
-@target(javascript)
 import lily/store.{type Store}
 @target(javascript)
 import lily/transport
@@ -131,20 +130,22 @@ import lily/transport
 // =============================================================================
 
 @target(javascript)
-/// Session persistence configuration, opaque.
-///
-/// - Build using [`client.session_persistence`](#session_persistence)
-/// - Add fields with [`client.session_field`](#session_field)
-/// - Attach to the runtime with [`client.attach_session`](#attach_session)
-pub opaque type Persistence(session) {
-  Persistence(fields: List(Field(session)))
-}
-
-@target(javascript)
 /// Opaque handle to a running Lily app. Runtimes are isolated, so multiple
 /// independent apps can share a page.
 pub opaque type Runtime(model, message) {
   Runtime(handle: RuntimeHandle)
+}
+
+@target(javascript)
+/// One persisted session field, built with
+/// [`session_field`](#session_field) and handed to
+/// [`attach_session`](#attach_session).
+pub opaque type SessionField(session) {
+  SessionField(
+    key: String,
+    get: fn(session) -> Json,
+    set: fn(session, Dynamic) -> Result(session, Nil),
+  )
 }
 
 // =============================================================================
@@ -157,35 +158,33 @@ pub opaque type Runtime(model, message) {
 /// it after `client.start`.
 ///
 /// ```gleam
-/// let persistence =
-///   client.session_persistence()
-///   |> client.session_field(
-///     key: "token",
-///     get: fn(session) { session.token },
-///     set: fn(session, value) { SessionData(..session, token: value) },
-///     encode: json.nullable(json.string),
-///     decoder: decode.optional(decode.string),
-///   )
-///
-/// client.start(app_store, shared.wiring())
+/// client.start(app_store, shared.wiring(), shared.serialiser())
 /// |> client.attach_session(
-///   persistence:,
+///   fields: [
+///     client.session_field(
+///       key: "token",
+///       get: fn(session) { session.token },
+///       set: fn(session, value) { SessionData(..session, token: value) },
+///       encode: json.nullable(json.string),
+///       decoder: decode.optional(decode.string),
+///     ),
+///   ],
 ///   get: fn(model) { model.session },
 ///   set: fn(model, session) { Model(..model, session: session) },
 /// )
 /// ```
 pub fn attach_session(
   runtime: Runtime(model, message),
-  persistence persistence: Persistence(session),
+  fields fields: List(SessionField(session)),
   get get: fn(model) -> session,
   set set: fn(model, session) -> model,
 ) -> Runtime(model, message) {
   let Runtime(handle) = runtime
   let current_model = get_model(handle)
-  let hydrated_session = hydrate_session(persistence, get(current_model))
+  let hydrated_session = hydrate_session(fields, get(current_model))
   let hydrated_model = set(current_model, hydrated_session)
   set_model(handle, hydrated_model)
-  set_session_config(handle, persistence, session_storage_prefix(), get, set)
+  set_session_config(handle, fields, session_storage_prefix(), get, set)
   runtime
 }
 
@@ -234,8 +233,8 @@ pub fn client_id(
 @target(javascript)
 /// Connect the runtime to a server over the given transport. The connector
 /// comes from a transport implementation, e.g.
-/// [`websocket_connect(config)`](./transport.html#websocket_connect) or
-/// [`http_connect(config)`](./transport.html#http_connect). Wires up the
+/// [`websocket`](./transport.html#websocket) or
+/// [`http_connect`](./transport.html#http_connect). Wires up the
 /// incoming-message and connection-status handlers, sending session messages
 /// as `SessionMessage` frames and routing topic messages by the wiring from
 /// [`client.start`](#start).
@@ -245,9 +244,15 @@ pub fn client_id(
 ///
 /// runtime
 /// |> client.connect(
-///   with: transport.websocket(url: "ws://localhost:8080/ws")
-///     |> transport.reconnect_base_milliseconds(2000)
-///     |> transport.websocket_connect,
+///   with: transport.websocket(
+///     url: "ws://localhost:8080/ws",
+///     reconnect: transport.Backoff(
+///       base_milliseconds: 2000,
+///       max_milliseconds: 30_000,
+///       jitter_ratio: 0.25,
+///       multiplier: 2.0,
+///     ),
+///   ),
 /// )
 /// ```
 pub fn connect(
@@ -310,8 +315,10 @@ pub fn connect(
 ///   Model(..model, connected: status)
 /// })
 /// |> client.connect(
-///   with: transport.websocket(url: "ws://localhost:8080/ws")
-///     |> transport.websocket_connect,
+///   with: transport.websocket(
+///     url: "ws://localhost:8080/ws",
+///     reconnect: transport.DefaultBackoff,
+///   ),
 /// )
 /// ```
 pub fn connection_status(
@@ -362,22 +369,6 @@ pub fn enable_hot_reload(
     hot_reload_guard_milliseconds,
   )
   runtime
-}
-
-@target(javascript)
-/// Generate a random 32-character hex string for a client-side session id.
-/// Each call returns a unique value from `crypto.getRandomValues`, safe to
-/// call at startup and store in the session model.
-///
-/// ```gleam
-/// let session_id = client.generate_session_id()
-/// let initial = shared.Model(
-///   session: shared.SessionState(..shared.initial_session(), session_id:),
-///   chat: shared.initial_chat(),
-/// )
-/// ```
-pub fn generate_session_id() -> String {
-  id.random_hex(session_id_bytes)
 }
 
 @target(javascript)
@@ -632,13 +623,13 @@ pub fn replace(runtime: Runtime(model, message), path path: String) -> Nil {
 }
 
 @target(javascript)
-/// Add a field to the session persistence config. Each is one value stored in
-/// `localStorage` under `lily_session_{key}`. `get`/`set` move it in and out of
-/// the session type, `encode`/`decoder` handle its JSON.
+/// Describe one persisted session value, stored in `localStorage` under
+/// `lily_session_{key}`. `get`/`set` move it in and out of the session type,
+/// `encode`/`decoder` handle its JSON. Collect these into a list and pass them
+/// to [`attach_session`](#attach_session).
 ///
 /// ```gleam
-/// client.session_persistence()
-/// |> client.session_field(
+/// client.session_field(
 ///   key: "theme",
 ///   get: fn(session) { session.theme },
 ///   set: fn(session, theme) { SessionData(..session, theme: theme) },
@@ -647,34 +638,21 @@ pub fn replace(runtime: Runtime(model, message), path path: String) -> Nil {
 /// )
 /// ```
 pub fn session_field(
-  persistence: Persistence(session),
   key key: String,
-  get get: fn(session) -> a,
-  set set: fn(session, a) -> session,
-  encode encode: fn(a) -> Json,
-  decoder decoder: decode.Decoder(a),
-) -> Persistence(session) {
-  let Persistence(fields) = persistence
-  let field =
-    Field(
-      key: key,
-      get: fn(session) { encode(get(session)) },
-      set: fn(session, dynamic_value) {
-        decode.run(dynamic_value, decoder)
-        |> result.map(set(session, _))
-        |> result.replace_error(Nil)
-      },
-    )
-  Persistence(fields: [field, ..fields])
-}
-
-@target(javascript)
-/// Create an empty session persistence config, ready for fields via
-/// [`client.session_field`](#session_field).
-///
-/// See the example in [`client.attach_session`](#attach_session).
-pub fn session_persistence() -> Persistence(session) {
-  Persistence(fields: [])
+  get get: fn(session) -> value,
+  set set: fn(session, value) -> session,
+  encode encode: fn(value) -> Json,
+  decoder decoder: decode.Decoder(value),
+) -> SessionField(session) {
+  SessionField(
+    key: key,
+    get: fn(session) { encode(get(session)) },
+    set: fn(session, dynamic_value) {
+      decode.run(dynamic_value, decoder)
+      |> result.map(set(session, _))
+      |> result.replace_error(Nil)
+    },
+  )
 }
 
 @target(javascript)
@@ -828,16 +806,6 @@ pub fn send_message(runtime: Runtime(model, message), message: message) -> Nil {
 // =============================================================================
 
 @target(javascript)
-/// One local-persistence field
-type Field(session) {
-  Field(
-    key: String,
-    get: fn(session) -> Json,
-    set: fn(session, Dynamic) -> Result(session, Nil),
-  )
-}
-
-@target(javascript)
 /// The concrete JS object from `createRuntime()`. JavaScript has no type
 /// parameters, so `Runtime(model, message)` (the public opaque type) wraps
 /// this. `@internal` for other Lily modules (component) needing FFI access.
@@ -859,10 +827,6 @@ const hot_reload_guard_milliseconds = 1500
 // Base delay before the dev-reload socket retries after a drop.
 @target(javascript)
 const hot_reload_reconnect_milliseconds = 1000
-
-// Random bytes behind a session ID, so 32 hex characters.
-@target(javascript)
-const session_id_bytes = 16
 
 @target(javascript)
 fn handle_incoming(
@@ -921,13 +885,12 @@ fn handle_snapshot(
 
 @target(javascript)
 fn hydrate_session(
-  persistence: Persistence(session),
+  fields: List(SessionField(session)),
   initial: session,
 ) -> session {
-  let Persistence(fields) = persistence
   let prefix = session_storage_prefix()
   list.fold(fields, initial, fn(session, f) {
-    let Field(key, _get, set) = f
+    let SessionField(key, _get, set) = f
     read_field(prefix, key)
     |> result.try(set(session, _))
     |> result.unwrap(session)
@@ -1153,7 +1116,7 @@ fn set_serialiser(
 @external(javascript, "./client.ffi.mjs", "setSessionConfig")
 fn set_session_config(
   handle: RuntimeHandle,
-  persistence: Persistence(session),
+  fields: List(SessionField(session)),
   prefix: String,
   get: fn(model) -> session,
   set: fn(model, session) -> model,

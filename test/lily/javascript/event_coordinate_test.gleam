@@ -33,7 +33,7 @@ pub fn event_on_mouse_down_extracts_coordinates_test() {
         test_support.set(y_ref, y)
         Noop
       },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.mouse_event("#coord-tgt", "mousedown", 42, 77)
@@ -59,7 +59,7 @@ pub fn event_on_pointer_move_extracts_coordinates_test() {
         test_support.set(x_ref, x)
         Noop
       },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.mouse_event("#ptr-tgt", "pointermove", 100, 200)
@@ -92,7 +92,7 @@ pub fn event_on_drag_extracts_coordinates_test() {
         test_support.set(y_ref, y)
         Noop
       },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.mouse_event("#drag-el", "drag", 15, 30)
@@ -118,7 +118,7 @@ pub fn event_on_mouse_move_extracts_coordinates_test() {
         test_support.set(x_ref, x)
         Noop
       },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.mouse_event("#mmove-el", "mousemove", 55, 0)
@@ -142,7 +142,7 @@ pub fn event_on_pointer_down_extracts_coordinates_test() {
         test_support.set(y_ref, y)
         Noop
       },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.mouse_event("#pdown-el", "pointerdown", 0, 88)
@@ -166,7 +166,7 @@ pub fn event_on_pointer_up_extracts_coordinates_test() {
         test_support.set(x_ref, x)
         Noop
       },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.mouse_event("#pup-el", "pointerup", 33, 0)
@@ -192,7 +192,7 @@ pub fn event_on_touch_start_extracts_coordinates_test() {
         test_support.set(y_ref, y)
         Noop
       },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.mouse_event("#tstart-el", "touchstart", 7, 14)
@@ -218,7 +218,7 @@ pub fn event_on_touch_move_extracts_coordinates_test() {
         test_support.set(x_ref, x)
         Noop
       },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.mouse_event("#tmove-el", "touchmove", 22, 0)
@@ -241,7 +241,7 @@ pub fn event_on_double_click_fires_test() {
       event: event.double_click,
       selector: "#dbl-el",
       handler: fn(_element) { Increment },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.simple_event("#dbl-el", "dblclick")
@@ -260,7 +260,7 @@ pub fn event_on_focus_fires_test() {
       event: event.focus_event,
       selector: "#foc-el",
       handler: fn(_element) { Increment },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.simple_event("#foc-el", "focus")
@@ -279,7 +279,7 @@ pub fn event_on_mouse_enter_fires_test() {
       event: event.mouse_enter,
       selector: "#enter-el",
       handler: fn(_element) { Increment },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   // setupElementEventWithOptions maps "mouseenter" to bubbling "mouseover"
@@ -299,7 +299,7 @@ pub fn event_on_mouse_leave_fires_test() {
       event: event.mouse_leave,
       selector: "#leave-el",
       handler: fn(_element) { Increment },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   // setupElementEventWithOptions maps "mouseleave" to bubbling "mouseout"
@@ -322,7 +322,7 @@ pub fn event_on_drag_end_fires_test() {
       event: event.drag_end,
       selector: "#dragend-el",
       handler: fn(_element) { Increment },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.simple_event("#dragend-el", "dragend")
@@ -341,7 +341,7 @@ pub fn event_on_touch_end_fires_test() {
       event: event.touch_end,
       selector: "#tend-el",
       handler: fn(_element) { Increment },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.simple_event("#tend-el", "touchend")
@@ -371,7 +371,7 @@ pub fn event_on_context_menu_extracts_coordinates_test() {
         test_support.set(y_ref, y)
         Noop
       },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.mouse_event("#ctx-el", "contextmenu", 20, 40)
@@ -397,7 +397,7 @@ pub fn event_on_drag_over_extracts_coordinates_test() {
         test_support.set(x_ref, x)
         Noop
       },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.mouse_event("#dragover-el", "dragover", 60, 0)
@@ -424,7 +424,7 @@ pub fn event_on_drag_start_extracts_coordinates_test() {
         test_support.set(y_ref, y)
         Noop
       },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.mouse_event("#dragstart-el", "dragstart", 0, 50)
@@ -450,7 +450,7 @@ pub fn event_on_drop_extracts_coordinates_test() {
         test_support.set(y_ref, y)
         Noop
       },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.mouse_event("#drop-el", "drop", 11, 22)
@@ -478,7 +478,7 @@ pub fn event_on_mouse_up_extracts_coordinates_test() {
         test_support.set(y_ref, y)
         Noop
       },
-      options: event.options(),
+      options: event.defaults,
     )
   })
   test_support.mouse_event("#mup-el", "mouseup", 77, 99)
@@ -505,7 +505,7 @@ pub fn event_on_drag_with_once_fires_only_once_test() {
       component,
       event: event.drag,
       selector: "#drag-w-el",
-      options: event.options() |> event.once,
+      options: event.EventOptions(..event.defaults, once: True),
       handler: fn(_payload) { Increment },
     )
   })
@@ -525,7 +525,7 @@ pub fn event_on_mouse_move_with_once_fires_only_once_test() {
       component,
       event: event.mouse_move,
       selector: "#mmove-w-el",
-      options: event.options() |> event.once,
+      options: event.EventOptions(..event.defaults, once: True),
       handler: fn(_payload) { Increment },
     )
   })
@@ -545,7 +545,7 @@ pub fn event_on_pointer_move_with_once_fires_only_once_test() {
       component,
       event: event.pointer_move,
       selector: "#pmove-w-el",
-      options: event.options() |> event.once,
+      options: event.EventOptions(..event.defaults, once: True),
       handler: fn(_payload) { Increment },
     )
   })
@@ -565,7 +565,7 @@ pub fn event_on_touch_move_with_once_fires_only_once_test() {
       component,
       event: event.touch_move,
       selector: "#tmove-w-el",
-      options: event.options() |> event.once,
+      options: event.EventOptions(..event.defaults, once: True),
       handler: fn(_payload) { Increment },
     )
   })
@@ -589,7 +589,7 @@ pub fn event_on_drag_over_with_once_fires_only_once_test() {
       component,
       event: event.drag_over,
       selector: "#dragover-w-el",
-      options: event.options() |> event.once,
+      options: event.EventOptions(..event.defaults, once: True),
       handler: fn(_payload) { Increment },
     )
   })

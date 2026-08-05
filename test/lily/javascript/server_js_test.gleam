@@ -8,6 +8,8 @@ import gleam/int
 @target(javascript)
 import gleam/list
 @target(javascript)
+import gleam/option
+@target(javascript)
 import gleam/string
 @target(javascript)
 import gleeunit/should
@@ -53,7 +55,7 @@ fn encode_resync_session(_seq: Int) -> BitArray {
 
 @target(javascript)
 pub fn js_server_start_returns_ok_test() {
-  server.new(
+  server.start(
     initial: test_support.initial_model(),
     serialiser: ser(),
     wiring: store.wiring()
@@ -63,8 +65,8 @@ pub fn js_server_start_returns_ok_test() {
         field_get: fn(model) { model },
         field_set: fn(_, model) { model },
       ),
+    origins: server.AnyOrigin,
   )
-  |> server.start
   |> should.be_ok
 }
 
@@ -76,9 +78,16 @@ pub fn js_server_start_returns_ok_test() {
 pub fn js_server_connect_sends_connected_frame_test() {
   let srv = test_support.new_server()
   let ref = test_support.new([])
-  server.connect(srv, client_id: "c1", send: fn(bytes) {
-    test_support.set(ref, [bytes, ..test_support.get(ref)])
-  })
+  let assert Ok(Nil) =
+    server.connect(
+      srv,
+      client_id: "c1",
+      origin: option.None,
+      send: fn(bytes) {
+        test_support.set(ref, [bytes, ..test_support.get(ref)])
+      },
+      session: [],
+    )
   case list.reverse(test_support.get(ref)) {
     [bytes] ->
       transport.decode(bytes, serialiser: ser())
@@ -196,6 +205,64 @@ pub fn js_server_session_state_is_per_connection_test() {
   let _ = get_c1()
   server.incoming(srv, client_id: "c2", bytes: encode_resync_session(0))
   case get_c2() {
+    [bytes, ..] ->
+      transport.decode(bytes, serialiser: ser())
+      |> should.equal(
+        Ok(transport.Snapshot(
+          target: transport.Session,
+          sequence: 0,
+          state: test_support.initial_model(),
+        )),
+      )
+    [] -> should.fail()
+  }
+}
+
+// =============================================================================
+// SESSION SEEDING
+// =============================================================================
+
+@target(javascript)
+/// Messages handed to `connect(session:)` are applied to the new client's
+/// session store before anything else, so the seeded model is what a resync
+/// snapshot reports.
+pub fn js_server_connect_seeds_session_model_test() {
+  let srv = test_support.new_server()
+  let sent = test_support.new([])
+  let assert Ok(Nil) =
+    server.connect(
+      srv,
+      client_id: "c1",
+      origin: option.None,
+      send: fn(bytes) {
+        test_support.set(sent, [bytes, ..test_support.get(sent)])
+      },
+      session: [SetName("Alice"), Increment],
+    )
+  test_support.set(sent, [])
+  server.incoming(srv, client_id: "c1", bytes: encode_resync_session(0))
+  case list.reverse(test_support.get(sent)) {
+    [bytes, ..] ->
+      case transport.decode(bytes, serialiser: ser()) {
+        Ok(transport.Snapshot(state: state, ..)) -> {
+          state.name
+          |> should.equal("Alice")
+          state.count
+          |> should.equal(1)
+        }
+        _ -> should.fail()
+      }
+    [] -> should.fail()
+  }
+}
+
+@target(javascript)
+/// An empty seed leaves the initial model untouched.
+pub fn js_server_connect_with_empty_session_keeps_initial_model_test() {
+  let srv = test_support.new_server()
+  let get_c1 = test_support.connect_client(srv, "c1")
+  server.incoming(srv, client_id: "c1", bytes: encode_resync_session(0))
+  case get_c1() {
     [bytes, ..] ->
       transport.decode(bytes, serialiser: ser())
       |> should.equal(
@@ -474,7 +541,7 @@ pub fn js_server_stop_silently_drops_further_calls_test() {
 @target(javascript)
 fn server_with_max_topics(maximum: Int) -> server.Server(Model, Message) {
   let assert Ok(srv) =
-    server.new(
+    server.start(
       initial: test_support.initial_model(),
       serialiser: ser(),
       wiring: store.wiring()
@@ -484,9 +551,9 @@ fn server_with_max_topics(maximum: Int) -> server.Server(Model, Message) {
           field_get: fn(model) { model },
           field_set: fn(_, model) { model },
         ),
+      origins: server.AnyOrigin,
     )
-    |> server.max_topics(maximum)
-    |> server.start
+  server.max_topics(srv, maximum)
   srv
 }
 

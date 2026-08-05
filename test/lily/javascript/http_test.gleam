@@ -1,4 +1,4 @@
-// Tests for transport.http, HTTP/SSE transport lifecycle.
+// Tests for transport.http_connect, HTTP/SSE transport lifecycle.
 // All functions are @target(javascript), skipped on Erlang.
 
 @target(javascript)
@@ -19,31 +19,6 @@ import lily/transport
 // =============================================================================
 
 // =============================================================================
-// CONFIGURATION
-// =============================================================================
-
-@target(javascript)
-pub fn http_config_has_default_batch_size_test() {
-  transport.http(
-    post_url: "http://localhost/api/messages",
-    events_url: "http://localhost/events",
-  )
-  |> get_flush_batch_size
-  |> should.equal(10)
-}
-
-@target(javascript)
-pub fn http_flush_batch_size_sets_value_test() {
-  transport.http(
-    post_url: "http://localhost/api/messages",
-    events_url: "http://localhost/events",
-  )
-  |> transport.flush_batch_size(5)
-  |> get_flush_batch_size
-  |> should.equal(5)
-}
-
-// =============================================================================
 // CONNECT LIFECYCLE
 // =============================================================================
 
@@ -53,11 +28,11 @@ pub fn http_connect_creates_event_source_test() {
   test_support.reset_mocks()
   let runtime = test_support.new_runtime()
   let connector =
-    transport.http(
+    transport.http_connect(
       post_url: "http://localhost/api/messages",
       events_url: "http://localhost/events",
+      flush_batch_size: 10,
     )
-    |> transport.http_connect
   let _r = client.connect(runtime, with: connector)
   is_null(test_support.get_last_event_source())
   |> should.be_false
@@ -127,11 +102,11 @@ pub fn http_send_when_disconnected_queues_test() {
   test_support.reset_mocks()
   let runtime = test_support.new_runtime()
   let connector =
-    transport.http(
+    transport.http_connect(
       post_url: "http://localhost/api/messages",
       events_url: "http://localhost/events",
+      flush_batch_size: 10,
     )
-    |> transport.http_connect
   let _r = client.connect(runtime, with: connector)
   client.dispatch(runtime)(test_support.Increment)
   let queued = test_support.read_session_storage("lily_http_pending")
@@ -153,11 +128,11 @@ pub fn http_close_shuts_down_event_source_test() {
   let connector =
     transport.make_connector(fn(handler: transport.Handler) {
       let t =
-        transport.http(
+        transport.http_connect(
           post_url: "http://localhost/api/messages",
           events_url: "http://localhost/events",
+          flush_batch_size: 10,
         )
-        |> transport.http_connect
         |> transport.run_connector(handler)
       test_support.set(transport_ref, t)
       t
@@ -185,11 +160,5 @@ fn is_null(_value: dynamic.Dynamic) -> Bool {
 @target(javascript)
 @external(javascript, "./http_test.ffi.mjs", "eventSourceReadyState")
 fn event_source_ready_state(_es: dynamic.Dynamic) -> Int {
-  0
-}
-
-@target(javascript)
-@external(javascript, "./http_test.ffi.mjs", "getFlushBatchSize")
-fn get_flush_batch_size(_config: transport.HttpConfig) -> Int {
   0
 }

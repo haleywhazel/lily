@@ -26,6 +26,24 @@ clean_all() {
   (cd backend && gleam clean)
 }
 
+# A Gleam or OTP upgrade leaves hex-dep beams compiled by the old toolchain in
+# build/, and mixing those with freshly compiled modules produces boot errors
+# like 'corrupt atom table' or an undef on a dep module. invalidate_path_deps
+# deliberately keeps hex deps cached, so it cannot catch this. Stamp the
+# toolchain and full-clean when it changes.
+TOOLCHAIN_STAMP=".toolchain"
+check_toolchain() {
+  local current
+  current="$(gleam --version 2>/dev/null) $(erl -noshell -eval 'io:format("~s",[erlang:system_info(otp_release)]), halt().' 2>/dev/null)"
+  if [[ ! -f "$TOOLCHAIN_STAMP" ]] || [[ "$(cat "$TOOLCHAIN_STAMP")" != "$current" ]]; then
+    if [[ -f "$TOOLCHAIN_STAMP" ]]; then
+      echo "Toolchain changed, cleaning all packages..."
+      clean_all
+    fi
+    printf '%s' "$current" > "$TOOLCHAIN_STAMP"
+  fi
+}
+
 build_shared()   { echo "Building shared..."   ; (cd shared   && gleam build); }
 build_frontend() { echo "Building frontend..." ; (cd frontend && gleam build); }
 build_backend()  { echo "Building backend..."  ; (cd backend  && gleam build); }
@@ -71,6 +89,7 @@ watch_loop() {
       if $needs_server; then
         echo "[change] rebuilding backend & restarting server"
         stop_server
+        check_toolchain
         invalidate_path_deps
         if build_shared && build_backend; then
           start_server
@@ -103,6 +122,7 @@ case "${1:-}" in
     clean_all
     ;;
   --watch)
+    check_toolchain
     invalidate_path_deps
     build_shared
     build_frontend
@@ -119,10 +139,17 @@ case "${1:-}" in
     ;;
 esac
 
+check_toolchain
+
 invalidate_path_deps
 build_shared
 build_frontend
 build_backend
 echo "Server running on http://localhost:8080"
 cd backend
+# The incremental cache can report 'compiled' while a beam is not loadable in
+# the launched code path, which boots as an undef on any dependency, not just
+# this app. A surgical wipe was tried and still left mist undef, so clean the
+# whole package here. Deps recompile from cached sources, so it costs seconds.
+gleam clean
 exec gleam run
