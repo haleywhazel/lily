@@ -27,9 +27,9 @@ passthrough(Value) -> Value.
 %%% ============================================================================
 
 reflect(undefined) ->
-    {reflected_nil};
+    reflected_nil;
 reflect(nil) ->
-    {reflected_nil};
+    reflected_nil;
 reflect(Value) when is_boolean(Value) ->
     {reflected_bool, Value};
 reflect(Value) when is_integer(Value) ->
@@ -75,7 +75,7 @@ reflect(Map) when is_map(Map) ->
     Entries = [{reflect(K), reflect(V)} || {K, V} <- maps:to_list(Map)],
     {reflected_dict, Entries};
 reflect(_) ->
-    {reflected_nil}.
+    reflected_nil.
 
 construct(Reflected) ->
     try
@@ -88,7 +88,7 @@ construct(Reflected) ->
 %%% PRIVATE FUNCTIONS
 %%% ============================================================================
 
-construct_inner({reflected_nil}) ->
+construct_inner(reflected_nil) ->
     nil;
 construct_inner({reflected_bool, Value}) ->
     Value;

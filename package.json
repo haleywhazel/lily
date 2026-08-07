@@ -6,6 +6,6 @@
     "test:all": "gleam test --target erlang && gleam test --target javascript"
   },
   "devDependencies": {
-    "jsdom": "^25.0.0"
+    "jsdom": "^26.0.0"
   }
 }

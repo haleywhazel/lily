@@ -14,7 +14,7 @@ type Event {
 }
 
 @target(erlang)
-fn reduce(event: Event, state: Int) -> actor_cell.Reduction(Int, Int) {
+fn reduce(event: Event, state: Int) -> actor_cell.Outcome(Int, Int) {
   case event {
     Increment -> Continue(state + 1)
     Read -> Reply(state, state)

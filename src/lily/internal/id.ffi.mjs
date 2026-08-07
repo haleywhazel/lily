@@ -2,10 +2,7 @@
  * ID GENERATION (JAVASCRIPT)
  *
  * Random identifiers for the server's client IDs and the client's session
- * IDs. Uses the WebCrypto API off globalThis, which browsers, Node, Bun, and
- * Deno all provide, so nothing here imports a Node builtin. A static
- * `node:crypto` import would stop the whole client bundle loading in a
- * browser.
+ * IDs.
  */
 
 // =============================================================================

@@ -383,10 +383,11 @@ pub fn arrow_group(
 ///
 /// ```gleam
 /// root
-/// |> event.on_decoded(
+/// |> event.on_global_decoded(
 ///   event: event.click,
-///   selector: ".lily-ui-root",
+///   selector: "document",
 ///   decoder: event.decode_message,
+///   options: event.defaults,
 /// )
 /// ```
 pub fn decode_message(encoded: String) -> Result(message, Nil) {

@@ -37,6 +37,12 @@
 //// }
 //// ```
 ////
+//// On Erlang, prefer [`start_supervised`](#start_supervised), which puts the
+//// server and its topics in an OTP supervision tree so a crash restarts them
+//// instead of taking the node down. Register topics in its `started` callback,
+//// which runs again on every restart. [`supervised`](#supervised) gives you
+//// the child specification for a tree you already have.
+////
 //// Handing those same three values to [`client.start`](./client.html#start) is
 //// what makes both ends agree on the model, the update logic, and the wire
 //// encoding, so define them once in your `shared` package and pass the same
@@ -126,6 +132,7 @@
 // IMPORTS
 // =============================================================================
 
+import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option}
@@ -137,6 +144,15 @@ import lily/internal/id
 import lily/logging
 import lily/store
 import lily/transport.{type Serialiser}
+
+@target(erlang)
+import gleam/erlang/process
+@target(erlang)
+import gleam/otp/actor
+@target(erlang)
+import gleam/otp/static_supervisor
+@target(erlang)
+import gleam/otp/supervision
 
 // =============================================================================
 // PUBLIC TYPES
@@ -174,6 +190,7 @@ pub type Origins {
 pub opaque type Server(model, message) {
   Server(
     handle: ServerHandle(model, message),
+    supervisor: actor_cell.Supervisor,
     serialiser: Serialiser(model, message),
     initial_model: model,
     wiring: store.Wiring(model, message),
@@ -192,15 +209,29 @@ pub opaque type Server(model, message) {
 /// `can_subscribe` predicate. `subscribe_trusted` is the server-initiated path
 /// used by `topic.subscribe` and skips that predicate. Both receive the
 /// client's session model so authorisation can read the connection context.
+///
+/// `rejoin` re-attaches a subscriber the server had already authorised, after
+/// the topic came back from a crash. It sends the snapshot but skips the join
+/// hooks, so a chat topic's `UserJoined` does not replay for every subscriber
+/// on every crash.
+///
+/// `respawn` builds a whole fresh entry on a new process, replaying whatever
+/// configuration the topic was given, and re-watches it. `None` means this
+/// topic cannot come back and the server should forget it.
+///
+/// `watched` is the topic's own process, so the server can notice when it dies.
 @internal
 pub type ServerTopicEntry(model, message) {
   ServerTopicEntry(
     handle_incoming: fn(String, message) -> Nil,
+    rejoin: fn(String, fn(BitArray) -> Nil) -> Nil,
+    respawn: fn() -> Option(ServerTopicEntry(model, message)),
     subscribe: fn(String, model, fn(BitArray) -> Nil) -> Nil,
     subscribe_trusted: fn(String, model, fn(BitArray) -> Nil) -> Nil,
     unsubscribe: fn(String) -> Nil,
     send_snapshot: fn(fn(BitArray) -> Nil) -> Nil,
     stop: fn() -> Nil,
+    watched: actor_cell.Watched,
   )
 }
 
@@ -262,6 +293,7 @@ pub fn disconnect(
   server: Server(model, message),
   client_id client_id: String,
 ) -> Nil {
+  let _ = actor_cell.unwatch(server.handle, client_id)
   actor_cell.send(server.handle, ClientDisconnected(client_id:))
 }
 
@@ -423,40 +455,191 @@ pub fn start(
   wiring wiring: store.Wiring(model, message),
   origins origins: Origins,
 ) -> Result(Server(model, message), Nil) {
-  let initial_state =
-    ServerState(
-      initial_model: initial,
-      serialiser:,
-      session_apply: store.session_apply(wiring),
-      clients: dict.new(),
-      client_topics: dict.new(),
-      sessions: dict.new(),
-      topics: dict.new(),
-      topic_kinds: [],
-      on_connect_hook: fn(_) { Nil },
-      on_disconnect_hook: fn(_) { Nil },
-      on_message_hook: fn(_, _, _) { Nil },
-      on_topic_message_hook: fn(_, _, _) { Nil },
-      max_topics: default_max_topics,
-    )
-
-  actor_cell.start(initial_state, reduce:)
+  actor_cell.start_watching(
+    new_state(initial, serialiser, wiring),
+    reduce:,
+    on_down: on_watch_down,
+  )
   |> result.map(fn(handle) {
-    Server(handle:, serialiser:, initial_model: initial, wiring:, origins:)
+    Server(
+      handle:,
+      supervisor: actor_cell.no_supervisor(),
+      serialiser:,
+      initial_model: initial,
+      wiring:,
+      origins:,
+    )
   })
+}
+
+@target(erlang)
+/// Start a server inside its own OTP supervision tree, returning the
+/// supervisor and the running server. Erlang only, JavaScript has no
+/// processes to supervise, so use [`start`](#start) there.
+///
+/// Register your topics inside `started`, not afterwards. `started` runs every
+/// time the server is (re)started, and each restart is a genuinely new server,
+/// so anything registered outside it would be lost on the first crash.
+///
+/// The tree is `OneForAll`. A server restart already loses every client's
+/// `send` closure, since connections live in transport processes outside this
+/// tree, so **a Lily server restart drops all connections**. Clients reconnect
+/// and resync. Topic actors hang off a supervisor owned by the server, so
+/// they go down with it and come back with it.
+///
+/// ```gleam
+/// let assert Ok(#(_supervisor, server)) =
+///   server.start_supervised(
+///     initial: shared.initial_model(),
+///     serialiser: shared.serialiser(),
+///     wiring: shared.wiring(),
+///     origins: server.AnyOrigin,
+///     started: fn(server) {
+///       let assert Ok(_) = topic.new(server, id: "chat")
+///       Nil
+///     },
+///   )
+/// ```
+pub fn start_supervised(
+  initial initial: model,
+  serialiser serialiser: Serialiser(model, message),
+  wiring wiring: store.Wiring(model, message),
+  origins origins: Origins,
+  started started: fn(Server(model, message)) -> Nil,
+) -> Result(#(static_supervisor.Supervisor, Server(model, message)), Nil) {
+  // the child's start runs inside the supervisor process, so the only way back
+  // to this caller is a channel it owns
+  let ready = process.new_subject()
+  let child =
+    supervised(initial:, serialiser:, wiring:, origins:, started: fn(server) {
+      process.send(ready, server)
+      started(server)
+    })
+  let tree =
+    static_supervisor.new(static_supervisor.OneForAll)
+    // the 2 in 5 default is tight for a process a hostile client can influence
+    |> static_supervisor.restart_tolerance(intensity: 3, period: 10)
+    |> static_supervisor.add(child)
+    |> static_supervisor.start
+  case tree {
+    Error(_) -> Error(Nil)
+    Ok(tree) ->
+      case process.receive(ready, within: start_timeout_milliseconds) {
+        Error(_) -> Error(Nil)
+        Ok(server) -> Ok(#(tree.data, server))
+      }
+  }
 }
 
 /// Stop a running server. Every topic actor is asked to stop first, sending
 /// each subscriber a final `Acknowledge(Topic(id), seq)` so slices reset
 /// cleanly. The server actor then terminates (Erlang) or its `Reference` cell
 /// is cleared (JavaScript). Session clients receive no extra frame.
+///
+/// A supervised server is restarted by its supervisor, so stop the tree rather
+/// than the server when you mean to shut down for good.
 pub fn stop(server: Server(model, message)) -> Nil {
   actor_cell.send(server.handle, Stop)
+}
+
+@target(erlang)
+/// A [`ChildSpecification`](https://hexdocs.pm/gleam_otp/gleam/otp/supervision.html#ChildSpecification)
+/// for a Lily server, to add to an application's own supervision tree. Erlang
+/// only, JavaScript has no processes to supervise, so use [`start`](#start)
+/// there.
+///
+/// `started` runs inside the supervisor every time the server starts, so it is
+/// where topics get registered. A caller cannot hold a `Server` from before a
+/// restart, because a restarted server is a new one.
+///
+/// ```gleam
+/// supervisor.new(supervisor.OneForOne)
+/// |> supervisor.add(
+///   server.supervised(
+///     initial: shared.initial_model(),
+///     serialiser: shared.serialiser(),
+///     wiring: shared.wiring(),
+///     origins: server.AnyOrigin,
+///     started: fn(server) {
+///       let assert Ok(_) = topic.new(server, id: "chat")
+///       Nil
+///     },
+///   ),
+/// )
+/// |> supervisor.start
+/// ```
+pub fn supervised(
+  initial initial: model,
+  serialiser serialiser: Serialiser(model, message),
+  wiring wiring: store.Wiring(model, message),
+  origins origins: Origins,
+  started started: fn(Server(model, message)) -> Nil,
+) -> supervision.ChildSpecification(Server(model, message)) {
+  supervision.worker(run: fn() {
+    let cell =
+      actor_cell.start_with_supervisor(
+        new_state(initial, serialiser, wiring),
+        reduce:,
+        on_down: on_watch_down,
+      )
+    case cell {
+      Error(_) -> Error(actor.InitFailed("lily: server failed to start"))
+      Ok(#(handle, supervisor)) -> {
+        let server =
+          Server(
+            handle:,
+            supervisor:,
+            serialiser:,
+            initial_model: initial,
+            wiring:,
+            origins:,
+          )
+        started(server)
+        let pid = actor_cell.watched_pid(actor_cell.watched(handle))
+        Ok(actor.Started(pid:, data: server))
+      }
+    }
+  })
+}
+
+/// Tie a client's registration to the process that owns its connection. Call
+/// it from that process, immediately after [`connect`](#connect). When the
+/// process dies the server runs the same cleanup
+/// [`disconnect`](#disconnect) does, so a socket that dies without a close
+/// callback leaves nothing behind. No-op on JavaScript, which has no
+/// processes.
+///
+/// It is opt-in rather than part of `connect` because an HTTP transport calls
+/// `connect` from a request process that dies straight away, which would
+/// disconnect the client the instant it connected. Call it from long-lived
+/// connection processes only, such as a WebSocket handler.
+///
+/// ```gleam
+/// let client_id = server.generate_client_id()
+/// let assert Ok(Nil) = server.connect(server, client_id:, ..)
+/// server.watch(server, client_id:)
+/// ```
+pub fn watch(
+  server: Server(model, message),
+  client_id client_id: String,
+) -> Nil {
+  // captured here, at the call site, because the watch itself is asynchronous
+  // and the reducer runs in the server process, not the caller's
+  actor_cell.watch(server.handle, client_id, actor_cell.watched_here())
 }
 
 // =============================================================================
 // INTERNAL FUNCTIONS
 // =============================================================================
+
+/// Number of currently registered clients. Test-only accessor.
+@internal
+pub fn client_count(server: Server(model, message)) -> Int {
+  case actor_cell.call(server.handle, ClientCount, default: CountReply(-1)) {
+    CountReply(count) -> count
+    _ -> -1
+  }
+}
 
 /// Subscribe a client to a topic via the server, so it can look up the
 /// client's send function.
@@ -479,6 +662,14 @@ pub fn internals(
   #(server.initial_model, server.serialiser, server.wiring)
 }
 
+/// The supervisor topic actors are started under. Inert unless the server was
+/// started with [`start_supervised`](#start_supervised) or
+/// [`supervised`](#supervised).
+@internal
+pub fn supervisor(server: Server(model, message)) -> actor_cell.Supervisor {
+  server.supervisor
+}
+
 /// Register a topic entry under `id`. Returns `Error(Nil)` if `id` already
 /// exists or collides with a registered kind prefix.
 @internal
@@ -487,11 +678,19 @@ pub fn register_topic(
   id: String,
   entry: ServerTopicEntry(model, message),
 ) -> Result(Nil, Nil) {
-  actor_cell.call(
-    server.handle,
-    RegisterTopic(id:, entry:),
-    default: Error(Nil),
-  )
+  let reply =
+    actor_cell.call(
+      server.handle,
+      RegisterTopic(id:, entry:),
+      default: RegisterReply(Error(Nil)),
+    )
+  case reply {
+    RegisterReply(Ok(Nil)) -> {
+      let _ = watch_topic(server, id, entry.watched)
+      Ok(Nil)
+    }
+    _ -> Error(Nil)
+  }
 }
 
 /// Register a parametric topic kind. When a client subscribes to an id
@@ -505,17 +704,72 @@ pub fn register_topic_kind(
   prefix: String,
   create: fn(String) -> Option(ServerTopicEntry(model, message)),
 ) -> Result(Nil, Nil) {
-  actor_cell.call(
-    server.handle,
-    RegisterTopicKind(prefix:, create:),
-    default: Error(Nil),
-  )
+  case
+    actor_cell.call(
+      server.handle,
+      RegisterTopicKind(prefix:, create:),
+      default: RegisterReply(Error(Nil)),
+    )
+  {
+    RegisterReply(result) -> result
+    _ -> Error(Nil)
+  }
+}
+
+/// Replace the respawn closure of the topic registered under `id`. Each of
+/// `topic.gleam`'s configuration steps records itself, so a topic that comes
+/// back from a crash comes back configured.
+@internal
+pub fn set_topic_respawn(
+  server: Server(model, message),
+  id: String,
+  respawn: fn() -> Option(ServerTopicEntry(model, message)),
+) -> Nil {
+  actor_cell.send(server.handle, SetTopicRespawn(id:, respawn:))
+}
+
+/// The process running the topic registered under `id`, if any. Test-only
+/// accessor.
+@internal
+pub fn topic_watched(
+  server: Server(model, message),
+  id: String,
+) -> Option(actor_cell.Watched) {
+  case
+    actor_cell.call(
+      server.handle,
+      TopicWatched(id:),
+      default: WatchedReply(option.None),
+    )
+  {
+    WatchedReply(watched) -> watched
+    _ -> option.None
+  }
 }
 
 /// Remove a topic entry from the server registry.
 @internal
 pub fn unregister_topic(server: Server(model, message), id: String) -> Nil {
+  let _ = actor_cell.unwatch(server.handle, topic_watch_key(id))
   actor_cell.send(server.handle, UnregisterTopic(id:))
+}
+
+/// The process running the server itself. Test-only accessor.
+@internal
+pub fn watched(server: Server(model, message)) -> actor_cell.Watched {
+  actor_cell.watched(server.handle)
+}
+
+/// Watch the process running the topic registered under `id`, so the server
+/// deregisters it if it dies. Called from `topic.gleam` on both the fixed and
+/// the parametric creation paths.
+@internal
+pub fn watch_topic(
+  server: Server(model, message),
+  id: String,
+  watched: actor_cell.Watched,
+) -> Nil {
+  actor_cell.watch(server.handle, topic_watch_key(id), watched)
 }
 
 // =============================================================================
@@ -527,6 +781,7 @@ type ConnectionState(model, message) {
 }
 
 type InternalEvent(model, message) {
+  ClientCount
   ClientConnected(
     client_id: String,
     send: fn(BitArray) -> Nil,
@@ -541,22 +796,32 @@ type InternalEvent(model, message) {
   SetHook(hook: fn(message, model, String) -> Nil)
   SetMaxTopics(maximum: Int)
   SetTopicMessageHook(hook: fn(message, String, String) -> Nil)
+  SetTopicRespawn(
+    id: String,
+    respawn: fn() -> Option(ServerTopicEntry(model, message)),
+  )
   RegisterTopic(id: String, entry: ServerTopicEntry(model, message))
   RegisterTopicKind(
     prefix: String,
     create: fn(String) -> Option(ServerTopicEntry(model, message)),
   )
+  TopicDown(id: String)
+  TopicWatched(id: String)
   UnregisterTopic(id: String)
   DoSubscribe(client_id: String, topic_id: String)
   Stop
 }
 
 type ServerHandle(model, message) =
-  Cell(
-    ServerState(model, message),
-    InternalEvent(model, message),
-    Result(Nil, Nil),
-  )
+  Cell(ServerState(model, message), InternalEvent(model, message), ServerReply)
+
+/// Every synchronous answer the server actor can give, in one type because a
+/// cell has a single reply type.
+type ServerReply {
+  CountReply(Int)
+  RegisterReply(Result(Nil, Nil))
+  WatchedReply(Option(actor_cell.Watched))
+}
 
 type ServerState(model, message) {
   ServerState(
@@ -573,6 +838,7 @@ type ServerState(model, message) {
     on_message_hook: fn(message, model, String) -> Nil,
     on_topic_message_hook: fn(message, String, String) -> Nil,
     max_topics: Int,
+    restarts: Dict(String, Int),
   )
 }
 
@@ -593,6 +859,23 @@ const client_id_bytes = 16
 
 // Default cap on live topic actors, overridable with `server.max_topics`.
 const default_max_topics = 100_000
+
+// How many times one topic id may be respawned before the server gives up on
+// it. A topic that crashes inside its own `on_subscribe` would otherwise
+// restart in a tight loop with the whole subscriber list re-attaching each
+// time. The count is per topic id and per registration, not a sliding window,
+// so it is cleared when a fixed topic is registered afresh.
+const max_topic_restarts = 5
+
+// Ceiling in milliseconds on waiting for a supervised server to report itself
+// back to `start_supervised`.
+@target(erlang)
+const start_timeout_milliseconds = 5000
+
+// Client ids and topic ids share one watch key namespace, so topic keys carry
+// a prefix. A client id is exactly 32 hex characters, and ':' is not a hex
+// character, so the two can never collide however a topic is named.
+const topic_watch_prefix = "topic:"
 
 /// Apply `message` to a connection's model under crash isolation, returning the
 /// new model or the crash reason. `None` session apply leaves the model as-is.
@@ -655,6 +938,20 @@ fn find_or_create_topic(
   }
 }
 
+/// Drop a topic the server has given up on, and every client's memory of it.
+fn forget_topic(
+  state: ServerState(model, message),
+  id: String,
+) -> ServerState(model, message) {
+  logging.log(logging.Error, "lily: topic actor died, deregistered: " <> id)
+  let topics = dict.delete(state.topics, id)
+  let client_topics =
+    dict.map_values(state.client_topics, fn(_client_id, subscribed) {
+      set.delete(subscribed, id)
+    })
+  ServerState(..state, topics:, client_topics:)
+}
+
 fn handle_connect_logic(
   state: ServerState(model, message),
   client_id: String,
@@ -684,6 +981,12 @@ fn handle_disconnect_logic(
   state: ServerState(model, message),
   client_id: String,
 ) -> ServerState(model, message) {
+  // a close callback and a dead connection process can both land, so the hook
+  // must only fire for a client that is still registered
+  use <- bool.guard(
+    when: !dict.has_key(state.clients, client_id),
+    return: state,
+  )
   let subscribed =
     dict.get(state.client_topics, client_id) |> result.unwrap(set.new())
   set.each(subscribed, fn(topic_id) {
@@ -828,7 +1131,9 @@ fn handle_register_topic_logic(
     True -> #(state, Error(Nil))
     False -> {
       let topics = dict.insert(state.topics, id, entry)
-      #(ServerState(..state, topics:), Ok(Nil))
+      // a fresh registration is a fresh life, so the restart budget resets
+      let restarts = dict.delete(state.restarts, id)
+      #(ServerState(..state, topics:, restarts:), Ok(Nil))
     }
   }
 }
@@ -840,10 +1145,10 @@ fn handle_resync_logic(
 ) -> ServerState(model, message) {
   case dict.get(state.clients, client_id) {
     Error(_) -> state
-    Ok(send) -> {
-      list.each(cursors, fn(target) {
+    Ok(send) ->
+      list.fold(cursors, state, fn(state, target) {
         case target {
-          transport.Session ->
+          transport.Session -> {
             case dict.get(state.sessions, client_id) {
               Ok(connection) -> {
                 let snapshot_frame =
@@ -859,16 +1164,17 @@ fn handle_resync_logic(
               }
               Error(_) -> Nil
             }
+            state
+          }
 
           transport.Topic(id) ->
             case dict.get(state.topics, id) {
-              Ok(entry) -> entry.send_snapshot(send)
-              Error(_) -> Nil
+              Error(_) -> state
+              Ok(entry) ->
+                resubscribe_after_resync(state, client_id, id, entry, send)
             }
         }
       })
-      state
-    }
   }
 }
 
@@ -951,6 +1257,21 @@ fn handle_set_topic_message_hook_logic(
   ServerState(..state, on_topic_message_hook: hook)
 }
 
+fn handle_set_topic_respawn_logic(
+  state: ServerState(model, message),
+  id: String,
+  respawn: fn() -> Option(ServerTopicEntry(model, message)),
+) -> ServerState(model, message) {
+  case dict.get(state.topics, id) {
+    Error(_) -> state
+    Ok(entry) -> {
+      let topics =
+        dict.insert(state.topics, id, ServerTopicEntry(..entry, respawn:))
+      ServerState(..state, topics:)
+    }
+  }
+}
+
 /// Stop every topic actor (each sends a final `Acknowledge(Topic(id), seq)` to
 /// its subscribers) before the server goes away. Called from both the Erlang
 /// `Stop` arm and the JavaScript `stop()` method.
@@ -986,6 +1307,43 @@ fn handle_subscribe_logic(
   }
 }
 
+/// Handle a topic whose actor died. The topic is respawned on a fresh process
+/// and every client the server had already authorised is re-attached, unless
+/// it has crashed too often or cannot be rebuilt, in which case it is
+/// forgotten. A respawned topic starts at sequence 0 with the initial model,
+/// so subscribers get a replacing `Snapshot`.
+fn handle_topic_down_logic(
+  state: ServerState(model, message),
+  id: String,
+) -> ServerState(model, message) {
+  case dict.get(state.topics, id) {
+    Error(_) -> state
+    Ok(entry) -> {
+      let attempts = dict.get(state.restarts, id) |> result.unwrap(0)
+      // a respawn runs user configuration, so it can crash in turn, and it
+      // must not take the server with it
+      let respawned = case attempts >= max_topic_restarts {
+        True -> option.None
+        False ->
+          case rescue(entry.respawn) {
+            Ok(fresh) -> fresh
+            Error(reason) -> {
+              logging.log(
+                logging.Error,
+                "lily: topic respawn crashed on " <> id <> ": " <> reason,
+              )
+              option.None
+            }
+          }
+      }
+      case respawned {
+        option.None -> forget_topic(state, id)
+        option.Some(fresh) -> reinstate_topic(state, id, fresh, attempts + 1)
+      }
+    }
+  }
+}
+
 fn handle_topic_message_logic(
   state: ServerState(model, message),
   client_id: String,
@@ -1007,7 +1365,8 @@ fn handle_unregister_topic_logic(
   id: String,
 ) -> ServerState(model, message) {
   let topics = dict.delete(state.topics, id)
-  ServerState(..state, topics:)
+  let restarts = dict.delete(state.restarts, id)
+  ServerState(..state, topics:, restarts:)
 }
 
 fn handle_unsubscribe_logic(
@@ -1020,6 +1379,31 @@ fn handle_unsubscribe_logic(
     Error(_) -> Nil
   }
   untrack_subscription(state, client_id, topic_id)
+}
+
+/// The state a fresh server actor starts from. Shared by the plain and the
+/// supervised start paths, which differ only in how the cell is started.
+fn new_state(
+  initial: model,
+  serialiser: Serialiser(model, message),
+  wiring: store.Wiring(model, message),
+) -> ServerState(model, message) {
+  ServerState(
+    initial_model: initial,
+    serialiser:,
+    session_apply: store.session_apply(wiring),
+    clients: dict.new(),
+    client_topics: dict.new(),
+    sessions: dict.new(),
+    topics: dict.new(),
+    topic_kinds: [],
+    on_connect_hook: fn(_) { Nil },
+    on_disconnect_hook: fn(_) { Nil },
+    on_message_hook: fn(_, _, _) { Nil },
+    on_topic_message_hook: fn(_, _, _) { Nil },
+    max_topics: default_max_topics,
+    restarts: dict.new(),
+  )
 }
 
 /// Put an origin into the form used for the allowlist comparison. Scheme and
@@ -1036,11 +1420,25 @@ fn normalise_origin(origin: String) -> String {
   }
 }
 
+/// Turn a dead watched process into the event that cleans up after it. Topic
+/// keys carry `topic_watch_prefix`, anything else is a client id.
+fn on_watch_down(key: String) -> Option(InternalEvent(model, message)) {
+  case string.starts_with(key, topic_watch_prefix) {
+    True -> {
+      let prefix_length = string.length(topic_watch_prefix)
+      option.Some(TopicDown(id: string.drop_start(key, prefix_length)))
+    }
+    False -> option.Some(ClientDisconnected(client_id: key))
+  }
+}
+
 fn reduce(
   event: InternalEvent(model, message),
   state: ServerState(model, message),
-) -> actor_cell.Reduction(ServerState(model, message), Result(Nil, Nil)) {
+) -> actor_cell.Outcome(ServerState(model, message), ServerReply) {
   case event {
+    ClientCount -> Reply(state, CountReply(dict.size(state.clients)))
+
     ClientConnected(client_id:, send:, session:) ->
       Continue(handle_connect_logic(state, client_id, send, session))
 
@@ -1070,16 +1468,31 @@ fn reduce(
     SetTopicMessageHook(hook:) ->
       Continue(handle_set_topic_message_hook_logic(state, hook))
 
+    SetTopicRespawn(id:, respawn:) ->
+      Continue(handle_set_topic_respawn_logic(state, id, respawn))
+
     RegisterTopic(id:, entry:) -> {
       let #(new_state, result) = handle_register_topic_logic(state, id, entry)
-      Reply(new_state, result)
+      Reply(new_state, RegisterReply(result))
     }
 
     RegisterTopicKind(prefix:, create:) -> {
       let #(new_state, result) =
         handle_register_kind_logic(state, prefix, create)
-      Reply(new_state, result)
+      Reply(new_state, RegisterReply(result))
     }
+
+    TopicDown(id:) -> Continue(handle_topic_down_logic(state, id))
+
+    TopicWatched(id:) ->
+      Reply(
+        state,
+        WatchedReply(
+          dict.get(state.topics, id)
+          |> result.map(fn(entry) { entry.watched })
+          |> option.from_result,
+        ),
+      )
 
     UnregisterTopic(id:) -> Continue(handle_unregister_topic_logic(state, id))
 
@@ -1091,6 +1504,60 @@ fn reduce(
       Halt(state)
     }
   }
+}
+
+/// Put a respawned topic back in the registry and re-attach every client that
+/// was already subscribed to it. `rejoin` skips the join hooks, so a crash
+/// does not replay `on_subscribe` for every subscriber. The respawn closure
+/// has already re-watched the new process.
+fn reinstate_topic(
+  state: ServerState(model, message),
+  id: String,
+  entry: ServerTopicEntry(model, message),
+  attempts: Int,
+) -> ServerState(model, message) {
+  logging.log(logging.Error, "lily: topic actor died, respawned: " <> id)
+  let topics = dict.insert(state.topics, id, entry)
+  let restarts = dict.insert(state.restarts, id, attempts)
+  dict.each(state.client_topics, fn(client_id, subscribed) {
+    case set.contains(subscribed, id), dict.get(state.clients, client_id) {
+      True, Ok(send) -> entry.rejoin(client_id, send)
+      _, _ -> Nil
+    }
+  })
+  ServerState(..state, topics:, restarts:)
+}
+
+/// Re-attach a client to a topic on resync. A reconnecting client carries a
+/// fresh id and a fresh `send`, so a bare snapshot would leave it holding a
+/// topic it never hears from again. Already-subscribed clients only get the
+/// snapshot, so join hooks do not replay.
+fn resubscribe_after_resync(
+  state: ServerState(model, message),
+  client_id: String,
+  topic_id: String,
+  entry: ServerTopicEntry(model, message),
+  send: fn(BitArray) -> Nil,
+) -> ServerState(model, message) {
+  let subscribed =
+    dict.get(state.client_topics, client_id)
+    |> result.unwrap(set.new())
+    |> set.contains(topic_id)
+  case subscribed, dict.get(state.sessions, client_id) {
+    False, Ok(connection) -> {
+      entry.subscribe_trusted(client_id, connection.model, send)
+      track_subscription(state, client_id, topic_id)
+    }
+    _, _ -> {
+      entry.send_snapshot(send)
+      state
+    }
+  }
+}
+
+/// The watch key a topic is registered under.
+fn topic_watch_key(id: String) -> String {
+  topic_watch_prefix <> id
 }
 
 /// Record that `client_id` is subscribed to `topic_id`, so disconnect can

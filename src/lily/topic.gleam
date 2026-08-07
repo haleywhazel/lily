@@ -111,10 +111,11 @@
 
 import gleam/bool
 import gleam/dict.{type Dict}
+import gleam/list
 import gleam/option.{type Option}
 import gleam/result
 import gleam/string
-import lily/internal/actor_cell.{type Cell, Continue, Halt}
+import lily/internal/actor_cell.{type Cell, Continue, Halt, Reply}
 import lily/logging
 import lily/server.{type Server, type ServerTopicEntry, ServerTopicEntry}
 import lily/store
@@ -133,11 +134,18 @@ pub type Stateful
 /// Opaque handle to a running topic. The `kind` phantom is `Ephemeral` after
 /// `topic.new` and `Stateful` after `topic.with_store`, enforced at compile
 /// time so `topic.dispatch` cannot be called on an ephemeral topic.
+///
+/// `config` is the configuration the topic was given, in order, so a topic
+/// that comes back from a crash comes back configured. `fixed` is `False` for
+/// a topic created by a parametric [`kind`](#kind), which rebuilds itself
+/// through its own factory instead.
 pub opaque type Topic(model, message, kind) {
   Topic(
     id: String,
     handle: TopicHandle(model, message),
     server: Server(model, message),
+    config: List(InternalEvent(model, message)),
+    fixed: Bool,
   )
 }
 
@@ -190,8 +198,8 @@ pub fn can_subscribe(
   topic: Topic(model, message, kind),
   predicate predicate: fn(String, String, model) -> Bool,
 ) -> Topic(model, message, kind) {
-  actor_cell.send(topic.handle, SetCanSubscribe(predicate:))
-  topic
+  let config = record(topic, SetCanSubscribe(predicate:))
+  Topic(..topic, config:)
 }
 
 /// Apply a message to the topic's store and emit
@@ -238,27 +246,9 @@ pub fn kind(
   configure configure: fn(parsed, Topic(model, message, Ephemeral)) ->
     Topic(model, message, kind),
 ) -> Result(Nil, Nil) {
-  let create = fn(topic_id: String) -> option.Option(
-    ServerTopicEntry(model, message),
-  ) {
-    let suffix = string.drop_start(topic_id, string.length(prefix))
-    case parse_id(suffix) {
-      Error(_) -> option.None
-      Ok(parsed) -> {
-        let #(_, serialiser, _) = server.internals(server)
-        let initial_state = make_initial_state(topic_id, serialiser)
-        case actor_cell.start(initial_state, reduce:) {
-          Error(_) -> option.None
-          Ok(handle) -> {
-            let pre_topic = Topic(id: topic_id, handle:, server:)
-            let configured = configure(parsed, pre_topic)
-            option.Some(make_entry_from_handle(configured.handle))
-          }
-        }
-      }
-    }
-  }
-  server.register_topic_kind(server, prefix, create)
+  server.register_topic_kind(server, prefix, fn(topic_id) {
+    create_parametric(server, prefix, parse_id, configure, topic_id)
+  })
 }
 
 /// Register a topic on the server. Returns an ephemeral (broadcast-only)
@@ -267,16 +257,37 @@ pub fn kind(
 /// ```gleam
 /// let assert Ok(typing) = topic.new(server, id: "typing")
 /// ```
+///
+/// Each step records itself on the returned topic so a supervised server can
+/// rebuild the topic after a crash, and a step applied to a stale binding
+/// records only what that binding knew.
+///
+/// ```gleam
+/// // records with_store and can_subscribe
+/// let assert Ok(chat) =
+///   topic.new(server, id: "chat")
+///   |> result.map(topic.with_store)
+///   |> result.map(topic.can_subscribe(_, predicate))
+/// ```
+///
+/// A topic that comes back from a crash comes back at sequence 0 with the
+/// initial model, and its subscribers receive a replacing `Snapshot`. The
+/// state it held is genuinely lost. Persist anything you need to survive a
+/// crash yourself.
 pub fn new(
   server: Server(model, message),
   id id: String,
 ) -> Result(Topic(model, message, Ephemeral), Nil) {
   let #(_, serialiser, _) = server.internals(server)
   let initial_state = make_initial_state(id, serialiser)
-  use handle <- result.try(actor_cell.start(initial_state, reduce:))
-  let entry = make_entry_from_handle(handle)
+  use handle <- result.try(actor_cell.start_in_supervisor(
+    server.supervisor(server),
+    initial_state,
+    reduce:,
+  ))
+  let entry = make_entry(server, id, handle, [])
   use _ <- result.try(server.register_topic(server, id, entry))
-  Ok(Topic(id:, handle:, server:))
+  Ok(Topic(id:, handle:, server:, config: [], fixed: True))
 }
 
 /// Set a join hook. Returned messages are broadcast (ephemeral) or dispatched
@@ -292,8 +303,8 @@ pub fn on_subscribe(
   topic: Topic(model, message, kind),
   hook: fn(String) -> List(message),
 ) -> Topic(model, message, kind) {
-  actor_cell.send(topic.handle, SetOnSubscribe(hook:))
-  topic
+  let config = record(topic, SetOnSubscribe(hook:))
+  Topic(..topic, config:)
 }
 
 /// Set a leave hook. Symmetric to `on_subscribe` and fires after the
@@ -306,8 +317,8 @@ pub fn on_unsubscribe(
   topic: Topic(model, message, kind),
   hook: fn(String) -> List(message),
 ) -> Topic(model, message, kind) {
-  actor_cell.send(topic.handle, SetOnUnsubscribe(hook:))
-  topic
+  let config = record(topic, SetOnUnsubscribe(hook:))
+  Topic(..topic, config:)
 }
 
 /// Stop the topic actor and remove it from the server registry. Subscribers
@@ -362,8 +373,30 @@ pub fn with_store(
     option.Some(f) -> f
     option.None -> fn(m, _) { m }
   }
-  actor_cell.send(topic.handle, UpgradeToStateful(initial:, apply_message:))
-  Topic(id: topic.id, handle: topic.handle, server: topic.server)
+  let config = record(topic, UpgradeToStateful(initial:, apply_message:))
+  Topic(
+    id: topic.id,
+    handle: topic.handle,
+    server: topic.server,
+    config:,
+    fixed: topic.fixed,
+  )
+}
+
+// =============================================================================
+// INTERNAL FUNCTIONS
+// =============================================================================
+
+/// Number of clients currently subscribed to this topic. Test-only accessor.
+@internal
+pub fn subscriber_count(topic: Topic(model, message, kind)) -> Int {
+  actor_cell.call(topic.handle, SubscriberCount, default: -1)
+}
+
+/// The process running this topic, so it can be watched or, in tests, killed.
+@internal
+pub fn watched(topic: Topic(model, message, kind)) -> actor_cell.Watched {
+  actor_cell.watched(topic.handle)
 }
 
 // =============================================================================
@@ -375,12 +408,15 @@ type InternalEvent(model, message) {
   ClientUnsubscribe(client_id: String)
   Dispatch(from: Option(String), message: message)
   Broadcast(message: message, exclude: Option(String))
+  // re-attach after a crash, so the join hooks must not run again
+  RejoinSubscriber(client_id: String, send: fn(BitArray) -> Nil)
   SendSnapshot(send: fn(BitArray) -> Nil)
   // no session field, the trusted path has nothing to authorise against
   ServerSubscribe(client_id: String, send: fn(BitArray) -> Nil)
   SetCanSubscribe(predicate: fn(String, String, model) -> Bool)
   SetOnSubscribe(hook: fn(String) -> List(message))
   SetOnUnsubscribe(hook: fn(String) -> List(message))
+  SubscriberCount
   UpgradeToStateful(initial: model, apply_message: fn(model, message) -> model)
   Stop
 }
@@ -398,7 +434,7 @@ type TopicActorState(model, message) {
 }
 
 type TopicHandle(model, message) =
-  Cell(TopicActorState(model, message), InternalEvent(model, message), Nil)
+  Cell(TopicActorState(model, message), InternalEvent(model, message), Int)
 
 type TopicStore(model, message) {
   TopicStore(
@@ -424,6 +460,58 @@ fn admit_subscriber(
   let state = TopicActorState(..state, subscribers:)
   maybe_send_snapshot(state, send)
   handle_hook_messages(state, state.on_subscribe(client_id), option.None)
+}
+
+/// Start and configure one instance of a parametric topic. Also the respawn
+/// path, so it names itself rather than closing over a local, which is why it
+/// carries every argument `kind` was given.
+fn create_parametric(
+  server: Server(model, message),
+  prefix: String,
+  parse_id: fn(String) -> Result(parsed, Nil),
+  configure: fn(parsed, Topic(model, message, Ephemeral)) ->
+    Topic(model, message, kind),
+  topic_id: String,
+) -> Option(ServerTopicEntry(model, message)) {
+  let suffix = string.drop_start(topic_id, string.length(prefix))
+  case parse_id(suffix) {
+    Error(_) -> option.None
+    Ok(parsed) -> {
+      let #(_, serialiser, _) = server.internals(server)
+      let initial_state = make_initial_state(topic_id, serialiser)
+      case
+        actor_cell.start_in_supervisor(
+          server.supervisor(server),
+          initial_state,
+          reduce:,
+        )
+      {
+        Error(_) -> option.None
+        Ok(handle) -> {
+          let pre_topic =
+            Topic(id: topic_id, handle:, server:, config: [], fixed: False)
+          let configured = configure(parsed, pre_topic)
+          // the fixed path watches from `server.register_topic`, but a
+          // parametric topic is created inside the server's own reducer, so
+          // the watch is issued here instead
+          let _ =
+            server.watch_topic(
+              server,
+              topic_id,
+              actor_cell.watched(configured.handle),
+            )
+          option.Some(
+            ServerTopicEntry(
+              ..make_entry(server, topic_id, configured.handle, []),
+              respawn: fn() {
+                create_parametric(server, prefix, parse_id, configure, topic_id)
+              },
+            ),
+          )
+        }
+      }
+    }
+  }
 }
 
 /// Encode a protocol frame with the topic actor's serialiser.
@@ -532,6 +620,21 @@ fn handle_hook_messages(
   }
 }
 
+/// Re-attach a subscriber the server had already authorised, after this topic
+/// came back from a crash. Identical to `admit_subscriber` except that the
+/// join hooks do not run, so a chat topic's `UserJoined` is not replayed for
+/// every subscriber on every crash.
+fn handle_rejoin_logic(
+  state: TopicActorState(model, message),
+  client_id: String,
+  send: fn(BitArray) -> Nil,
+) -> TopicActorState(model, message) {
+  let subscribers = dict.insert(state.subscribers, client_id, send)
+  let state = TopicActorState(..state, subscribers:)
+  maybe_send_snapshot(state, send)
+  state
+}
+
 fn handle_send_snapshot_logic(
   state: TopicActorState(model, message),
   send: fn(BitArray) -> Nil,
@@ -622,13 +725,22 @@ fn handle_upgrade_to_stateful_logic(
   TopicActorState(..state, store: option.Some(store))
 }
 
-fn make_entry_from_handle(
+/// The callbacks the server routes through, plus the closure that rebuilds
+/// this topic from `config` after a crash.
+fn make_entry(
+  server: Server(model, message),
+  id: String,
   handle: TopicHandle(model, message),
+  config: List(InternalEvent(model, message)),
 ) -> ServerTopicEntry(model, message) {
   ServerTopicEntry(
     handle_incoming: fn(client_id, message) {
       actor_cell.send(handle, Dispatch(from: option.Some(client_id), message:))
     },
+    rejoin: fn(client_id, send) {
+      actor_cell.send(handle, RejoinSubscriber(client_id:, send:))
+    },
+    respawn: fn() { respawn_fixed(server, id, config) },
     subscribe: fn(client_id, session, send) {
       actor_cell.send(handle, ClientSubscribe(client_id:, session:, send:))
     },
@@ -640,6 +752,7 @@ fn make_entry_from_handle(
     },
     send_snapshot: fn(send) { actor_cell.send(handle, SendSnapshot(send:)) },
     stop: fn() { actor_cell.send(handle, Stop) },
+    watched: actor_cell.watched(handle),
   )
 }
 
@@ -669,10 +782,29 @@ fn maybe_send_snapshot(
   }
 }
 
+/// Apply one configuration step and record it, so a supervised server can
+/// replay the whole chain onto a fresh process. Parametric topics rebuild
+/// through their own factory, so they record nothing.
+fn record(
+  topic: Topic(model, message, kind),
+  event: InternalEvent(model, message),
+) -> List(InternalEvent(model, message)) {
+  actor_cell.send(topic.handle, event)
+  let config = list.append(topic.config, [event])
+  case topic.fixed {
+    False -> Nil
+    True ->
+      server.set_topic_respawn(topic.server, topic.id, fn() {
+        respawn_fixed(topic.server, topic.id, config)
+      })
+  }
+  config
+}
+
 fn reduce(
   event: InternalEvent(model, message),
   state: TopicActorState(model, message),
-) -> actor_cell.Reduction(TopicActorState(model, message), Nil) {
+) -> actor_cell.Outcome(TopicActorState(model, message), Int) {
   case event {
     ClientSubscribe(client_id:, session:, send:) ->
       Continue(handle_subscribe_logic(state, client_id, session, send))
@@ -685,6 +817,9 @@ fn reduce(
 
     Broadcast(message:, exclude:) ->
       Continue(handle_broadcast_logic(state, message, exclude))
+
+    RejoinSubscriber(client_id:, send:) ->
+      Continue(handle_rejoin_logic(state, client_id, send))
 
     SendSnapshot(send:) -> Continue(handle_send_snapshot_logic(state, send))
 
@@ -700,12 +835,40 @@ fn reduce(
     SetOnUnsubscribe(hook:) ->
       Continue(handle_set_on_unsubscribe_logic(state, hook))
 
+    SubscriberCount -> Reply(state, dict.size(state.subscribers))
+
     UpgradeToStateful(initial:, apply_message:) ->
       Continue(handle_upgrade_to_stateful_logic(state, initial, apply_message))
 
     Stop -> {
       handle_stop_logic(state)
       Halt(state)
+    }
+  }
+}
+
+/// Rebuild a fixed topic on a fresh process, replaying its recorded
+/// configuration in order and re-watching the new process. The state the old
+/// one held is gone, so it starts at sequence 0 with the initial model.
+fn respawn_fixed(
+  server: Server(model, message),
+  id: String,
+  config: List(InternalEvent(model, message)),
+) -> Option(ServerTopicEntry(model, message)) {
+  let #(_, serialiser, _) = server.internals(server)
+  let initial_state = make_initial_state(id, serialiser)
+  case
+    actor_cell.start_in_supervisor(
+      server.supervisor(server),
+      initial_state,
+      reduce:,
+    )
+  {
+    Error(_) -> option.None
+    Ok(handle) -> {
+      list.each(config, fn(event) { actor_cell.send(handle, event) })
+      let _ = server.watch_topic(server, id, actor_cell.watched(handle))
+      option.Some(make_entry(server, id, handle, config))
     }
   }
 }
