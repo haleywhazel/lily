@@ -395,10 +395,11 @@ pub fn mount(
 /// [`Component`](#Component) tree and piping each render through `to_html`.
 /// Compiles on both targets, so you can produce initial markup ahead of time,
 /// at build time or from a plain request handler. Pair with
-/// [`transport.encode_initial_snapshot`](./transport.html#encode_initial_snapshot)
-/// and [`client.hydrate`](./client.html#hydrate) so the client adopts the
-/// pre-rendered DOM. This is static pre-rendering plus hydration, not
-/// per-request SSR.
+/// [`transport.encode_initial_snapshot`](./transport.html#encode_initial_snapshot),
+/// which [`client.start`](./client.html#start) picks up so the client adopts
+/// the pre-rendered DOM.
+///
+/// Static pre-rendering plus hydration, not per-request SSR.
 ///
 /// Nested components placed via the [`Slotter`](#Slotter) callback render
 /// inline, `from_string` wraps each child's string back into an `html` value,

@@ -486,9 +486,9 @@ pub fn encode(
 /// Encode a model as an inline hydration payload for pre-rendered HTML.
 /// Returns `<script type="application/json" id="lily-snapshot">...</script>`
 /// wrapping a JSON `Snapshot(Session, 0, model)` frame.
-/// [`client.hydrate`](./client.html#hydrate) reads it on mount as the initial
-/// state, saving a round-trip on first paint. A fixed initial state baked into
-/// the page, not per-request data.
+/// [`client.start`](./client.html#start) reads it as the initial state, saving
+/// a round-trip on first paint. A fixed initial state baked into the page, not
+/// per-request data.
 ///
 /// Always JSON regardless of the serialiser format, since binary MessagePack
 /// isn't
