@@ -20,7 +20,13 @@ import {
   RemoveAttribute,
 } from "./component.mjs";
 import { log as logLine } from "./logging.ffi.mjs";
+import { registerModule } from "./internal/reflection.ffi.mjs";
 import { Local as StoreLocal } from "./store.mjs";
+
+// A server snapshot carries `Local` fields as `{"_":"Local",...}`,  so reflect
+// never caches its constructor and the decode would throw. Register it here
+// to keep out of reflection-store-transport import cycle.
+registerModule({ Local: StoreLocal });
 
 // =============================================================================
 // EXPORT FUNCTIONS
