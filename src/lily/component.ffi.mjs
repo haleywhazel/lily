@@ -618,7 +618,7 @@ function renderLive(handle, component, model, toHtml, toSlot) {
     model,
     toHtml,
     toSlot,
-    initial,
+    (slot) => initial(slice(model), slot),
   );
 
   let cachedElement = null;

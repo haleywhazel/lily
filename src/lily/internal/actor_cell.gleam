@@ -1,4 +1,4 @@
-//// A minimal state cell over a typed event enum and a pure reducer, shared by
+//// A minimal state cell over a typed event enum and a reducer, shared by
 //// [`server`](../server.html) and [`topic`](../topic.html).
 ////
 //// On Erlang the cell is an OTP actor. On JavaScript there is no actor, so it
@@ -69,7 +69,7 @@ pub opaque type Cell(state, event, reply) {
 @target(erlang)
 /// A `factory_supervisor` that child cells hang off. `NoSupervisor` is the
 /// unsupervised case, where a child is started as a plain linked-then-unlinked
-/// cell exactly as before.
+/// cell.
 @internal
 pub opaque type Supervisor {
   NoSupervisor
@@ -82,6 +82,24 @@ pub opaque type Supervisor {
 @internal
 pub opaque type Supervisor {
   NoSupervisor
+}
+
+@target(erlang)
+/// A registered name for a cell, so a handle taken before a restart still
+/// reaches the process that came back.
+///
+/// Carries the `Envelope` type, which is what the actor's subject transports.
+@internal
+pub opaque type CellName(event, reply) {
+  CellName(name: process.Name(Envelope(event, reply)))
+}
+
+@target(javascript)
+/// A registered name for a cell. JavaScript has no process registry and
+/// nothing to restart, so this carries nothing.
+@internal
+pub opaque type CellName(event, reply) {
+  CellName
 }
 
 @target(erlang)
@@ -107,6 +125,21 @@ pub opaque type Watched {
 // reducer surfaces as a timeout rather than blocking the caller forever.
 @target(erlang)
 const call_timeout_milliseconds = 5000
+
+@target(erlang)
+/// Mint a name for a cell. Every call allocates an atom that is never
+/// collected, so call it once while the program starts and never inside a
+/// loop, a reducer, or anything a supervisor restarts.
+@internal
+pub fn new_name(prefix: String) -> CellName(event, reply) {
+  CellName(name: process.new_name(prefix))
+}
+
+@target(javascript)
+@internal
+pub fn new_name(_prefix: String) -> CellName(event, reply) {
+  CellName
+}
 
 @target(erlang)
 /// Synchronously send `event`, returning the reducer's `Reply` value or
@@ -192,11 +225,6 @@ pub fn start(
 /// supervisor is inert. A supervised child stays linked to the supervisor, so
 /// a crash is contained there rather than reaching whoever asked for the child.
 ///
-/// The supervisor's child type is monomorphic, so the generic cell never
-/// crosses it. The child argument is a closure that starts the cell and
-/// reports it back over a channel this function owns, and the only thing the
-/// supervisor ever sees is a pid.
-///
 /// ```gleam
 /// let cell = actor_cell.start_in_supervisor(supervisor, 0, reduce:)
 /// ```
@@ -255,8 +283,10 @@ pub fn start_watching(
     Error(_) -> Error(Nil)
     Ok(cell) -> {
       // `actor.start` spawn-links, so a crashing cell would take its starter
-      // down with it. Lily stops every cell explicitly, so the link buys
-      // nothing and costs the whole server.
+      // down with it.
+      //
+      // Lily stops every cell explicitly, so the link buys nothing and costs
+      // the whole server.
       process.unlink(cell.pid)
       Ok(cell)
     }
@@ -285,13 +315,14 @@ pub fn start_watching(
 ///
 /// ```gleam
 /// let assert Ok(#(cell, supervisor)) =
-///   actor_cell.start_with_supervisor(state, reduce:, on_down:)
+///   actor_cell.start_with_supervisor(state, reduce:, on_down:, name:)
 /// ```
 @internal
 pub fn start_with_supervisor(
   initial: state,
   reduce reduce: fn(event, state) -> Outcome(state, reply),
   on_down on_down: fn(String) -> Option(event),
+  name name: CellName(event, reply),
 ) -> Result(#(Cell(state, event, reply), Supervisor), Nil) {
   let runner = new_runner(initial, reduce, on_down)
   let builder =
@@ -306,6 +337,10 @@ pub fn start_with_supervisor(
       }
     })
     |> actor.on_message(handle)
+    // The subject handed to the initialiser is the named one, so callers
+    // reach whichever process currently holds the name rather than the pid
+    // that happened to answer first.
+    |> actor.named(name.name)
   case actor.start(builder) {
     Error(_) -> Error(Nil)
     Ok(started) -> {
@@ -321,6 +356,7 @@ pub fn start_with_supervisor(
   initial: state,
   reduce reduce: fn(event, state) -> Outcome(state, reply),
   on_down on_down: fn(String) -> Option(event),
+  name _name: CellName(event, reply),
 ) -> Result(#(Cell(state, event, reply), Supervisor), Nil) {
   case start_watching(initial, reduce:, on_down:) {
     Error(_) -> Error(Nil)
@@ -380,7 +416,12 @@ pub fn watch(
 /// ```
 @internal
 pub fn watched(cell: Cell(state, event, reply)) -> Watched {
-  Watched(pid: cell.pid)
+  // A named cell outlives the pid it started on, so ask the subject who owns
+  // it now and only fall back to the boot pid for an unnamed one.
+  case process.subject_owner(cell.subject) {
+    Ok(pid) -> Watched(pid:)
+    Error(Nil) -> Watched(pid: cell.pid)
+  }
 }
 
 @target(javascript)
@@ -431,7 +472,7 @@ type Envelope(event, reply) {
   Watch(key: String, watched: Watched)
 }
 
-// Type for supervisor child.
+// type for a supervisor child
 @target(erlang)
 type ChildStart =
   fn() -> Result(Pid, Nil)
@@ -493,8 +534,9 @@ fn apply_event(
 }
 
 // Apply one event to the reducer in place, storing the next state and handing
-// back a `Reply` value if there was one. `call` and `send` differ only in what
-// they do with it.
+// back a `Reply` value if there was one.
+//
+// `call` and `send` differ only in what they do with it.
 @target(javascript)
 fn apply_event(cell: Cell(state, event, reply), event: event) -> Option(reply) {
   case get(cell.runner) {
@@ -569,7 +611,8 @@ fn handle_down(
   case dict.get(runner.keys, down.monitor) {
     Error(_) -> actor.continue(runner)
     Ok(key) -> {
-      // `drop_watch` owns the paired delete, so the two dicts cannot drift.
+      // `drop_watch` owns the paired delete, so the two dicts can't drift.
+      //
       // Demonitoring a monitor that has already fired is a no-op.
       let runner = drop_watch(runner, key)
       case runner.on_down(key) {

@@ -1,6 +1,6 @@
 //// Topics are basically ways for clients to listen to a certain broadcast
 //// channel, similar to pub/sub patterns within other libraries like Phoenix.
-//// This is useful for cases where your own model/store need to easily react
+//// This is useful for cases where your own model/store needs to easily react
 //// to other states shared between a few clients (e.g. chat rooms).
 ////
 //// Lily provides two main types of topics, an ephemeral topic that simply
@@ -125,15 +125,17 @@ import lily/transport.{type Serialiser}
 // PUBLIC TYPES
 // =============================================================================
 
-/// Phantom kind marker for ephemeral topics (broadcast only, no store).
+/// Ephemeral topics (broadcast only, no store).
 pub type Ephemeral
 
-/// Phantom kind marker for stateful topics (store + sequence + snapshot).
+/// Stateful topics (store + sequence + snapshot).
 pub type Stateful
 
-/// Opaque handle to a running topic. The `kind` phantom is `Ephemeral` after
-/// `topic.new` and `Stateful` after `topic.with_store`, enforced at compile
-/// time so `topic.dispatch` cannot be called on an ephemeral topic.
+/// Opaque handle to a running topic.
+///
+/// The `kind` is `Ephemeral` after `topic.new` and `Stateful` after
+/// `topic.with_store`, enforced at compile time so that `topic.dispatch`
+/// cannot be called on an ephemeral topic.
 ///
 /// `config` is the configuration the topic was given, in order, so a topic
 /// that comes back from a crash comes back configured. `fixed` is `False` for
@@ -184,10 +186,11 @@ pub fn broadcast_from(
 
 /// Set an authorisation predicate for client-initiated subscribes. It receives
 /// the client id, the topic id, and that connection's session model, which is
-/// where whatever the transport seeded at connect time lives, so the decision
-/// can read the signed-in user rather than the id alone. Server-side
-/// `topic.subscribe` is trusted and unaffected. On `False`, the server replies
-/// with `Rejected(topic_id, "denied")`.
+/// where whatever the transport seeded at connect time lives.
+///
+/// Server-side `topic.subscribe` is trusted and unaffected.
+///
+/// On `False`, the server replies with `Rejected(topic_id, "denied")`.
 ///
 /// ```gleam
 /// topic.can_subscribe(chat_topic, fn(_client_id, _topic_id, session) {
@@ -251,8 +254,8 @@ pub fn kind(
   })
 }
 
-/// Register a topic on the server. Returns an ephemeral (broadcast-only)
-/// handle, pipe through `with_store` to make it stateful.
+/// Register a topic on the server. Returns an ephemeral  handle, pipe through
+/// `with_store` to make it stateful.
 ///
 /// ```gleam
 /// let assert Ok(typing) = topic.new(server, id: "typing")
@@ -272,8 +275,8 @@ pub fn kind(
 ///
 /// A topic that comes back from a crash comes back at sequence 0 with the
 /// initial model, and its subscribers receive a replacing `Snapshot`. The
-/// state it held is genuinely lost. Persist anything you need to survive a
-/// crash yourself.
+/// state it held is lost. Persist anything you need to survive a crash
+/// yourself.
 pub fn new(
   server: Server(model, message),
   id id: String,
@@ -291,8 +294,8 @@ pub fn new(
 }
 
 /// Set a join hook. Returned messages are broadcast (ephemeral) or dispatched
-/// (stateful) right after the joiner receives its `Snapshot`, so it sees them
-/// too.
+/// (stateful) right after the joiner receives its `Snapshot`, so that it sees
+/// them too.
 ///
 /// ```gleam
 /// topic.on_subscribe(chat_topic, fn(client_id) {
@@ -322,9 +325,11 @@ pub fn on_unsubscribe(
 }
 
 /// Stop the topic actor and remove it from the server registry. Subscribers
-/// stop receiving updates, last slice value left as-is. Further subscribes to
-/// this id either error (fixed topic) or lazily reinstantiate (parametric
-/// kind), the fresh topic then pushing a replacing snapshot on subscribe.
+/// stop receiving updates, last slice value left as is.
+///
+/// Further subscribes to this id either error (fixed topic) or lazily
+/// reinstantiate (parametric kind), the fresh topic then pushing a replacing
+/// snapshot on subscribe.
 ///
 /// ```gleam
 /// topic.stop(chat_topic)
@@ -387,13 +392,16 @@ pub fn with_store(
 // INTERNAL FUNCTIONS
 // =============================================================================
 
-/// Number of clients currently subscribed to this topic. Test-only accessor.
+/// Number of clients currently subscribed to this topic.
+///
+/// Test-only accessor currently, might be useful to make public later.
 @internal
 pub fn subscriber_count(topic: Topic(model, message, kind)) -> Int {
   actor_cell.call(topic.handle, SubscriberCount, default: -1)
 }
 
-/// The process running this topic, so it can be watched or, in tests, killed.
+/// The process running this topic, so that it can be watched or, killed in
+/// tests.
 @internal
 pub fn watched(topic: Topic(model, message, kind)) -> actor_cell.Watched {
   actor_cell.watched(topic.handle)
@@ -408,7 +416,7 @@ type InternalEvent(model, message) {
   ClientUnsubscribe(client_id: String)
   Dispatch(from: Option(String), message: message)
   Broadcast(message: message, exclude: Option(String))
-  // re-attach after a crash, so the join hooks must not run again
+  // re-attach after a crash, join hooks must not run again
   RejoinSubscriber(client_id: String, send: fn(BitArray) -> Nil)
   SendSnapshot(send: fn(BitArray) -> Nil)
   // no session field, the trusted path has nothing to authorise against
@@ -448,9 +456,7 @@ type TopicStore(model, message) {
 // PRIVATE FUNCTIONS
 // =============================================================================
 
-/// Add a subscriber unconditionally, send it the snapshot, then run the join
-/// hook. Shared by the gated client path and the trusted server path, which
-/// differ only in whether `can_subscribe` runs first.
+/// Add a subscriber, send it the snapshot, then run the join hook.
 fn admit_subscriber(
   state: TopicActorState(model, message),
   client_id: String,
@@ -459,12 +465,15 @@ fn admit_subscriber(
   let subscribers = dict.insert(state.subscribers, client_id, send)
   let state = TopicActorState(..state, subscribers:)
   maybe_send_snapshot(state, send)
-  handle_hook_messages(state, state.on_subscribe(client_id), option.None)
+  let joined =
+    server.rescue_or("on_subscribe", [], fn() { state.on_subscribe(client_id) })
+  handle_hook_messages(state, joined, option.None)
 }
 
-/// Start and configure one instance of a parametric topic. Also the respawn
-/// path, so it names itself rather than closing over a local, which is why it
-/// carries every argument `kind` was given.
+/// Start and configure one instance of a parametric topic.
+///
+/// Also the respawn path, so it names itself rather than closing over a local
+/// and carries every argument `kind` was given.
 fn create_parametric(
   server: Server(model, message),
   prefix: String,
@@ -514,12 +523,16 @@ fn create_parametric(
   }
 }
 
-/// Encode a protocol frame with the topic actor's serialiser.
+/// Encode a protocol frame with the topic actor's serialiser. `None` means the
+/// user's serialiser crashed on it, so the frame is dropped and every
+/// subscriber keeps its connection. They can ask for a resync.
 fn encode_frame(
   state: TopicActorState(model, message),
   frame: transport.Protocol(model, message),
-) -> BitArray {
-  transport.encode(frame, serialiser: state.serialiser)
+) -> Option(BitArray) {
+  server.rescue_or("topic encode", option.None, fn() {
+    option.Some(transport.encode(frame, serialiser: state.serialiser))
+  })
 }
 
 fn handle_broadcast_logic(
@@ -529,8 +542,9 @@ fn handle_broadcast_logic(
 ) -> TopicActorState(model, message) {
   let push_frame =
     encode_frame(state, transport.Push(topic_id: state.id, payload: message))
-  send_to_subscribers(state.subscribers, exclude, option.None, push_frame)
-  state
+  let subscribers =
+    send_to_subscribers(state.subscribers, exclude, option.None, push_frame)
+  TopicActorState(..state, subscribers:)
 }
 
 fn handle_dispatch_logic(
@@ -539,8 +553,11 @@ fn handle_dispatch_logic(
   message: message,
 ) -> TopicActorState(model, message) {
   // A client may only write to a topic it subscribes to (subscribing already
-  // cleared `can_subscribe`). Server dispatches carry `from = None` and are
-  // trusted. Unsubscribed client messages dropped silently.
+  // cleared `can_subscribe`).
+  //
+  // Server dispatches carry `from = None` and are trusted.
+  //
+  // Unsubscribed client messages dropped.
   let authorised = case from {
     option.Some(client_id) -> dict.has_key(state.subscribers, client_id)
     option.None -> True
@@ -548,8 +565,7 @@ fn handle_dispatch_logic(
   use <- bool.guard(when: !authorised, return: state)
   case state.store {
     // No store, so relay the message to other subscribers as a Push (no
-    // sequence, no replay). Originator skipped, it already applied
-    // optimistically. Fans out client-to-client signalling without a hook.
+    // sequence, no replay).
     option.None -> handle_broadcast_logic(state, message, from)
     option.Some(topic_store) ->
       // A subscribed client can send a payload the update function cannot
@@ -589,15 +605,20 @@ fn handle_dispatch_logic(
               ),
             )
           // Originator gets the ack, everyone else the update.
-          send_to_subscribers(
-            state.subscribers,
-            from,
-            option.Some(ack_frame),
-            update_frame,
-          )
+          let subscribers =
+            send_to_subscribers(
+              state.subscribers,
+              from,
+              ack_frame,
+              update_frame,
+            )
           let topic_store =
             TopicStore(..topic_store, current: new_model, sequence: new_seq)
-          TopicActorState(..state, store: option.Some(topic_store))
+          TopicActorState(
+            ..state,
+            store: option.Some(topic_store),
+            subscribers:,
+          )
         }
       }
   }
@@ -684,7 +705,9 @@ fn handle_stop_logic(state: TopicActorState(model, message)) -> Nil {
       state,
       transport.Acknowledge(target: transport.Topic(state.id), sequence: seq),
     )
-  dict.each(state.subscribers, fn(_id, send) { send(ack_frame) })
+  let _ =
+    send_to_subscribers(state.subscribers, option.None, option.None, ack_frame)
+  Nil
 }
 
 fn handle_subscribe_logic(
@@ -693,14 +716,24 @@ fn handle_subscribe_logic(
   session: model,
   send: fn(BitArray) -> Nil,
 ) -> TopicActorState(model, message) {
-  case state.can_subscribe(client_id, state.id, session) {
+  // Fails closed. Rescuing it to `True` would turn one crash into an
+  // escalation, and a crash left unrescued would reset the topic for everybody
+  // already in it.
+  let allowed =
+    server.rescue_or("can_subscribe", False, fn() {
+      state.can_subscribe(client_id, state.id, session)
+    })
+  case allowed {
     False -> {
       let rejected_frame =
         encode_frame(
           state,
           transport.Rejected(topic_id: state.id, reason: "denied"),
         )
-      send(rejected_frame)
+      let _ = case rejected_frame {
+        option.None -> True
+        option.Some(bytes) -> server.rescue_send("subscriber", send, bytes)
+      }
       state
     }
     True -> admit_subscriber(state, client_id, send)
@@ -713,7 +746,11 @@ fn handle_unsubscribe_logic(
 ) -> TopicActorState(model, message) {
   let subscribers = dict.delete(state.subscribers, client_id)
   let state = TopicActorState(..state, subscribers:)
-  handle_hook_messages(state, state.on_unsubscribe(client_id), option.None)
+  let left =
+    server.rescue_or("on_unsubscribe", [], fn() {
+      state.on_unsubscribe(client_id)
+    })
+  handle_hook_messages(state, left, option.None)
 }
 
 fn handle_upgrade_to_stateful_logic(
@@ -778,11 +815,18 @@ fn maybe_send_snapshot(
 ) -> Nil {
   case state.store {
     option.None -> Nil
-    option.Some(topic_store) -> send(snapshot_frame(state, topic_store))
+    option.Some(topic_store) ->
+      case snapshot_frame(state, topic_store) {
+        option.None -> Nil
+        option.Some(bytes) -> {
+          let _ = server.rescue_send("subscriber", send, bytes)
+          Nil
+        }
+      }
   }
 }
 
-/// Apply one configuration step and record it, so a supervised server can
+/// Apply one configuration step and record it so that a supervised server can
 /// replay the whole chain onto a fresh process. Parametric topics rebuild
 /// through their own factory, so they record nothing.
 fn record(
@@ -880,17 +924,23 @@ fn send_to_subscribers(
   subscribers: Dict(String, fn(BitArray) -> Nil),
   originator: Option(String),
   originator_frame: Option(BitArray),
-  other_frame: BitArray,
-) -> Nil {
-  use <- bool.guard(when: dict.is_empty(subscribers), return: Nil)
-  dict.each(subscribers, fn(id, send) {
-    case originator {
-      option.Some(sender) if sender == id ->
-        case originator_frame {
-          option.Some(frame) -> send(frame)
-          option.None -> Nil
+  other_frame: Option(BitArray),
+) -> Dict(String, fn(BitArray) -> Nil) {
+  use <- bool.guard(when: dict.is_empty(subscribers), return: subscribers)
+  dict.fold(subscribers, subscribers, fn(kept, id, send) {
+    let frame = case originator {
+      option.Some(sender) if sender == id -> originator_frame
+      option.Some(_) | option.None -> other_frame
+    }
+    case frame {
+      option.None -> kept
+      option.Some(bytes) ->
+        case server.rescue_send("subscriber", send, bytes) {
+          True -> kept
+          // A send closure that raises is a dead connection rather than a bad
+          // frame, the subscriber goes and the rest of the room carries on.
+          False -> dict.delete(kept, id)
         }
-      option.Some(_) | option.None -> send(other_frame)
     }
   })
 }
@@ -898,7 +948,7 @@ fn send_to_subscribers(
 fn snapshot_frame(
   state: TopicActorState(model, message),
   store: TopicStore(model, message),
-) -> BitArray {
+) -> Option(BitArray) {
   encode_frame(
     state,
     transport.Snapshot(

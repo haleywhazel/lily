@@ -257,12 +257,15 @@ pub opaque type Event(payload) {
   Event(name: String, event_type: EventType)
 }
 
-/// Modifiers for an event handler. `debounce_milliseconds` collapses a burst
-/// into one dispatch fired after the gap, `throttle_milliseconds` caps
-/// dispatches to one per interval, `once` fires only the first matching event,
-/// and the last two call `stopPropagation` and `preventDefault` on every
-/// matching event. Start from [`defaults`](#defaults) and update the one field
-/// you need.
+/// Modifiers for an event handler. Start from [`defaults`](#defaults) and
+/// update the one field you need.
+///
+/// `debounce_milliseconds` collapses a burst into one dispatch fired after the
+/// gap, `throttle_milliseconds` caps dispatches to one per interval, and `once`
+/// fires only the first matching event.
+///
+/// The last two call `stopPropagation` and `preventDefault` on every matching
+/// event.
 ///
 /// ```gleam
 /// event.EventOptions(
@@ -343,21 +346,24 @@ pub fn arrow_group(
 }
 
 @target(javascript)
-/// Make a set of sibling elements one arrow-navigable group (the 'roving
-/// tabindex' pattern). While focus is on one, the arrow keys allowed by
-/// `orientation` (plus Home and End) move to the previous or next item. `wrap`
-/// decides whether moving past either end loops around.
+/// Make a set of sibling elements one arrow-navigable group, the 'roving
+/// tabindex' pattern.
 ///
-/// Pipe-friendly and scoped like [`on`](#on): `items` is relative to the
-/// component's scope (its `id`), so `'[role=menuitem]'` composes to
-/// `#<id> [role=menuitem]`. Registers at
-/// [`component.mount()`](./component.html#mount) and re-queries items on every
-/// keypress, so a transient overlay's items are handled the moment it opens.
+/// While focus is on one, the arrow keys allowed by `orientation`, plus Home
+/// and End, move to the previous or next item. `wrap` decides whether moving
+/// past either end loops around.
+///
+/// Pipe-friendly and scoped like [`on`](#on). `items` is relative to the
+/// component's scope, so `'[role=menuitem]'` composes to
+/// `#<id> [role=menuitem]`.
+///
+/// Items are re-queried on every keypress, so a transient overlay's items are
+/// handled the moment it opens.
 ///
 /// Unlike [`focus_trap`](#focus_trap)'s one-active stack, several groups
-/// coexist, the active one on a keypress is whichever contains the focused
-/// element. Focus moves with `element.focus()`, so non-active items can carry
-/// `tabindex="-1"` and still be reached by the arrows.
+/// coexist. The active one on a keypress is whichever contains the focused
+/// element, so non-active items can carry `tabindex="-1"` and still be reached
+/// by the arrows.
 pub fn arrow_group(
   component: Component(model, message, html),
   items items: String,
@@ -375,11 +381,11 @@ pub fn arrow_group(
   })
 }
 
-/// Recover a message encoded by [`encode_message`](#encode_message). Returns
-/// `Error(Nil)` for any string this module did not produce, so it drops into
+/// Recover a message encoded by [`encode_message`](#encode_message).
+///
+/// `Error(Nil)` for any string this module didn't produce, so it drops into
 /// [`on_decoded()`](#on_decoded) as the `decoder` and coexists with handlers
-/// reading readable `data-message` tags (those decline here and are handled by
-/// their own listeners).
+/// reading readable `data-message` tags.
 ///
 /// ```gleam
 /// root
@@ -493,20 +499,20 @@ pub fn on(
 
 @target(javascript)
 /// Bind an event handler to a component. The handler dispatches a message, and
-/// `event` fixes the payload type so it's checked at compile time. Registered
-/// during [`component.mount()`](./component.html#mount).
+/// `event` fixes the payload type so that it's checked at compile time.
 ///
 /// Scoped to the component's own subtree, firing only for `event`s inside the
-/// element matched by its scope selector (the `id`, via
-/// [`component.scoped`](./component.html#scoped)). Attach to a narrower or
-/// wider component to narrow or widen. For page-level listeners (`document`
-/// keydown, `window` resize, a root `data-message` decoder) use
-/// [`on_global`](#on_global).
+/// element matched by its scope selector. Attach to a narrower or wider
+/// component to narrow or widen.
 ///
-/// A scopeless component still works, the binding falls back to a document-wide
-/// listener and a dev warning nudges you to add an `id`. Bindings inside
-/// [`each`](./component.html#each) item bodies are ignored, so attach them to
-/// the wrapper or a static ancestor.
+/// For page-level listeners, a `document` keydown, a `window` resize, a root
+/// `data-message` decoder, use [`on_global`](#on_global).
+///
+/// A scopeless component still works, the binding falling back to a
+/// document-wide listener with a dev warning nudging you to add an `id`.
+///
+/// Bindings inside [`each`](./component.html#each) item bodies are ignored, so
+/// attach them to the wrapper or a static ancestor.
 ///
 /// Pass `options: event.defaults` for no modifiers, or update one field of it
 /// with a record update.
@@ -597,14 +603,17 @@ pub fn on_global(
 
 @target(javascript)
 /// The page-level counterpart to [`on`](#on), binding with an explicit,
-/// verbatim `selector` rather than scoping to the component's subtree. Use it
-/// for listeners tied to the page rather than one component, a `document`
-/// keydown, a `window` resize, or the app-root `data-message` click decoder.
+/// verbatim `selector` rather than scoping to the component's subtree.
 ///
-/// Still takes a `component` first so it composes into the view tree the same
-/// way, the scope is ignored and only the mount-time tree walk that collects
-/// the binding matters. `selector` is used exactly as given, so the listener
-/// survives arbitrary DOM churn.
+/// Use it for listeners tied to the page rather than one component, a
+/// `document` keydown, a `window` resize, or the app-root `data-message` click
+/// decoder.
+///
+/// Still takes a `component` first so that it composes into the view tree the
+/// same way, though the scope is ignored.
+///
+/// `selector` is used exactly as given, so the listener survives arbitrary DOM
+/// churn.
 ///
 /// ```gleam
 /// root
@@ -927,8 +936,7 @@ fn register_event(
   dispatch: fn(payload) -> Nil,
 ) -> Nil {
   // Each Event constant pairs `event_type` with the phantom `payload` type at
-  // its declaration, so the casts below are safe by construction, the handler
-  // signature is already constrained to match.
+  // its declaration, so the casts below are safe by construction.
   let unpacked = unpack_options(options)
   case event.event_type {
     TypeClick -> {
@@ -1006,7 +1014,7 @@ fn register_event(
     }
 
     TypeSubmit -> {
-      // Bake prevent-default in regardless of caller options
+      // prevent-default baked in regardless of caller options
       let typed: fn(Nil) -> Nil = unsafe_cast(dispatch)
       let with_prevent_default =
         unpack_options(EventOptions(..options, prevent_default: True))
@@ -1034,9 +1042,10 @@ fn register_event(
 
 @target(javascript)
 fn resolve_scope(component: Component(model, message, html)) -> String {
-  // Scoped binders confine the listener to the component's own subtree. A
-  // scopeless component falls back to document-wide, the old global footgun,
-  // so warn to nudge an `id` / `component.scoped`.
+  // Scoped binders confine the listener to the component's own subtree.
+  //
+  // A scopeless component falls back to document-wide, so warn to nudge an
+  // `id` and `component.scoped`.
   case component.scope(component) {
     option.Some(selector) -> selector
     option.None -> {

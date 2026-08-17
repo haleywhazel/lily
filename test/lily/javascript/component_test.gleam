@@ -192,7 +192,7 @@ pub fn component_simple_morph_preserves_nested_live_child_test() {
   let child =
     component.live(
       slice: fn(m: Model) { m.name },
-      initial: fn(_) { "<input id=\"pill\">" },
+      initial: fn(_, _) { "<input id=\"pill\">" },
       patch: fn(_) { [] },
     )
   let _r =
@@ -263,7 +263,7 @@ pub fn component_live_renders_initial_html_test() {
     mount(runtime, fn(_model) {
       component.live(
         slice: fn(m: Model) { m.count },
-        initial: fn(_) { "<div><span class=\"val\">0</span></div>" },
+        initial: fn(_, _) { "<div><span class=\"val\">0</span></div>" },
         patch: fn(count) { [component.SetText(".val", int.to_string(count))] },
       )
     })
@@ -280,7 +280,7 @@ pub fn component_live_applies_patches_test() {
     mount(runtime, fn(_model) {
       component.live(
         slice: fn(m: Model) { m.count },
-        initial: fn(_) { "<div><span class=\"val\">0</span></div>" },
+        initial: fn(_, _) { "<div><span class=\"val\">0</span></div>" },
         patch: fn(count) { [component.SetText(".val", int.to_string(count))] },
       )
     })
@@ -297,7 +297,7 @@ pub fn component_live_applies_set_attribute_patch_test() {
     mount(runtime, fn(_model) {
       component.live(
         slice: fn(m: Model) { m.count },
-        initial: fn(_) { "<div class=\"box\"></div>" },
+        initial: fn(_, _) { "<div class=\"box\"></div>" },
         patch: fn(count) {
           [component.SetAttribute("", "data-count", int.to_string(count))]
         },
@@ -316,7 +316,7 @@ pub fn component_live_refuses_unsafe_attribute_patch_test() {
     mount(runtime, fn(_model) {
       component.live(
         slice: fn(m: Model) { m.count },
-        initial: fn(_) { "<div class=\"box\"></div>" },
+        initial: fn(_, _) { "<div class=\"box\"></div>" },
         patch: fn(_count) {
           [
             component.SetAttribute("", "onclick", "alert(1)"),
@@ -367,7 +367,9 @@ pub fn live_root_keeps_nested_children_reactive_test() {
     mount(runtime, fn(_model) {
       component.live(
         slice: fn(_m: Model) { "system" },
-        initial: fn(slot) { "<div class=\"root\">" <> slot(body()) <> "</div>" },
+        initial: fn(_, slot) {
+          "<div class=\"root\">" <> slot(body()) <> "</div>"
+        },
         patch: fn(_) { [] },
       )
     })
@@ -722,7 +724,9 @@ pub fn event_on_slot_child_of_live_test() {
         )
       component.live(
         slice: fn(_m: Model) { 0 },
-        initial: fn(slot) { "<div class=\"shell\">" <> slot(inner) <> "</div>" },
+        initial: fn(_, slot) {
+          "<div class=\"shell\">" <> slot(inner) <> "</div>"
+        },
         patch: fn(_) { [] },
       )
     })

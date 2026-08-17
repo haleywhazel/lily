@@ -1,8 +1,8 @@
 //// Components subscribe to the [`Store`](./store.html#Store) and re-render
 //// when their slice of the model changes. They are stateless components and
-//// focus more on rendering, so are fairly light (lighter than Lustre or
-//// LiveView components, for example) and having a lot of components is not
-//// an anti-pattern in Lily.
+//// focus more on rendering, so are light (lighter than Lustre or LiveView
+//// components, for example) and having a lot of components is not an
+//// anti-pattern in Lily.
 ////
 //// Each component is a [`ComponentType`](#ComponentType) plus zero or more
 //// [`Decoration`](#Decoration)s (the things you pipe on, like a transition or
@@ -21,7 +21,7 @@
 //// (that reacts to changes in the store), and `live` lets you hand-write
 //// patches if you want smoother patching of dynamic components instead of
 //// having to run through large DOM subtree at every frame. Lily doesn't use a
-//// VDOM so these choices are entirely yours to make for your own performance
+//// VDOM so these choices are yours to make for your own performance
 //// reqs.
 ////
 //// (The main tradeoff of this design is that it slightly goes against only
@@ -44,7 +44,7 @@
 //// ```gleam
 //// component.live(
 ////   slice: fn(model) { model.is_active },
-////   initial: fn(slot) {
+////   initial: fn(_, slot) {
 ////     html.section([attribute.class("column")], [
 ////       html.h2([], [html.text("Title")]),
 ////       slot(component.each(
@@ -255,8 +255,10 @@ pub type Slotter(model, message, html) =
 ///
 /// `slice` returns a `List`, `render` returns a `Component` per item (wrap
 /// plain HTML with [`static`](#static)). Keys can be any type, stringified
-/// internally. Event bindings inside `render` aren't collected, so put per-list
-/// events on this component or an ancestor.
+/// internally.
+///
+/// Event bindings inside `render` aren't collected, so put per-list events on
+/// this component or an ancestor.
 ///
 /// ```gleam
 /// component.each(
@@ -305,23 +307,24 @@ pub fn fragment(
 
 /// Renders initial HTML once, then applies the targeted patches you return on
 /// update. A hand-written diff, the escape hatch for a profiled hot path where
-/// [`simple`](#simple)'s morph walk is too costly (a large subtree updating at
-/// high frequency where each change touches little).
+/// [`simple`](#simple)'s morph walk is measurably too costly.
 ///
 /// [`simple`](#simple) already preserves nodes, so `live` isn't needed just to
-/// keep focus or in-progress input, use it only for the hot-path case.
+/// keep focus or in-progress input.
+///
+/// `initial` and `patch` both read the slice, so the baseline and the patches
+/// that follow it can't disagree.
 ///
 /// `patch` returns `Patch` values, each targeting an element under the
-/// component root by CSS selector. `initial`'s first parameter is a
-/// [`Slotter`](#Slotter), call `slot(child)` for a nested component or ignore
-/// it with `_`.
+/// component root by CSS selector. Call `slot(child)` in `initial` for a
+/// nested component or ignore the [`Slotter`](#Slotter) with `_`.
 ///
 /// ```gleam
 /// component.live(
 ///   slice: fn(model) { model.data },
-///   initial: fn(_) {
+///   initial: fn(data, _) {
 ///     html.div([], [
-///       html.span([class("value")], [html.text("0")]),
+///       html.span([class("value")], [html.text(int.to_string(data))]),
 ///       html.div([class("bar")], [])
 ///     ])
 ///   },
@@ -335,13 +338,13 @@ pub fn fragment(
 /// ```
 pub fn live(
   slice slice: fn(model) -> a,
-  initial initial: fn(Slotter(model, message, html)) -> html,
+  initial initial: fn(a, Slotter(model, message, html)) -> html,
   patch patch: fn(a) -> List(Patch),
 ) -> Component(model, message, html) {
   new_component(
     Live(
       slice: fn(model) { to_dynamic(slice(model)) },
-      initial: initial,
+      initial: fn(data, slotter) { initial(from_dynamic(data), slotter) },
       apply: fn(data) { patch(from_dynamic(data)) },
     ),
   )
@@ -381,10 +384,11 @@ pub fn mount(
 ) -> Runtime(model, message) {
   let model = client.get_current_model(runtime)
   let tree = view(model)
-  // Render also registers bindings. renderComponent (JS) queues every
-  // component's `Listener` decorations, including slot children the Gleam
-  // tree walk can't reach (they're built via the slotter callback at render
-  // time). render_tree drains the queue after innerHTML, so element-scoped
+  // Render also registers bindings. `renderComponent` queues every component's
+  // `Listener` decorations, including slot children the Gleam tree walk can't
+  // reach, since those are built by the slotter callback at render time.
+  //
+  // `render_tree` drains the queue after innerHTML, so element-scoped
   // listeners find their target in the DOM.
   render_tree(runtime, selector, tree, model, to_html, to_slot)
 
@@ -393,22 +397,26 @@ pub fn mount(
 
 /// Render a view to an HTML string without touching the DOM, walking the
 /// [`Component`](#Component) tree and piping each render through `to_html`.
+///
 /// Compiles on both targets, so you can produce initial markup ahead of time,
-/// at build time or from a plain request handler. Pair with
+/// at build time or from a plain request handler.
+///
+/// Pair with
 /// [`transport.encode_initial_snapshot`](./transport.html#encode_initial_snapshot),
-/// which [`client.start`](./client.html#start) picks up so the client adopts
-/// the pre-rendered DOM.
+/// which [`client.start`](./client.html#start) picks up so that the client
+/// adopts the pre-rendered DOM.
 ///
 /// Static pre-rendering plus hydration, not per-request SSR.
 ///
 /// Nested components placed via the [`Slotter`](#Slotter) callback render
-/// inline, `from_string` wraps each child's string back into an `html` value,
+/// inline. `from_string` wraps each child's string back into an `html` value,
 /// the identity for raw-HTML libraries, an `unsafe_raw_html`-style constructor
 /// for Lustre.
 ///
 /// Event bindings, focus, and CSS transitions are skipped, they only make sense
-/// on a live DOM. For [`live`](#live) the `initial` baseline renders, patches
-/// apply only at runtime via [`mount`](#mount).
+/// on a live DOM. For [`live`](#live) the `initial` baseline renders from the
+/// slice, so it carries the model's state, and patches apply only at runtime
+/// via [`mount`](#mount).
 ///
 /// ```gleam
 /// let html = component.render_to_string(
@@ -428,8 +436,10 @@ pub fn render_to_string(
 }
 
 /// The default component. Subscribes to a slice and re-renders on change,
-/// morphing onto the live DOM so existing nodes survive (focus, cursor,
-/// in-progress input, and nested reactive children all kept).
+/// morphing onto the live DOM so that existing nodes survive.
+///
+/// Focus, cursor, in-progress input and nested reactive children are all
+/// kept.
 ///
 /// `render` receives the slice value and a [`Slotter`](#Slotter), call
 /// `slot(child)` for a nested component or ignore it with `_`.
@@ -476,11 +486,14 @@ pub fn static(
 }
 
 /// Decorate a component with enter and exit CSS classes timed to a duration.
-/// The component comes first so it chains like the other decorators. On mount
-/// the wrapper carries `enter` for `duration_milliseconds`, then drops it. On
-/// unmount (an enclosing `each` or a `simple` morph removing it) `exit` is
-/// applied and DOM removal is deferred by the same duration, with
-/// `animationend` winning if the CSS fires it first.
+/// The component comes first so that it chains like the other decorators.
+///
+/// On mount the wrapper carries `enter` for `duration_milliseconds`, then
+/// drops it.
+///
+/// On unmount, an enclosing `each` or a `simple` morph removing it, `exit` is
+/// applied and DOM removal is deferred by the same duration. `animationend`
+/// wins if the CSS fires it first.
 ///
 /// The CSS contract is keyframes-based.
 ///
@@ -494,10 +507,12 @@ pub fn static(
 /// `forwards` on exit keeps the final state visible while the framework holds
 /// the element in the DOM, preventing a flicker before removal.
 ///
-/// Placement rule, transitions fire when the framework's removal path runs
-/// through them, `each` child removal and a `simple` morph dropping the
-/// transitioned child (an open/close panel). The `simple` morph runs the exit
-/// animation before the node leaves, and re-opening cancels a mid-exit.
+/// Transitions fire when the framework's own removal path runs through them,
+/// meaning `each` child removal and a `simple` morph dropping the transitioned
+/// child.
+///
+/// The `simple` morph runs the exit animation before the node leaves, and
+/// re-opening cancels a mid-exit.
 ///
 /// ```gleam
 /// component.simple(
@@ -550,7 +565,7 @@ pub type ComponentType(model, message, html) {
   /// Patch-based updates for a 60fps hot path
   Live(
     slice: fn(model) -> Dynamic,
-    initial: fn(Slotter(model, message, html)) -> html,
+    initial: fn(Dynamic, Slotter(model, message, html)) -> html,
     apply: fn(Dynamic) -> List(Patch),
   )
 
@@ -581,8 +596,7 @@ pub type Decoration(model) {
 
   /// Gates the subtree on connection status. When `connected` returns `False`
   /// the wrapper is marked disabled (`data-lily-disabled`, `aria-disabled`,
-  /// `lily-disconnected`). No public constructor builds this at present, the
-  /// runtime still honours it.
+  /// `lily-disconnected`).
   Connection(connected: fn(model) -> Bool)
 }
 
@@ -595,9 +609,7 @@ pub type Decoration(model) {
 /// `lily/event`, not by users.
 ///
 /// The binding is wrapped in an opaque `fn(Dynamic) -> Nil` closure before
-/// storing, since `Listener` holds opaque bindings to keep
-/// [`Component`](#Component) cross-target. The closure casts the `Dynamic` back
-/// to a typed `Runtime` on invocation.
+/// storing, which is what keeps [`Component`](#Component) cross-target.
 @internal
 pub fn attach_event(
   component component: Component(model, message, html),
@@ -606,29 +618,27 @@ pub fn attach_event(
   let opaque_binding = fn(runtime_dynamic: Dynamic) {
     binding(from_dynamic(runtime_dynamic))
   }
-  // Listeners register in attach order, the first-attached fires first at
-  // dispatch. That lets a specific handler with `stop_propagation` (attached
-  // before a broader ancestor-selector handler) block the broader one, since
-  // all delegated listeners share one node and run in registration order.
+  // Listeners register in attach order, so the first attached fires first at
+  // dispatch. That lets a specific handler with `stop_propagation` block a
+  // broader ancestor-selector one attached after it.
+  //
   // `add_decoration` prepends, so `register_bindings` reverses at read time.
   add_decoration(component, Listener(opaque_binding))
 }
 
 @target(javascript)
-/// Walk the tree invoking every `event.on*` binding (each a `Listener`
-/// decoration) and recursing into Fragment children. Stops at Each, its
-/// per-item render bodies aren't inspected, so events inside item components
-/// are ignored by design (see the `each` docstring).
+/// Walk the tree invoking every `event.on*` binding and recursing into
+/// Fragment children.
 ///
-/// Called from [`mount`](#mount) before the FFI render pass. `@internal` so
-/// tests can register bindings without mounting (and wiping the DOM container).
+/// Stops at Each. Its per-item render bodies aren't inspected, so events inside
+/// item components are ignored by design.
 @internal
 pub fn register_bindings(
   runtime: Runtime(model, message),
   component: Component(model, message, html),
 ) -> Nil {
   let runtime_dynamic = to_dynamic(runtime)
-  // Reverse to fire in attach order (add_decoration prepends)
+  // reversed to fire in attach order, `add_decoration` prepends
   list.each(list.reverse(component.decorations), fn(decoration) {
     case decoration {
       Listener(handler:) -> handler(runtime_dynamic)
@@ -650,9 +660,11 @@ pub fn scope(component: Component(model, message, html)) -> Option(String) {
   component.scope
 }
 
-/// Record a component's own CSS selector (usually `#<id>`) as its scope, so the
-/// scoped `event.on*` binders match only within its subtree. Pipe on after
-/// giving the component an `id`, then pipe on `event.on` without a selector.
+/// Record a component's own CSS selector (usually `#<id>`) as its scope, so
+/// that the scoped `event.on*` binders match only within its subtree.
+///
+/// Pipe on after giving the component an `id`, then pipe on `event.on` without
+/// a selector.
 ///
 /// ```gleam
 /// component.simple(slice: ..., render: ...)
@@ -679,15 +691,16 @@ pub fn walk_to_string(
   from_string: fn(String) -> html,
 ) -> String {
   // Decorations only matter on a live DOM, so delegate to the component type.
+  //
   // The slot filler is identical for the three variants that use it, so build
-  // it once. The Each and Fragment branches recurse without a slotter.
+  // it once. Each and Fragment recurse without a slotter.
   let slotter = make_slotter(model, to_html, from_string)
   case component.component_type {
     Static(content:) -> to_html(content(slotter))
 
     Simple(slice:, render:) -> to_html(render(slice(model), slotter))
 
-    Live(slice: _, initial:, apply: _) -> to_html(initial(slotter))
+    Live(slice:, initial:, apply: _) -> to_html(initial(slice(model), slotter))
 
     Each(slice:, key: _, render:) -> {
       slice(model)

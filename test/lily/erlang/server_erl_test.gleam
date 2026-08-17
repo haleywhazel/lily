@@ -55,6 +55,8 @@ fn connect_client(
       send: process.send(subj, _),
       session: [],
     )
+  // Drain the Version and Connected frames sent on registration.
+  let _ = recv(subj)
   let _ = recv(subj)
   subj
 }
@@ -133,6 +135,16 @@ pub fn server_connect_sends_connected_frame_test() {
       send: process.send(subj, _),
       session: [],
     )
+  // The incarnation is announced first, so a client knows which server it
+  // reached before it is told anything else.
+  case recv(subj) {
+    Ok(bytes) ->
+      case transport.decode(bytes, serialiser: ser()) {
+        Ok(transport.Version(hash: hash)) -> { hash != "" } |> should.be_true
+        _ -> should.fail()
+      }
+    Error(_) -> should.fail()
+  }
   case recv(subj) {
     Ok(bytes) ->
       transport.decode(bytes, serialiser: ser())
@@ -280,8 +292,9 @@ pub fn server_connect_seeds_session_model_test() {
       send: process.send(subj, _),
       session: [Increment, Increment],
     )
-  // Drain the Connected frame, then one SessionUpdate per seed message. The
+  // Drain Version and Connected, then one SessionUpdate per seed message. The
   // client has to receive the seeds to stay in step with the server.
+  let _ = recv(subj)
   let _ = recv(subj)
   let _ = recv(subj)
   let _ = recv(subj)

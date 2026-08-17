@@ -74,15 +74,19 @@
 //// and [`on_snapshot`](#on_snapshot) lets you decide how a fresh server
 //// snapshot merges into what the client already has.
 ////
-//// Lily does client-side routing too, though it is opt-in and deliberately not
-//// a router, Lily is for connection-preserving apps, not for turning every site
-//// into an SPA. Mirror the location into your model with [`url`](#url), whose
-//// `set` callback hands you the parsed `Uri` to map onto your own route type,
-//// then move around with [`navigate`](#navigate) to push a new history entry or
-//// [`replace`](#replace) to swap the current one without leaving a back-button
-//// stop. To make ordinary `<a href>` links navigate warmly (no page reload),
-//// pipe on [`intercept_links`](#intercept_links), and when a path must actually
-//// be handled by the server, use [`load`](#load) for a full page navigation.
+//// Lily does client-side routing too, though it's opt-in and deliberately not
+//// a router. Lily is for connection-preserving apps, not for turning every
+//// site into an SPA.
+////
+//// Mirror the location into your model with [`url`](#url), whose `set`
+//// callback hands you the parsed `Uri` to map onto your own route type, then
+//// move around with [`navigate`](#navigate) to push a new history entry or
+//// [`replace`](#replace) to swap the current one without leaving a
+//// back-button stop.
+////
+//// To make ordinary `<a href>` links navigate without a page reload, pipe on
+//// [`intercept_links`](#intercept_links). When a path has to be handled by
+//// the server, use [`load`](#load) for a full page navigation.
 ////
 //// Because the wire only ever carries messages, an offline client keeps
 //// working and catches up on reconnect. For state that should outlive a reload
@@ -95,7 +99,7 @@
 //// Each [`Runtime`](#Runtime) is fully isolated, so several can coexist on one
 //// page, but we'd steer you towards one runtime per page. Splitting your state
 //// across many runtimes gets hard to reason about fast (badly designed React
-//// apps with state scattered everywhere come to mind). If you genuinely need
+//// apps with state scattered everywhere come to mind). If you need
 //// independent, self-contained stateful widgets, a different framework might
 //// suit you better.
 
@@ -153,9 +157,11 @@ pub opaque type SessionField(session) {
 // =============================================================================
 
 @target(javascript)
-/// Attach session persistence so data survives page navigation. Hydrates the
-/// model from localStorage and mirrors local state via `get` and `set`. Pipe
-/// it after `client.start`.
+/// Attach session persistence so that data survives page navigation. Pipe it
+/// after `client.start`.
+///
+/// Hydrates the model from localStorage and mirrors local state via `get` and
+/// `set`.
 ///
 /// ```gleam
 /// client.start(app_store, shared.wiring(), shared.serialiser())
@@ -209,8 +215,10 @@ pub fn clear_session() -> Nil {
 
 @target(javascript)
 /// Inject the server-assigned client id into the model when a `Connected`
-/// frame arrives. That frame lands right after connect, so the model updates
-/// before the first snapshot.
+/// frame arrives.
+///
+/// That frame lands right after connect, so the model updates before the first
+/// snapshot.
 ///
 /// ```gleam
 /// runtime
@@ -234,10 +242,10 @@ pub fn client_id(
 /// Connect the runtime to a server over the given transport. The connector
 /// comes from a transport implementation, e.g.
 /// [`websocket`](./transport.html#websocket) or
-/// [`http_connect`](./transport.html#http_connect). Wires up the
-/// incoming-message and connection-status handlers, sending session messages
-/// as `SessionMessage` frames and routing topic messages by the wiring from
-/// [`client.start`](#start).
+/// [`http_connect`](./transport.html#http_connect).
+///
+/// Session messages go out as `SessionMessage` frames, topic messages are
+/// routed by the wiring from [`client.start`](#start).
 ///
 /// ```gleam
 /// import lily/transport
@@ -303,11 +311,12 @@ pub fn connect(
 }
 
 @target(javascript)
-/// Track connection status in the model, handy for disabling elements while
-/// offline. Lily calls `set` with `True` on connect and `False` on
-/// disconnect, and components can slice the field to react. Call before
-/// [`client.connect`](#connect) to capture the initial state. Optional, status
-/// is tracked internally either way.
+/// Track connection status in the model, for disabling elements while
+/// offline. Lily calls `set` with `True` on connect and `False` on disconnect.
+///
+/// Call before [`client.connect`](#connect) to capture the initial state.
+///
+/// Optional, status is tracked internally either way.
 ///
 /// ```gleam
 /// runtime
@@ -332,8 +341,9 @@ pub fn connection_status(
 
 @target(javascript)
 /// Get a dispatch function that feeds messages into the runtime's update loop.
-/// The [`Store`](./store.html#Store) is pure, so this is how side-effects like
-/// fetch callbacks and timers update the store.
+///
+/// The [`Store`](./store.html#Store) is pure, so this is how side effects like
+/// fetch callbacks and timers update it.
 ///
 /// ```gleam
 /// let runtime = client.start(store, shared.wiring(), shared.serialiser())
@@ -372,25 +382,18 @@ pub fn enable_hot_reload(
 }
 
 @target(javascript)
-/// Opt in to client-side navigation for `<a href>` links: a left-click on a
-/// same-origin internal link becomes a warm [`navigate`](#navigate) (history
-/// push + [`url`](#url) setter), no page reload. Real navigations fall through
-/// untouched, external/cross-origin links, `target="_blank"`, `download`,
-/// `rel="external"`, `mailto:`/`tel:` schemes, modified/middle clicks, in-page
-/// `#fragment` anchors, and any link with the opt-out attribute (default
-/// `data-lily-native`). Pipe once, after [`url`](#url).
+/// Opt in to client-side navigation for `<a href>` links. A left-click on a
+/// same-origin internal link becomes a [`navigate`](#navigate), a history
+/// push plus the [`url`](#url) setter, with no page reload. Pipe once, after
+/// [`url`](#url).
+///
+/// Real navigations fall through untouched: external and cross-origin links,
+/// `target="_blank"`, `download`, `rel="external"`, `mailto:` and `tel:`
+/// schemes, modified and middle clicks, in-page `#fragment` anchors, and any
+/// link carrying the opt-out attribute (`data-lily-native` by default).
 ///
 /// Opt-in and deliberately minimal, Lily is not a router. Use it only when
 /// navigation should preserve the live socket and offline state.
-///
-/// ```gleam
-/// runtime
-/// |> client.url(set: fn(model, uri) { Model(..model, route: parse(uri)) })
-/// |> client.intercept_links
-/// ```
-///
-/// All page anchors are intercepted, any carrying `data-lily-native` opts out
-/// into a full page load.
 pub fn intercept_links(
   runtime: Runtime(model, message),
 ) -> Runtime(model, message) {
@@ -400,11 +403,13 @@ pub fn intercept_links(
 }
 
 @target(javascript)
-/// Full page navigation (`window.location.assign`), leaving the Lily app
-/// entirely, the counterpart to [`navigate`](#navigate)'s in-app history push.
-/// Use when a path must be handled by the server, after a logout that clears a
-/// cookie, entering a server-rendered flow. The socket is torn down and the
-/// destination loads fresh.
+/// Full page navigation, leaving the Lily app. The counterpart to
+/// [`navigate`](#navigate)'s in-app history push.
+///
+/// Use it when a path has to be handled by the server, after a logout that
+/// clears a cookie, or entering a server-rendered flow.
+///
+/// The socket is torn down and the destination loads fresh.
 ///
 /// ```gleam
 /// client.load(runtime, "/logout")
@@ -415,14 +420,15 @@ pub fn load(runtime: Runtime(model, message), path path: String) -> Nil {
 }
 
 @target(javascript)
-/// Reconciliation helper for [`on_snapshot`](#on_snapshot): walks the incoming
+/// Reconciliation helper for [`on_snapshot`](#on_snapshot). Walks the incoming
 /// model, keeping any field whose current value is
 /// [`store.Local`](./store.html#Local) and taking the incoming value
-/// otherwise. Compose with custom per-field merge logic when the default
-/// slice-merge isn't enough.
+/// otherwise.
 ///
-/// Argument order matches the [`on_snapshot`](#on_snapshot) hook,
-/// `(incoming, current)`.
+/// Compose with custom per-field merge logic when the default slice-merge
+/// isn't enough.
+///
+/// Argument order matches the hook, `(incoming, current)`.
 pub fn merge_locals(incoming: model, current: model) -> model {
   ffi_merge_locals(incoming, current)
 }
@@ -442,8 +448,10 @@ pub fn navigate(runtime: Runtime(model, message), path path: String) -> Nil {
 
 @target(javascript)
 /// Register a hook that fires once after the first server-acknowledged
-/// connection, receiving the client id. For per-session bootstrap work like
-/// registering with analytics or a one-time fetch.
+/// connection, receiving the client id.
+///
+/// For per-session bootstrap work like registering with analytics or a
+/// one-time fetch.
 ///
 /// Attach before [`connect`](#connect) so it's in place when the first
 /// `Connected` frame arrives.
@@ -483,8 +491,9 @@ pub fn on_disconnect(
 
 @target(javascript)
 /// Register a hook that runs after each locally-dispatched message, session
-/// and topic alike. `model` is the full outer model after the message is
-/// applied.
+/// and topic alike.
+///
+/// `model` is the full outer model after the message is applied.
 ///
 /// ```gleam
 /// runtime
@@ -523,8 +532,9 @@ pub fn on_reconnect(
 }
 
 @target(javascript)
-/// Register a hook that runs when a server snapshot arrives on reconnect. It
-/// receives `(incoming, current)` and returns the merged model to dispatch.
+/// Register a hook that runs when a server snapshot arrives on reconnect,
+/// receiving `(incoming, current)` and returning the merged model to
+/// dispatch.
 ///
 /// Without a hook, the wiring merges only the snapshotted target's slice into
 /// the current model, leaving other slices intact. Compose with
@@ -548,9 +558,12 @@ pub fn on_snapshot(
 
 @target(javascript)
 /// Register a hook that fires when a `Version` frame's hash differs from the
-/// first this runtime saw. The server sends one on connect and every
-/// reconnect, so a changed value means a new build is live. Pair with
-/// [`reload`](#reload), resync then recovers the model.
+/// first this runtime saw.
+///
+/// The server sends one on connect and every reconnect, so a changed value
+/// means a new build is live, or that the server restarted.
+///
+/// Pair with [`reload`](#reload), resync then recovers the model.
 ///
 /// ```gleam
 /// runtime |> client.on_version_mismatch(client.reload)
@@ -566,11 +579,14 @@ pub fn on_version_mismatch(
 
 @target(javascript)
 /// Recover state a dev-reload stashed just before firing, clearing the stash
-/// either way. Merges top-level primitive fields (`Int`, `Float`, `String`,
-/// `Bool`) into `initial` by field name, anything else (nested custom type,
-/// `List`, `Option`) falls back to `initial`. Use
-/// [`recover_after_reload_migrate`](#recover_after_reload_migrate) to take over
-/// the merge entirely.
+/// either way.
+///
+/// Merges top-level primitive fields (`Int`, `Float`, `String`, `Bool`) into
+/// `initial` by field name. Anything else, a nested custom type, a `List`, an
+/// `Option`, falls back to `initial`.
+///
+/// Use [`recover_after_reload_migrate`](#recover_after_reload_migrate) to take
+/// over the merge entirely.
 ///
 /// ```gleam
 /// let initial = client.recover_after_reload(shared.initial_model())
@@ -581,18 +597,23 @@ pub fn recover_after_reload(initial: model) -> model {
 
 @target(javascript)
 /// Like [`recover_after_reload`](#recover_after_reload) but takes over the
-/// merge entirely. `migrate` receives the raw stashed value and the fresh
-/// `initial` model and returns the model to boot with, for renamed fields,
-/// type changes, or a nested slice.
+/// merge entirely.
+///
+/// `migrate` receives the raw stashed value and the fresh `initial` model and
+/// returns the model to boot with, for renamed fields, type changes, or a
+/// nested slice.
 ///
 /// ```gleam
 /// let initial =
-///   client.recover_after_reload_migrate(shared.initial_model(), fn(stashed, initial) {
-///     let count =
-///       decode.run(stashed, decode.at(["count"], decode.int))
-///       |> result.unwrap(initial.count)
-///     Model(..initial, count:)
-///   })
+///   client.recover_after_reload_migrate(
+///     shared.initial_model(),
+///     fn(stashed, initial) {
+///       let count =
+///         decode.run(stashed, decode.at(["count"], decode.int))
+///         |> result.unwrap(initial.count)
+///       Model(..initial, count:)
+///     },
+///   )
 /// ```
 pub fn recover_after_reload_migrate(
   initial: model,
@@ -624,9 +645,13 @@ pub fn replace(runtime: Runtime(model, message), path path: String) -> Nil {
 
 @target(javascript)
 /// Describe one persisted session value, stored in `localStorage` under
-/// `lily_session_{key}`. `get`/`set` move it in and out of the session type,
-/// `encode`/`decoder` handle its JSON. Collect these into a list and pass them
-/// to [`attach_session`](#attach_session).
+/// `lily_session_{key}`.
+///
+/// `get`/`set` move it in and out of the session type, `encode`/`decoder`
+/// handle its JSON.
+///
+/// Collect these into a list and pass them to
+/// [`attach_session`](#attach_session).
 ///
 /// ```gleam
 /// client.session_field(
@@ -656,10 +681,11 @@ pub fn session_field(
 }
 
 @target(javascript)
-/// Start the client runtime with a store and a wiring config. The wiring tells
-/// the runtime how to route messages to the correct server-side target
-/// (session or a named topic store) and how to merge incoming snapshots into
-/// the outer model.
+/// Start the client runtime with a store and a wiring config.
+///
+/// The wiring tells the runtime how to route messages to the right server-side
+/// target, session or a named topic store, and how to merge incoming snapshots
+/// into the outer model.
 ///
 /// Build the wiring in your `shared` package and import it here:
 ///
@@ -691,8 +717,10 @@ pub fn start(
   set_wiring(handle, wiring)
   set_serialiser(handle, serialiser)
   // Hydrate from an embedded server-rendered snapshot if present, else fall
-  // back to the store's model. Lenient, a missing or malformed embed is
-  // ignored and the first render replaces any mismatch.
+  // back to the store's model.
+  //
+  // Lenient, a missing or malformed embed is ignored and the first render
+  // replaces any mismatch.
   case read_embedded_snapshot() {
     Ok(bytes) ->
       case transport.decode(bytes, serialiser:) {
@@ -729,7 +757,7 @@ pub fn subscribe(
 @target(javascript)
 /// Unsubscribe from a topic, sends a frame so the server stops pushing
 /// updates. Fire-and-forget, no confirmation and the topic's last slice is
-/// left as-is. Re-subscribing pulls a fresh snapshot that replaces it (for
+/// left as is. Re-subscribing pulls a fresh snapshot that replaces it (for
 /// stateful topics), clear it sooner with your own message if needed. Call
 /// after [`client.connect`](#connect).
 ///
@@ -816,8 +844,8 @@ pub type RuntimeHandle
 // PRIVATE FUNCTIONS
 // =============================================================================
 
-// hot reload settings are currently hardcoded in as consts, might change these
-// afterwards
+// Hot reload settings are hardcoded as consts for now, might change these
+// afterwards.
 
 // Storm guard window before a hot reload is allowed again, so a rebuild loop
 // cannot reload the page in a tight cycle.

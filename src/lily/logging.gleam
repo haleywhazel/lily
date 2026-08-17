@@ -84,7 +84,7 @@ import logging as erlang_logging
 // PUBLIC TYPES
 // =============================================================================
 
-/// Log severity. The eight levels of Erlang's `logger` and the `logging` hex
+/// Log severity, the eight levels of Erlang's `logger` and the `logging` hex
 /// package.
 pub type Level {
   Alert
@@ -97,9 +97,11 @@ pub type Level {
   Warning
 }
 
-/// A single HTTP request to log. `request_id` is an optional correlation id,
-/// echoed into the line as `#<id>` when set. Construct directly and emit with
+/// A single HTTP request to log. Construct directly and emit with
 /// [`request()`](#request).
+///
+/// `request_id` is an optional correlation id, echoed into the line as
+/// `#<id>` when set.
 ///
 /// Bodies are deliberately absent, logging them risks leaking passwords,
 /// tokens, and other GDPR-protected data.
@@ -117,8 +119,9 @@ pub type RequestLog {
 // PUBLIC FUNCTIONS
 // =============================================================================
 
-/// Inspect `value` with `string.inspect` and log it at the given level. The
-/// inspection is skipped when the level is suppressed, so a large model at
+/// Inspect `value` with `string.inspect` and log it at the given level.
+///
+/// The inspection is skipped when the level is suppressed, so a large model at
 /// `Debug` is cheap in production.
 pub fn auto_log(level: Level, value: a) -> Nil {
   case is_enabled(level) {
@@ -127,14 +130,16 @@ pub fn auto_log(level: Level, value: a) -> Nil {
   }
 }
 
-/// Configure the default logger. On Erlang, installs the `logging` package's
-/// pretty formatter and sets the level to `Info`. On JavaScript, a no-op (the
-/// console is always ready).
+/// Configure the default logger.
+///
+/// On Erlang, installs the `logging` package's pretty formatter and sets the
+/// level to `Info`. On JavaScript, a no-op, the console is always ready.
 pub fn configure() -> Nil {
   do_configure()
 }
 
 /// `True` if a message at `level` would be emitted under the current config.
+///
 /// Guards expensive payload construction outside [`auto_log`](#auto_log).
 ///
 /// ```gleam
@@ -153,9 +158,11 @@ pub fn log(level: Level, message: String) -> Nil {
 }
 
 /// Emit a compact request log line through the same sink as the other helpers,
-/// inheriting the level tag and colour. The level comes from the status (5xx
-/// `Error`, 4xx `Warning`, else `Info`). Suppressed levels short-circuit before
-/// the line is built.
+/// inheriting the level tag and colour.
+///
+/// The level comes from the status, 5xx `Error`, 4xx `Warning`, else `Info`.
+///
+/// Suppressed levels short-circuit before the line is built.
 ///
 /// ```gleam
 /// logging.RequestLog(

@@ -5,7 +5,7 @@
 //// walk the same way on either side.
 ////
 //// [`construct`](#construct) runs the tree back the other way to rebuild a
-//// value. Erlang atoms are self-describing, so it just works there. JavaScript
+//// value. Erlang atoms are self-describing, so it works there. JavaScript
 //// classes are not, so the constructor registry has to be seeded first
 //// (through `transport.ffi.mjs`'s `registerModule`) or decoding a type the
 //// runtime hasn't seen fails.
@@ -31,7 +31,7 @@ import gleam/dynamic.{type Dynamic}
 /// name and encode as a tag-less positional-keyed map.
 ///
 /// `ReflectedDict` and `ReflectedSet` cover `gleam/dict` and `gleam/set`, whose
-/// runtime shapes don't fit ReflectedConstructor cleanly. On the wire they look
+/// runtime shapes don't fit ReflectedConstructor. On the wire they look
 /// like a CustomType with reserved sentinel names `$dict` / `$set` to stay
 /// consistent with the JSON path.
 @internal

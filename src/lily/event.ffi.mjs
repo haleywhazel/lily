@@ -442,7 +442,17 @@ export function watchEscapeDismiss() {
       // through the ordinary data-message delegation. Mirrors a focus trap's
       // Escape dismiss, without trapping focus.
       event.preventDefault();
+      // Focus was inside the thing being dismissed, so it has to be put
+      // somewhere before that thing stops being focusable. A hidden overlay
+      // drops focus to the body, and the next Tab restarts from the top of the
+      // document rather than beside the control the reader was using.
+      //
+      // Only when focus was inside it. Dismissing an overlay the reader had
+      // already tabbed away from must not drag them back to it.
+      const inside =
+        document.activeElement && opener.contains(document.activeElement);
       target.click();
+      if (inside && typeof target.focus === "function") target.focus();
     }
   };
   // Capture phase so Escape dismisses even when focus sits outside the panel.

@@ -48,6 +48,8 @@ fn connect_client(
       send: process.send(subj, _),
       session: [],
     )
+  // Drain the Version and Connected frames sent on registration.
+  let _ = recv(subj)
   let _ = recv(subj)
   subj
 }

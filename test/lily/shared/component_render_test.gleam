@@ -90,7 +90,7 @@ pub fn render_live_uses_initial_test() {
   render(fn(_) {
     component.live(
       slice: fn(_) { 0 },
-      initial: fn(_) { "<gauge>0</gauge>" },
+      initial: fn(_, _) { "<gauge>0</gauge>" },
       patch: fn(_) { [] },
     )
   })

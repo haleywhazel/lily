@@ -254,7 +254,7 @@ fn app(
     slice: fn(model: shared.Model) {
       shared.theme_to_string(model.session.theme)
     },
-    initial: fn(slot) {
+    initial: fn(_, slot) {
       html.div(
         [
           attribute.class("app-root"),
@@ -388,7 +388,7 @@ fn connection_status() -> component.Component(
 ) {
   component.live(
     slice: fn(model: shared.Model) { model.session.connected },
-    initial: fn(_slot) {
+    initial: fn(_, _slot) {
       html.span([attribute.class("status")], [
         html.span([attribute.class("dot")], []),
         html.span(
@@ -427,7 +427,7 @@ fn theme_toggle() -> component.Component(
 ) {
   component.live(
     slice: fn(model: shared.Model) { model.session.theme == shared.Light },
-    initial: fn(_slot) {
+    initial: fn(_, _slot) {
       html.button(
         [
           attribute.class("theme-toggle"),

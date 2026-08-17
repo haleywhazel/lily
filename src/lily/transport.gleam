@@ -152,12 +152,7 @@ pub opaque type Connector {
 /// transport.automatic(format: transport.Json, max_decode_depth: 128)
 /// ```
 pub type Format {
-  /// Text frames, readable in browser DevTools, the friendlier choice while
-  /// developing.
   Json
-
-  /// Compact binary frames, smaller and faster, the friendlier choice in
-  /// production.
   MessagePack
 }
 
@@ -173,17 +168,11 @@ pub type Handler {
   )
 }
 
-/// Wire-format envelope between client and server. Sequence numbers are
-/// server-assigned and tracked separately per [`Target`](#Target), so each
-/// store stays in sync independently.
+/// Wire-format envelope between client and server.
 ///
-/// Sequences are ordering metadata, not a security control. The client records
-/// whatever sequence a frame carries with no monotonicity check, so they give
-/// no replay or reorder protection alone. The server is the trust anchor (it
-/// assigns ids and sequences and ignores server-to-client frames from a
-/// client), and confidentiality and integrity rest on the transport. Run over
-/// secure connections in production. Built-in connectors select `wss`
-/// automatically on an HTTPS page.
+/// Sequence numbers are server-assigned and tracked separately per
+/// [`Target`](#Target), meaning that each store stays in sync independently.
+/// These numbers help with ordering.
 @internal
 pub type Protocol(model, message) {
   /// Server, after applying a `SessionMessage` or `TopicMessage` and assigning
@@ -254,15 +243,17 @@ pub type Protocol(model, message) {
 /// )
 /// ```
 pub type Reconnect {
-  /// Exponential backoff with the built-in settings, suitable for most apps.
-  /// Equivalent to `Backoff(1000, 30_000, 0.25, 2.0)`.
+  /// Exponential backoff with the built-in settings.
+  ///
+  /// Basically the same as `Backoff(1000, 30_000, 0.25, 2.0)`.
   DefaultBackoff
 
   /// Tuned exponential backoff. `base_milliseconds` is the first delay,
   /// multiplied by `multiplier` after each failed attempt and capped at
-  /// `max_milliseconds`. `jitter_ratio` randomises each delay by plus or minus
-  /// that fraction, between 0.0 (none) and 1.0 (full), so a mass disconnect
-  /// does not stampede the server.
+  /// `max_milliseconds`.
+  ///
+  /// `jitter_ratio` randomises each delay by plus or minus to prevent mass
+  /// disconnect from overwhelming the server.
   ///
   /// ```gleam
   /// transport.websocket(
@@ -331,8 +322,6 @@ type BinaryCodec(model, message) {
   )
 }
 
-/// One field of a `Protocol` envelope, the source of truth both the JSON and
-/// MessagePack encoders map over.
 type Field(model, message) {
   FieldInt(name: String, value: Int)
   FieldMessage(name: String, value: message)
@@ -353,9 +342,9 @@ type WsHandle
 // =============================================================================
 
 /// Create an automatic serialiser. `format` picks the wire encoding, and
-/// `max_decode_depth` caps how deeply the MessagePack decoder will nest so a
-/// hostile frame can't blow the stack. 128 is generous, and the depth is
-/// ignored under `Json`.
+/// `max_decode_depth` caps how deeply the MessagePack decoder will nest.
+///
+/// The depth is ignored under `Json`.
 ///
 /// ```gleam
 /// transport.automatic(format: transport.MessagePack, max_decode_depth: 128)
@@ -367,9 +356,7 @@ type WsHandle
 /// `transport.ffi.mjs`, once per file. See the module docs for the full
 /// pattern.
 ///
-/// ## Supported value shapes
-///
-/// Every Gleam value the model and message types are likely to hold:
+/// ## Supported shapes
 ///
 /// - Primitives, `Int`, `Float`, `String`, `Bool`, `Nil`.
 /// - Custom types, records and variants, a tagged map whose `_` field carries
@@ -380,12 +367,11 @@ type WsHandle
 /// - `gleam/dict.Dict`, as `{"_":"$dict","0":[[k,v],...]}`.
 /// - `gleam/set.Set`, as `{"_":"$set","0":[v,...]}`.
 ///
-/// ## Not supported: `BitArray`
+/// ## Not supported
 ///
 /// `BitArray` fields in synced types are not auto-encoded. Erlang represents
 /// both `String` and `BitArray` as native binaries, so reflection can't tell
-/// them apart, a byte sequence like `<<104,101,108,108,111>>` is both a valid
-/// `String` and a valid `BitArray`. Encoding the wrong one corrupts data.
+/// them apart.
 ///
 /// For raw bytes, wrap them in a marker CustomType and encode yourself with
 /// [`custom_binary`](#custom_binary) or [`custom_json`](#custom_json):
@@ -487,12 +473,12 @@ pub fn encode(
 /// Returns `<script type="application/json" id="lily-snapshot">...</script>`
 /// wrapping a JSON `Snapshot(Session, 0, model)` frame.
 /// [`client.start`](./client.html#start) reads it as the initial state, saving
-/// a round-trip on first paint. A fixed initial state baked into the page, not
-/// per-request data.
+/// a round-trip on first paint.
+///
+/// A fixed initial state baked into the page, not per-request data.
 ///
 /// Always JSON regardless of the serialiser format, since binary MessagePack
-/// isn't
-/// safe to inline in HTML. A `CustomBinary` serialiser produces a
+/// isn't safe to inline in HTML. A `CustomBinary` serialiser produces a
 /// base16-encoded payload, so prefer `automatic` or `custom_json` here.
 ///
 /// ```gleam
@@ -537,7 +523,7 @@ pub fn encode_initial_snapshot(
 ///
 /// `flush_batch_size` is the most queued messages POSTed in parallel on
 /// reconnect. Lower limits concurrent POSTs during a burst, higher flushes
-/// faster. 10 is a reasonable starting point.
+/// faster. 10 seems like a reasonable number.
 ///
 /// ```gleam
 /// client.connect(runtime,
@@ -682,8 +668,6 @@ fn acknowledge_decoder() -> decode.Decoder(Protocol(model, message)) {
   decode.success(Acknowledge(target:, sequence:))
 }
 
-// Capture `max_decode_depth` so envelope and payload parse both honour the
-// cap.
 fn auto_binary_codec(max_decode_depth: Int) -> BinaryCodec(model, message) {
   BinaryCodec(
     encode_message: ffi_auto_encode_message_pack,
@@ -807,8 +791,7 @@ fn decode_message_pack_envelope(
   }
 }
 
-/// Decode MessagePack bytes to a Protocol, the codec handling payload/state
-/// values.
+/// Decode MessagePack bytes to a Protocol.
 fn decode_message_pack_protocol(
   bytes: BitArray,
   codec: BinaryCodec(model, message),
@@ -841,8 +824,7 @@ fn decode_target_message_pack(value: Value) -> Result(Target, Nil) {
 }
 
 /// Decode a MessagePack envelope carrying a single `topic_id` string, applying
-/// `build` to it. Shared by the byte-identical `subscribe`/`unsubscribe`
-/// variants.
+/// `build` to it.
 fn decode_topic_id_variant(
   entries: List(#(Value, Value)),
   build: fn(String) -> Protocol(model, message),
@@ -876,9 +858,7 @@ fn encode_json(
   |> bit_array.from_string
 }
 
-/// Encode a Protocol to MessagePack bytes. Pure Gleam, source of truth for
-/// both targets. Payload/state slots embed bytes from the configured codec
-/// (auto or user-supplied).
+/// Encode a Protocol to MessagePack bytes.
 fn encode_message_pack_protocol(
   protocol: Protocol(model, message),
   codec: BinaryCodec(model, message),
@@ -1020,7 +1000,7 @@ fn protocol_decoder(
 }
 
 /// Wire tag and ordered fields for each `Protocol` variant. Field order must
-/// match the historical encoders exactly to keep the wire format unchanged.
+/// match the encoders exactly to keep the wire format unchanged.
 fn protocol_fields(
   protocol: Protocol(model, message),
 ) -> #(String, List(Field(model, message))) {

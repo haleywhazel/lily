@@ -19,33 +19,43 @@ pub fn main() {
   logging.configure()
   logging.set_level(logging.Info)
 
-  let assert Ok(server) =
-    server.start(
+  // Supervised, so a crash restarts the server rather than taking the node
+  // down. The name is minted once here and never again, since each call
+  // allocates an atom, and it is what lets `server` keep working after a
+  // restart has replaced the process behind it.
+  let assert Ok(#(_supervisor, server)) =
+    server.start_supervised(
+      name: server.name("lily_example_server"),
       initial: shared.initial_model(),
       serialiser: shared.serialiser(),
       wiring: shared.wiring(),
       // TODO: add your production origin here.
       origins: server.AllowedOrigins(["http://localhost:8080"]),
-    )
+      // Everything registered here runs again on every restart, so the hooks
+      // and the room kind come back with the server. Registered outside, they
+      // would be lost the first time it crashed.
+      started: fn(server) {
+        server.on_message(server, fn(message, _model, _client_id) {
+          logging.auto_log(logging.Info, message)
+        })
+        server.on_topic_message(server, fn(message, _topic_id, _client_id) {
+          logging.auto_log(logging.Info, message)
+        })
 
-  server.on_message(server, fn(message, _model, _client_id) {
-    logging.auto_log(logging.Info, message)
-  })
-  server.on_topic_message(server, fn(message, _topic_id, _client_id) {
-    logging.auto_log(logging.Info, message)
-  })
-
-  let assert Ok(_) =
-    topic.kind(
-      server,
-      prefix: "room:",
-      parse_id: fn(name) {
-        case name {
-          "" -> Error(Nil)
-          _ -> Ok(name)
-        }
+        let assert Ok(_) =
+          topic.kind(
+            server,
+            prefix: "room:",
+            parse_id: fn(name) {
+              case name {
+                "" -> Error(Nil)
+                _ -> Ok(name)
+              }
+            },
+            configure: fn(_room_name, room) { topic.with_store(room) },
+          )
+        Nil
       },
-      configure: fn(_room_name, room) { topic.with_store(room) },
     )
 
   let secret_key_base = wisp.random_string(64)
@@ -84,6 +94,7 @@ fn handle_request(
 
 type OutgoingMessage {
   OutgoingMessage(bytes: BitArray)
+  ServerGone
 }
 
 type WsState {
@@ -130,10 +141,18 @@ fn ws_init(
 
   let assert Ok(Nil) =
     server.connect(server, client_id:, origin:, send:, session: [])
+  // Ties the registration to this process, so a socket that dies without a
+  // close callback still leaves nothing behind.
+  server.watch(server, client_id:)
 
   let selector =
     process.new_selector()
     |> process.select(outgoing_subject)
+    // A supervised restart replaces the server, so close the socket and let
+    // the client reconnect rather than leave it reading Online forever.
+    |> process.select_specific_monitor(server.monitor(server), fn(_) {
+      ServerGone
+    })
 
   #(WsState(client_id:, server: server), Some(selector))
 }
@@ -153,6 +172,7 @@ fn handle_ws_message(
       let _ = mist.send_binary_frame(connection, bytes)
       mist.continue(state)
     }
+    mist.Custom(ServerGone) -> mist.stop()
 
     mist.Text(_) -> mist.continue(state)
     mist.Closed | mist.Shutdown -> mist.stop()

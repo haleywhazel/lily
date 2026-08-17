@@ -95,7 +95,7 @@ fn collect_indexed(
   convert: fn(value) -> Result(Reflected, Nil),
 ) -> Result(List(Reflected), Nil) {
   // Walk the positional keys '0', '1', and so on, converting each in turn and
-  // stopping at the first missing key so both wire formats agree on the field
+  // stopping at the first missing key so that both formats agree on the field
   // count. The MessagePack and JSON paths differ only in 'convert'.
   case dict.get(index, int.to_string(number)) {
     Error(_) -> Ok(list.reverse(accumulator))
@@ -267,10 +267,10 @@ fn json_set_to_reflected(
   Ok(ReflectedSet(members: reflected))
 }
 
-// Mirror of reflected_to_json. Classifies a parsed JSON `Dynamic` into a
-// Reflected node for reflection.construct, like message_pack_value_to_reflected
-// on the MessagePack path. Objects before lists before scalars, bare null last
-// as Nil.
+// Mirror of `reflected_to_json`, classifying a parsed JSON `Dynamic` into a
+// `Reflected` node for `reflection.construct`.
+//
+// Objects before lists before scalars, bare null last as Nil.
 fn json_to_reflected(value: Dynamic) -> Result(Reflected, Nil) {
   case run_decoder(value, decode.dict(decode.string, decode.dynamic)) {
     Ok(fields) -> json_object_to_reflected(fields)
@@ -434,8 +434,8 @@ fn reflected_to_message_pack(reflected: Reflected) -> BitArray {
       ])
     }
     ReflectedConstructor(name:, fields:) -> {
-      // Positional fields first, name tag last, byte-for-byte what the old FFI
-      // codecs emitted. Zero-field constructor is just the tag.
+      // Positional fields first, name tag last, byte-for-byte what the FFI
+      // codecs emit. A zero-field constructor is just the tag.
       let tag_entry = #(
         message_pack.encode_string("_"),
         message_pack.encode_string(name),

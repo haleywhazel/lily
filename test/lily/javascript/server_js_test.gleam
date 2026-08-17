@@ -88,10 +88,17 @@ pub fn js_server_connect_sends_connected_frame_test() {
       },
       session: [],
     )
+  // The incarnation is announced first, so a client knows which server it
+  // reached before it is told anything else.
   case list.reverse(test_support.get(ref)) {
-    [bytes] ->
-      transport.decode(bytes, serialiser: ser())
+    [version, connected] -> {
+      case transport.decode(version, serialiser: ser()) {
+        Ok(transport.Version(hash: hash)) -> { hash != "" } |> should.be_true
+        _ -> should.fail()
+      }
+      transport.decode(connected, serialiser: ser())
       |> should.equal(Ok(transport.Connected(client_id: "c1")))
+    }
     _ -> should.fail()
   }
 }

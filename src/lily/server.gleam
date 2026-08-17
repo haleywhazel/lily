@@ -1,10 +1,11 @@
-//// The [`Server`](#Server) is the authoritative half of a Lily app. It holds
-//// the real state and routes every message a client sends to the right store,
-//// either that client's own per-connection session store, or a named
-//// [topic](./topic.html) store shared between clients. Clients apply their own
-//// changes optimistically, the server has the final say and streams the
-//// corrected state back, so the two stay in sync (see
+//// The [`Server`](#Server) is the authoritative half of a Lily app. Clients
+//// apply their own changes optimistically, the server has the final say and
+//// streams the corrected state back, so the two stay in sync (see
 //// [transport](./transport.html) for the frames that carry it).
+////
+//// Every message a client sends lands in one of two places, either that
+//// client's own per-connection session store, or a named
+//// [topic](./topic.html) store shared between clients.
 ////
 //// It compiles for both targets, but not using the Erlang one means that you
 //// aren't leveraging BEAM's model and a full-stack JS model might be better
@@ -13,8 +14,9 @@
 //// You [`start`](#start) a server with the same three values your client
 //// gets, the initial model, the serialiser, and the shared
 //// [`Wiring`](./store.html#Wiring), plus an [`Origins`](#Origins) policy
-//// saying which browser origins may open a connection. Register your topics
-//// afterwards with [`topic.new`](./topic.html#new):
+//// saying which browser origins may open a connection.
+////
+//// Here's a server with one chat topic registered:
 ////
 //// ```gleam
 //// import gleam/result
@@ -38,10 +40,12 @@
 //// ```
 ////
 //// On Erlang, prefer [`start_supervised`](#start_supervised), which puts the
-//// server and its topics in an OTP supervision tree so a crash restarts them
-//// instead of taking the node down. Register topics in its `started` callback,
-//// which runs again on every restart. [`supervised`](#supervised) gives you
-//// the child specification for a tree you already have.
+//// server and its topics in an OTP supervision tree so that a crash restarts
+//// them instead of taking the node down. Register topics in its `started`
+//// callback, which runs again on every restart.
+////
+//// [`supervised`](#supervised) gives you the child specification for a tree
+//// you already have.
 ////
 //// Handing those same three values to [`client.start`](./client.html#start) is
 //// what makes both ends agree on the model, the update logic, and the wire
@@ -52,12 +56,9 @@
 //// The server never imports `mist` or `wisp`, it's completely
 //// transport-agnostic (the same way Lustre leaves the transport to you), so
 //// you wire it into whatever WebSocket or HTTP handler you're running with
-//// three calls. Create a stable id for each connection with
+//// three calls. Create a stable id with
 //// [`generate_client_id`](#generate_client_id), register it with
-//// [`connect`](#connect) (handing over the request's `Origin` header, the
-//// `send` callback the server uses to push frames back to that one client,
-//// and any messages that should seed this connection's session before the
-//// first frame arrives), feed every inbound frame to
+//// [`connect`](#connect), feed every inbound frame to
 //// [`incoming`](#incoming), and call [`disconnect`](#disconnect) when the
 //// socket closes:
 ////
@@ -79,6 +80,10 @@
 //// server.disconnect(server, client_id:)
 //// ```
 ////
+//// `connect` takes the request's `Origin` header, the `send` callback the
+//// server pushes frames back through, and any messages that should seed this
+//// connection's session before the first frame arrives.
+////
 //// A transport that wants to refuse the upgrade outright, with a 403 rather
 //// than an accepted socket that immediately closes, can run the same policy
 //// ahead of time with [`check_origin`](#check_origin).
@@ -86,10 +91,8 @@
 //// From there most apps just need the lifecycle hooks.
 //// [`on_connect`](#on_connect) and [`on_disconnect`](#on_disconnect) fire with
 //// the client id for presence tracking or audit logging,
-//// [`on_message`](#on_message) runs after each session message is applied
-//// (giving you the decoded message, the whole model after the update, and the
-//// client id, the natural home for side effects like writing to a database),
-//// and [`on_topic_message`](#on_topic_message) fires for each client-incoming
+//// [`on_message`](#on_message) runs after each session message is applied, and
+//// [`on_topic_message`](#on_topic_message) fires for each client-incoming
 //// topic message:
 ////
 //// ```gleam
@@ -97,21 +100,31 @@
 ////   logging.log(logging.Info, "client connected: " <> client_id)
 //// })
 ////
-//// server.on_message(server, fn(message, _model, _client_id) {
+//// server.on_message(server, fn(message, _model, client_id) {
 ////   case message {
-////     Session(SaveDocument(doc)) -> db.write(doc)
+////     // Spawned a process so that sync writes don't stall other clients
+////     Session(SaveDocument(doc)) ->
+////       process.spawn(fn() {
+////         let saved = db.write(doc)
+////         server.dispatch_to(server, client_id:, message: Saved(saved))
+////       })
 ////     _ -> Nil
 ////   }
 //// })
 //// ```
 ////
+//// That goes for every hook. They run inside the one actor every connection
+//// shares, so they're the place to notice something rather than the place to
+//// do it.
+////
 //// When the server itself needs to change a client's state, rather than react
 //// to something the client sent, reach for [`dispatch_to`](#dispatch_to). It
 //// applies a message to one client's session store and pushes the update
-//// straight back to them, ideal for seeding a session right after connect or
-//// for delivering the result of some async work once it lands (it's safe to
-//// call from any process, so spawn the slow thing and dispatch when it's
-//// ready):
+//// straight back to them.
+////
+//// For seeding a session right after connect, or for delivering
+//// the result of some async work once it lands. It's safe to call from any
+//// process, so spawn the slow thing and dispatch when it's ready:
 ////
 //// ```gleam
 //// server.on_connect(server, fn(client_id) {
@@ -121,11 +134,12 @@
 ////
 //// [`dispatch_to_all`](#dispatch_to_all) does the same to every connected
 //// client at once, for a server-wide change that also mutates session state.
+////
 //// If you only want to send something out without touching session state,
 //// broadcast through a [topic](./topic.html#broadcast) instead.
 ////
 //// Shut a server down with [`stop`](#stop), which asks every topic to stop
-//// first so subscribers' slices reset cleanly before the underlying actor
+//// first so that subscribers' slices reset before the underlying actor
 //// terminates.
 
 // =============================================================================
@@ -158,6 +172,27 @@ import gleam/otp/supervision
 // PUBLIC TYPES
 // =============================================================================
 
+/// Static asset requests to serve, from [`asset`](#asset).
+pub type Asset {
+  Asset(
+    path: String,
+    content_type: String,
+    /// Immutable for a content-hashed name, `no-store` for anything else
+    cache_control: String,
+    /// `None` when the file is sent as it sits on disk
+    content_encoding: Option(String),
+    /// `None` for an unhashed name
+    etag: Option(String),
+  )
+}
+
+/// A registered name for a supervised server, from [`name`](#name).
+pub opaque type ServerName(model, message) {
+  ServerName(
+    cell: actor_cell.CellName(InternalEvent(model, message), ServerReply),
+  )
+}
+
 /// Why a connection was refused before it was ever registered.
 pub type ConnectError {
   /// The `Origin` header did not match the configured allowlist.
@@ -171,22 +206,18 @@ pub type ConnectError {
 /// [`check_origin`](#check_origin).
 ///
 /// ```gleam
-/// server.AllowedOrigins(["https://example.com", "http://localhost:1234"])
+/// server.AllowedOrigins(["https://example.com", "http://localhost:8080"])
 /// ```
 pub type Origins {
-  /// Only these exact origins may open a connection. A request with no
-  /// `Origin` header, such as curl or a native app, is refused.
   AllowedOrigins(List(String))
-  /// Every origin may connect, including requests with no `Origin` header.
-  /// Only safe when the socket carries no cookie or other ambient credential.
   AnyOrigin
 }
 
-/// Handle to a running Lily server, backed by an
-/// [`actor_cell`](./internal/actor_cell.html) (OTP actor on Erlang, `Reference`
-/// cell on JavaScript). Also carries `serialiser`, `initial_model`, and the
-/// `origins` policy for zero-copy access by `topic.new` and by the origin
-/// checks, neither of which needs an actor round trip.
+/// Running Lily server. Use [`start`](#start) to start one rather than using
+/// this type.
+///
+/// Also carries `serialiser`, `initial_model` and the `origins` policy, which
+/// `topic.new` and the origin checks read without an actor round trip.
 pub opaque type Server(model, message) {
   Server(
     handle: ServerHandle(model, message),
@@ -202,24 +233,22 @@ pub opaque type Server(model, message) {
 // INTERNAL TYPES
 // =============================================================================
 
-/// Callbacks a topic actor registers so the server can route frames to it.
-/// Created in `topic.gleam`, stored in the server's topic registry.
+/// Callbacks a topic actor registers so that the server can route frames to
+/// it. Created in `topic.gleam`, stored in the server's topic registry.
 ///
 /// `subscribe` is the client-initiated path and runs the topic's
-/// `can_subscribe` predicate. `subscribe_trusted` is the server-initiated path
-/// used by `topic.subscribe` and skips that predicate. Both receive the
-/// client's session model so authorisation can read the connection context.
+/// `can_subscribe` predicate, `subscribe_trusted` is the server-initiated one
+/// and skips it. Both receive the client's session model so that authorisation
+/// can read the connection context.
 ///
 /// `rejoin` re-attaches a subscriber the server had already authorised, after
 /// the topic came back from a crash. It sends the snapshot but skips the join
-/// hooks, so a chat topic's `UserJoined` does not replay for every subscriber
-/// on every crash.
+/// hooks, so a chat topic's `UserJoined` doesn't replay for everybody on every
+/// crash.
 ///
-/// `respawn` builds a whole fresh entry on a new process, replaying whatever
-/// configuration the topic was given, and re-watches it. `None` means this
-/// topic cannot come back and the server should forget it.
-///
-/// `watched` is the topic's own process, so the server can notice when it dies.
+/// `respawn` builds a fresh entry on a new process, replaying whatever
+/// configuration the topic was given. `None` means this topic can't come back
+/// and the server should forget it.
 @internal
 pub type ServerTopicEntry(model, message) {
   ServerTopicEntry(
@@ -239,9 +268,82 @@ pub type ServerTopicEntry(model, message) {
 // PUBLIC FUNCTIONS
 // =============================================================================
 
-/// Check an origin without connecting, so a transport can refuse the upgrade
-/// with a 403 instead of accepting a socket and closing it. Runs the exact
-/// same policy [`connect`](#connect) does.
+/// Decide what to serve for a static asset, or `Error(Nil)` for anything that
+/// shouldn't be served. `exists` probes the filesystem, which keeps
+/// this pure and usable from either target, and `accepting` is the request's
+/// raw `accept-encoding` value.
+///
+/// A precompressed `.br` or `.gz` sibling is preferred whenever the client
+/// accepts it and the file is on disk.
+///
+/// Names carrying a content hash (`name.<8 hex>.css`) are tagged and made
+/// immutable, anything else is `no-store`.
+///
+/// `Error(Nil)` means this was not a servable asset, so answer 404 rather than
+/// falling through to an app route.
+///
+/// A missing stylesheet answered with HTML and a 200 is ignored by the browser
+/// and shows up only as an unstyled page.
+///
+/// ```gleam
+/// case server.asset(
+///   name: "lily-ui.a1b2c3d4.css",
+///   in: "../dist/assets",
+///   accepting: "gzip, deflate, br",
+///   exists: fn(path) { simplifile.is_file(path) |> result.unwrap(False) },
+/// ) {
+///   Ok(found) -> send_file(found)
+///   Error(Nil) -> not_found()
+/// }
+/// ```
+pub fn asset(
+  name name: String,
+  in directory: String,
+  accepting accepting: String,
+  exists exists: fn(String) -> Bool,
+) -> Result(Asset, Nil) {
+  use <- bool.guard(when: !asset_name_is_safe(name), return: Error(Nil))
+
+  let requested = directory <> "/" <> name
+  let #(path, encoding) = asset_encoding(requested, accepting, exists)
+  use <- bool.guard(when: !exists(path), return: Error(Nil))
+
+  let etag = case asset_hash(name) {
+    Error(Nil) -> option.None
+    // Folding the encoding in stops a shared cache handing the brotli body to
+    // a client that only reads gzip.
+    Ok(hash) -> option.Some("\"" <> hash <> option.unwrap(encoding, "") <> "\"")
+  }
+
+  Ok(Asset(
+    path:,
+    content_type: asset_content_type(name),
+    cache_control: asset_cache_control(name),
+    content_encoding: encoding,
+    etag:,
+  ))
+}
+
+/// This server incarnation's id, sent to every client as a
+/// [`Version`](./transport.html#Protocol) frame the moment it connects.
+///
+/// A restart mints a new one, so a client comparing it against the first it
+/// saw can tell a restarted server from a reconnected socket.
+///
+/// ```gleam
+/// server.boot_id(app)
+/// ```
+pub fn boot_id(server: Server(model, message)) -> String {
+  case query(server, BootId, StringReply("")) {
+    StringReply(id) -> id
+    _ -> ""
+  }
+}
+
+/// Check an origin without connecting, so that a transport can refuse the
+/// upgrade with a 403 instead of accepting a socket and closing it.
+///
+/// Runs the same policy [`connect`](#connect) does.
 ///
 /// ```gleam
 /// case server.check_origin(server, origin:) {
@@ -256,15 +358,17 @@ pub fn check_origin(
   validate_origin(server.origins, origin)
 }
 
-/// Register a client connection. `origin` is the request's `Origin` header, if
-/// any, and is checked against the server's [`Origins`](#Origins) policy
-/// before anything is registered, so a refused connection leaves no trace. The
-/// `send` callback pushes frames back to this specific client.
+/// Register a client connection. The `send` callback pushes frames back to
+/// this specific client.
 ///
-/// `session` seeds this connection's session store. Each message is applied
-/// and streamed back as a `SessionUpdate` before any inbound frame can be
-/// processed, which is how a transport hands the server what it learnt from
-/// the request, like the signed-in user. Pass `[]` for none.
+/// `origin` is the request's `Origin` header, if any, checked against the
+/// server's [`Origins`](#Origins) policy before anything is registered, so a
+/// refused connection leaves no trace.
+///
+/// `session` seeds this connection's session store, applied and streamed back
+/// as a `SessionUpdate` before any inbound frame can be processed. That's how
+/// a transport hands over what it learnt from the request, like the signed-in
+/// user. Pass `[]` for none.
 ///
 /// ```gleam
 /// server.connect(
@@ -284,7 +388,7 @@ pub fn connect(
 ) -> Result(Nil, ConnectError) {
   // validated up front so a refused origin never reaches the actor at all
   use _ <- result.try(validate_origin(server.origins, origin))
-  actor_cell.send(server.handle, ClientConnected(client_id:, send:, session:))
+  cast(server, ClientConnected(client_id:, send:, session:))
   Ok(Nil)
 }
 
@@ -294,15 +398,17 @@ pub fn disconnect(
   client_id client_id: String,
 ) -> Nil {
   let _ = actor_cell.unwatch(server.handle, client_id)
-  actor_cell.send(server.handle, ClientDisconnected(client_id:))
+  cast(server, ClientDisconnected(client_id:))
 }
 
 /// Apply `message` to one connected client's session store and send a
 /// `SessionUpdate` frame back to it. Use for server-initiated per-client
 /// updates, e.g. a fresh slice after auth, per-user timers, async DB results.
 ///
-/// No-op if no client with `client_id` is connected. Safe to call from any
-/// process, so spawn the slow work and call `dispatch_to` when it's ready.
+/// No-op if no client with `client_id` is connected.
+///
+/// Safe to call from any process, so spawn the slow work and call this when
+/// it's ready.
 ///
 /// ```gleam
 /// server.on_connect(server, fn(client_id) {
@@ -314,13 +420,14 @@ pub fn dispatch_to(
   client_id client_id: String,
   message message: message,
 ) -> Nil {
-  actor_cell.send(server.handle, DispatchToClient(client_id:, message:))
+  cast(server, DispatchToClient(client_id:, message:))
 }
 
 /// Apply `message` to every connected client's session store and send each a
 /// `SessionUpdate` frame. Use for server-wide announcements that also mutate
-/// session state, like a forced feature-flag refresh. For fire-and-forget
-/// broadcasts without session mutation, use a topic.
+/// session state, like a forced feature-flag refresh.
+///
+/// For fire-and-forget broadcasts without session mutation, use a topic.
 ///
 /// ```gleam
 /// server.dispatch_to_all(server, message: SystemBannerUpdated(banner))
@@ -329,12 +436,12 @@ pub fn dispatch_to_all(
   server: Server(model, message),
   message message: message,
 ) -> Nil {
-  actor_cell.send(server.handle, DispatchToAllClients(message:))
+  cast(server, DispatchToAllClients(message:))
 }
 
 /// Generate a cryptographically random 32-character hex client id. Pair with
-/// [`connect`](#connect) so every connection carries a stable, server-issued
-/// id.
+/// [`connect`](#connect) so that every connection carries a stable,
+/// server-issued id.
 ///
 /// ```gleam
 /// let client_id = server.generate_client_id()
@@ -344,32 +451,37 @@ pub fn generate_client_id() -> String {
   id.random_hex(client_id_bytes)
 }
 
-/// Process an incoming frame from a client. Decodes and routes it:
-/// `SessionMessage` to the session store, `TopicMessage`/`Subscribe`/
-/// `Unsubscribe` to the topic actor, `Resync` to a per-target snapshot
+/// Process an incoming frame from a client, decoding and routing it.
+///
+/// `SessionMessage` goes to the session store, `TopicMessage`, `Subscribe` and
+/// `Unsubscribe` to the topic actor, and `Resync` to a per-target snapshot
 /// fan-out.
 pub fn incoming(
   server: Server(model, message),
   client_id client_id: String,
   bytes bytes: BitArray,
 ) -> Nil {
-  actor_cell.send(server.handle, Incoming(client_id:, bytes:))
+  cast(server, Incoming(client_id:, bytes:))
 }
 
 /// Set the maximum number of live topic actors at once, bounding client-driven
-/// topic creation through parametric kinds. The default is generous, raise it
-/// if your app legitimately needs more concurrent topics.
+/// topic creation through parametric kinds.
+///
+/// The default is generous, raise it if your app legitimately needs more
+/// concurrent topics.
 ///
 /// ```gleam
 /// server.max_topics(server, 500_000)
 /// ```
 pub fn max_topics(server: Server(model, message), maximum: Int) -> Nil {
-  actor_cell.send(server.handle, SetMaxTopics(maximum:))
+  cast(server, SetMaxTopics(maximum:))
 }
 
 /// Register a hook that runs after a client connects, receiving the
-/// server-assigned client id. Use for presence, audit logging, or seeding the
-/// session via [`dispatch_to`](#dispatch_to).
+/// server-assigned client id.
+///
+/// Use for presence, audit logging, or seeding the session via
+/// [`dispatch_to`](#dispatch_to).
 ///
 /// ```gleam
 /// server.on_connect(server, fn(client_id) {
@@ -380,11 +492,13 @@ pub fn on_connect(
   server: Server(model, message),
   hook: fn(String) -> Nil,
 ) -> Nil {
-  actor_cell.send(server.handle, SetConnectHook(hook:))
+  cast(server, SetConnectHook(hook:))
 }
 
 /// Register a hook that runs after a client disconnects, receiving the id that
-/// just left. Use for presence cleanup or audit logging.
+/// just left.
+///
+/// Use for presence cleanup or audit logging.
 ///
 /// ```gleam
 /// server.on_disconnect(server, fn(client_id) {
@@ -395,17 +509,24 @@ pub fn on_disconnect(
   server: Server(model, message),
   hook: fn(String) -> Nil,
 ) -> Nil {
-  actor_cell.send(server.handle, SetDisconnectHook(hook:))
+  cast(server, SetDisconnectHook(hook:))
 }
 
 /// Register a hook that runs after each session message is applied. Receives
 /// the decoded message, the full outer model after it's applied to this
 /// client's session store, and the originating client id.
 ///
+/// Hooks run inside the one actor every connection shares, so start slow work
+/// rather than doing it here.
+///
 /// ```gleam
-/// server.on_message(server, fn(message, model, client_id) {
+/// server.on_message(server, fn(message, _model, client_id) {
 ///   case message {
-///     Session(SaveDocument(doc)) -> db.write(doc)
+///     Session(SaveDocument(doc)) ->
+///       process.spawn(fn() {
+///         let saved = db.write(doc)
+///         server.dispatch_to(server, client_id:, message: Saved(saved))
+///       })
 ///     _ -> Nil
 ///   }
 /// })
@@ -414,14 +535,16 @@ pub fn on_message(
   server: Server(model, message),
   hook: fn(message, model, String) -> Nil,
 ) -> Nil {
-  actor_cell.send(server.handle, SetHook(hook:))
+  cast(server, SetHook(hook:))
 }
 
 /// Register a hook that runs for each client-incoming topic message. Receives
-/// the decoded message, the topic id, and the originating client id. Fires
-/// before the topic actor processes it, whether the topic is stateful,
-/// ephemeral, or unknown. Does not fire for server-initiated
-/// `topic.dispatch`/`topic.broadcast`.
+/// the decoded message, the topic id, and the originating client id.
+///
+/// Fires before the topic actor processes it, whether the topic is stateful,
+/// ephemeral, or unknown.
+///
+/// Does not fire for server-initiated `topic.dispatch` or `topic.broadcast`.
 ///
 /// ```gleam
 /// server.on_topic_message(server, fn(message, topic_id, _client_id) {
@@ -432,13 +555,15 @@ pub fn on_topic_message(
   server: Server(model, message),
   hook: fn(message, String, String) -> Nil,
 ) -> Nil {
-  actor_cell.send(server.handle, SetTopicMessageHook(hook:))
+  cast(server, SetTopicMessageHook(hook:))
 }
 
 /// Start a server. Provide the shared initial model (the zero-state for
 /// per-connection session stores and for topic snapshots), the serialiser, the
 /// shared wiring, and the [`Origins`](#Origins) policy every connection is
-/// checked against. Add topics afterwards via `topic.new(server, ...)`.
+/// checked against.
+///
+/// Add topics afterwards via `topic.new(server, ...)`.
 ///
 /// ```gleam
 /// let assert Ok(server) =
@@ -477,19 +602,25 @@ pub fn start(
 /// supervisor and the running server. Erlang only, JavaScript has no
 /// processes to supervise, so use [`start`](#start) there.
 ///
-/// Register your topics inside `started`, not afterwards. `started` runs every
-/// time the server is (re)started, and each restart is a genuinely new server,
-/// so anything registered outside it would be lost on the first crash.
+/// Register your topics inside `started`, not afterwards. It runs every time
+/// the server is (re)started, so anything registered outside it would be lost
+/// on the first crash.
 ///
-/// The tree is `OneForAll`. A server restart already loses every client's
-/// `send` closure, since connections live in transport processes outside this
-/// tree, so **a Lily server restart drops all connections**. Clients reconnect
-/// and resync. Topic actors hang off a supervisor owned by the server, so
-/// they go down with it and come back with it.
+/// `name` comes from [`name`](#name) and is what keeps the returned `Server`
+/// working across a restart, since it resolves the registered name rather than
+/// the pid it booted on.
+///
+/// The tree is `OneForAll`, and topic actors hang off a supervisor owned by
+/// the server, so they go down with it and come back with it.
+///
+/// A restart loses every client's `send` closure, since connections live in
+/// transport processes outside this tree. Pair with [`monitor`](#monitor) so
+/// that those sockets close and their clients reconnect and resync.
 ///
 /// ```gleam
 /// let assert Ok(#(_supervisor, server)) =
 ///   server.start_supervised(
+///     name: server.name("my_app_server"),
 ///     initial: shared.initial_model(),
 ///     serialiser: shared.serialiser(),
 ///     wiring: shared.wiring(),
@@ -501,23 +632,32 @@ pub fn start(
 ///   )
 /// ```
 pub fn start_supervised(
+  name name: ServerName(model, message),
   initial initial: model,
   serialiser serialiser: Serialiser(model, message),
   wiring wiring: store.Wiring(model, message),
   origins origins: Origins,
   started started: fn(Server(model, message)) -> Nil,
 ) -> Result(#(static_supervisor.Supervisor, Server(model, message)), Nil) {
-  // the child's start runs inside the supervisor process, so the only way back
-  // to this caller is a channel it owns
+  // The child's start runs inside the supervisor process, so the only way
+  // back to this caller is a channel it owns.
   let ready = process.new_subject()
   let child =
-    supervised(initial:, serialiser:, wiring:, origins:, started: fn(server) {
-      process.send(ready, server)
-      started(server)
-    })
+    supervised(
+      name:,
+      initial:,
+      serialiser:,
+      wiring:,
+      origins:,
+      started: fn(server) {
+        process.send(ready, server)
+        started(server)
+      },
+    )
   let tree =
     static_supervisor.new(static_supervisor.OneForAll)
-    // the 2 in 5 default is tight for a process a hostile client can influence
+    // The 2 in 5 default is tight for a process a hostile client can
+    // influence.
     |> static_supervisor.restart_tolerance(intensity: 3, period: 10)
     |> static_supervisor.add(child)
     |> static_supervisor.start
@@ -531,15 +671,58 @@ pub fn start_supervised(
   }
 }
 
+@target(erlang)
+/// Monitor the server process, so that a transport can close its sockets when
+/// the server goes. Erlang only, JavaScript has no processes to monitor.
+///
+/// Call it from the process that owns the connection and select on the `Down`.
+///
+/// A supervised restart replaces the process behind the handle. Without this a
+/// client holding a socket to the old one sits there reading Online forever,
+/// never reconnecting and never resyncing.
+///
+/// ```gleam
+/// let gone = server.monitor(app)
+/// process.new_selector()
+/// |> process.select(outgoing)
+/// |> process.select_specific_monitor(gone, fn(_) { ServerGone })
+/// ```
+pub fn monitor(server: Server(model, message)) -> process.Monitor {
+  process.monitor(actor_cell.watched_pid(actor_cell.watched(server.handle)))
+}
+
+@target(erlang)
+/// Mint a name for a supervised server. Pair with
+/// [`start_supervised`](#start_supervised) or [`supervised`](#supervised).
+///
+/// Call it once while your program starts and hold the result. Each call
+/// allocates an atom that is never collected, so calling it inside a loop, a
+/// hook, or anything a supervisor restarts will eventually fill the atom table
+/// and take the VM down with it.
+///
+/// A `Server` built against a name keeps working across restarts, so a
+/// transport can capture it once at boot.
+///
+/// ```gleam
+/// let name = server.name("my_app_server")
+/// let assert Ok(#(_tree, app)) =
+///   server.start_supervised(name:, initial:, serialiser:, wiring:, origins:,
+///     started:)
+/// ```
+pub fn name(prefix: String) -> ServerName(model, message) {
+  ServerName(cell: actor_cell.new_name(prefix))
+}
+
 /// Stop a running server. Every topic actor is asked to stop first, sending
-/// each subscriber a final `Acknowledge(Topic(id), seq)` so slices reset
-/// cleanly. The server actor then terminates (Erlang) or its `Reference` cell
-/// is cleared (JavaScript). Session clients receive no extra frame.
+/// each subscriber a final `Acknowledge(Topic(id), seq)` so that slices reset.
+///
+/// The server actor then terminates (Erlang) or its `Reference` cell is
+/// cleared (JavaScript). Session clients receive no extra frame.
 ///
 /// A supervised server is restarted by its supervisor, so stop the tree rather
 /// than the server when you mean to shut down for good.
 pub fn stop(server: Server(model, message)) -> Nil {
-  actor_cell.send(server.handle, Stop)
+  cast(server, Stop)
 }
 
 @target(erlang)
@@ -548,14 +731,17 @@ pub fn stop(server: Server(model, message)) -> Nil {
 /// only, JavaScript has no processes to supervise, so use [`start`](#start)
 /// there.
 ///
-/// `started` runs inside the supervisor every time the server starts, so it is
-/// where topics get registered. A caller cannot hold a `Server` from before a
-/// restart, because a restarted server is a new one.
+/// `started` runs inside the supervisor every time the server starts, so that
+/// is where topics get registered.
+///
+/// A restarted server is a new process, but the `name` keeps a
+/// `Server` taken before the restart pointing at whichever one is live.
 ///
 /// ```gleam
 /// supervisor.new(supervisor.OneForOne)
 /// |> supervisor.add(
 ///   server.supervised(
+///     name: server.name("my_app_server"),
 ///     initial: shared.initial_model(),
 ///     serialiser: shared.serialiser(),
 ///     wiring: shared.wiring(),
@@ -569,6 +755,7 @@ pub fn stop(server: Server(model, message)) -> Nil {
 /// |> supervisor.start
 /// ```
 pub fn supervised(
+  name name: ServerName(model, message),
   initial initial: model,
   serialiser serialiser: Serialiser(model, message),
   wiring wiring: store.Wiring(model, message),
@@ -581,6 +768,7 @@ pub fn supervised(
         new_state(initial, serialiser, wiring),
         reduce:,
         on_down: on_watch_down,
+        name: name.cell,
       )
     case cell {
       Error(_) -> Error(actor.InitFailed("lily: server failed to start"))
@@ -603,13 +791,14 @@ pub fn supervised(
 }
 
 /// Tie a client's registration to the process that owns its connection. Call
-/// it from that process, immediately after [`connect`](#connect). When the
-/// process dies the server runs the same cleanup
-/// [`disconnect`](#disconnect) does, so a socket that dies without a close
-/// callback leaves nothing behind. No-op on JavaScript, which has no
-/// processes.
+/// it from that process, immediately after [`connect`](#connect). No-op on
+/// JavaScript, which has no processes.
 ///
-/// It is opt-in rather than part of `connect` because an HTTP transport calls
+/// When the process dies the server runs the same cleanup
+/// [`disconnect`](#disconnect) does, so that a socket dying without a close
+/// callback leaves nothing behind.
+///
+/// It's opt-in rather than part of `connect` because an HTTP transport calls
 /// `connect` from a request process that dies straight away, which would
 /// disconnect the client the instant it connected. Call it from long-lived
 /// connection processes only, such as a WebSocket handler.
@@ -632,29 +821,27 @@ pub fn watch(
 // INTERNAL FUNCTIONS
 // =============================================================================
 
-/// Number of currently registered clients. Test-only accessor.
+/// Number of currently registered clients.
+///
+/// Test-only accessor currently, might be useful to make public later.
 @internal
 pub fn client_count(server: Server(model, message)) -> Int {
-  case actor_cell.call(server.handle, ClientCount, default: CountReply(-1)) {
+  case query(server, ClientCount, CountReply(-1)) {
     CountReply(count) -> count
     _ -> -1
   }
 }
 
-/// Subscribe a client to a topic via the server, so it can look up the
-/// client's send function.
 @internal
 pub fn do_subscribe(
   server: Server(model, message),
   client_id: String,
   topic_id: String,
 ) -> Nil {
-  actor_cell.send(server.handle, DoSubscribe(client_id:, topic_id:))
+  cast(server, DoSubscribe(client_id:, topic_id:))
 }
 
-/// Config values `topic.gleam` needs to build a topic actor: the initial model
-/// (for full-outer-model snapshots), the serialiser (to encode topic frames),
-/// and the wiring (to look up the apply function for a topic id).
+/// Config values `topic.gleam` needs to build a topic actor.
 @internal
 pub fn internals(
   server: Server(model, message),
@@ -662,16 +849,19 @@ pub fn internals(
   #(server.initial_model, server.serialiser, server.wiring)
 }
 
-/// The supervisor topic actors are started under. Inert unless the server was
-/// started with [`start_supervised`](#start_supervised) or
-/// [`supervised`](#supervised).
+/// The supervisor topic actors are started under.
+///
+/// Inert unless the server was started with
+/// [`start_supervised`](#start_supervised) or [`supervised`](#supervised).
 @internal
 pub fn supervisor(server: Server(model, message)) -> actor_cell.Supervisor {
   server.supervisor
 }
 
-/// Register a topic entry under `id`. Returns `Error(Nil)` if `id` already
-/// exists or collides with a registered kind prefix.
+/// Register a topic entry under `id`.
+///
+/// `Error(Nil)` if `id` already exists or collides with a registered kind
+/// prefix.
 @internal
 pub fn register_topic(
   server: Server(model, message),
@@ -679,11 +869,7 @@ pub fn register_topic(
   entry: ServerTopicEntry(model, message),
 ) -> Result(Nil, Nil) {
   let reply =
-    actor_cell.call(
-      server.handle,
-      RegisterTopic(id:, entry:),
-      default: RegisterReply(Error(Nil)),
-    )
+    query(server, RegisterTopic(id:, entry:), RegisterReply(Error(Nil)))
   case reply {
     RegisterReply(Ok(Nil)) -> {
       let _ = watch_topic(server, id, entry.watched)
@@ -693,11 +879,11 @@ pub fn register_topic(
   }
 }
 
-/// Register a parametric topic kind. When a client subscribes to an id
-/// starting with `prefix` and no fixed topic with that id exists, `create` is
-/// called with the full id and returns a `ServerTopicEntry` on success or
-/// `None` to reject. `find_or_create_topic` inserts the entry directly, no
-/// server callback needed.
+/// Register a parametric topic kind.
+///
+/// When a client subscribes to an id starting with `prefix` and no fixed topic
+/// with that id exists, `create` is called with the full id and returns a
+/// `ServerTopicEntry`, or `None` to reject.
 @internal
 pub fn register_topic_kind(
   server: Server(model, message),
@@ -705,10 +891,10 @@ pub fn register_topic_kind(
   create: fn(String) -> Option(ServerTopicEntry(model, message)),
 ) -> Result(Nil, Nil) {
   case
-    actor_cell.call(
-      server.handle,
+    query(
+      server,
       RegisterTopicKind(prefix:, create:),
-      default: RegisterReply(Error(Nil)),
+      RegisterReply(Error(Nil)),
     )
   {
     RegisterReply(result) -> result
@@ -716,53 +902,93 @@ pub fn register_topic_kind(
   }
 }
 
-/// Replace the respawn closure of the topic registered under `id`. Each of
-/// `topic.gleam`'s configuration steps records itself, so a topic that comes
-/// back from a crash comes back configured.
+/// Run `operation`, or log and hand back `default` when it crashes. `label`
+/// names the callback in the log line.
+///
+/// Wraps every place the server and a topic call into user code, since one
+/// client's bad callback must not take down the actor every other client
+/// shares.
+@internal
+pub fn rescue_or(
+  label: String,
+  default: value,
+  operation: fn() -> value,
+) -> value {
+  case rescue(operation) {
+    Ok(value) -> value
+    Error(reason) -> {
+      logging.log(logging.Error, "lily: " <> label <> " crashed: " <> reason)
+      default
+    }
+  }
+}
+
+/// Push one frame to a client, reporting whether it got there.
+///
+/// `False` means the transport's own send closure raised, which is a dead
+/// connection rather than a bad frame, so the caller drops that client instead
+/// of trying again.
+@internal
+pub fn rescue_send(
+  label: String,
+  send: fn(BitArray) -> Nil,
+  frame: BitArray,
+) -> Bool {
+  case rescue(fn() { send(frame) }) {
+    Ok(Nil) -> True
+    Error(reason) -> {
+      logging.log(
+        logging.Error,
+        "lily: " <> label <> " send crashed: " <> reason,
+      )
+      False
+    }
+  }
+}
+
+/// Replace the respawn closure of the topic registered under `id`.
+///
+/// Each of `topic.gleam`'s configuration steps records itself, so that a topic
+/// coming back from a crash comes back configured.
 @internal
 pub fn set_topic_respawn(
   server: Server(model, message),
   id: String,
   respawn: fn() -> Option(ServerTopicEntry(model, message)),
 ) -> Nil {
-  actor_cell.send(server.handle, SetTopicRespawn(id:, respawn:))
+  cast(server, SetTopicRespawn(id:, respawn:))
 }
 
-/// The process running the topic registered under `id`, if any. Test-only
-/// accessor.
+/// The process running the topic registered under `id`, if any.
+///
+/// Test-only accessor.
 @internal
 pub fn topic_watched(
   server: Server(model, message),
   id: String,
 ) -> Option(actor_cell.Watched) {
-  case
-    actor_cell.call(
-      server.handle,
-      TopicWatched(id:),
-      default: WatchedReply(option.None),
-    )
-  {
+  case query(server, TopicWatched(id:), WatchedReply(option.None)) {
     WatchedReply(watched) -> watched
     _ -> option.None
   }
 }
 
-/// Remove a topic entry from the server registry.
 @internal
 pub fn unregister_topic(server: Server(model, message), id: String) -> Nil {
   let _ = actor_cell.unwatch(server.handle, topic_watch_key(id))
-  actor_cell.send(server.handle, UnregisterTopic(id:))
+  cast(server, UnregisterTopic(id:))
 }
 
-/// The process running the server itself. Test-only accessor.
+/// The process running the server itself.
+///
+/// Test-only accessor.
 @internal
 pub fn watched(server: Server(model, message)) -> actor_cell.Watched {
   actor_cell.watched(server.handle)
 }
 
-/// Watch the process running the topic registered under `id`, so the server
-/// deregisters it if it dies. Called from `topic.gleam` on both the fixed and
-/// the parametric creation paths.
+/// Watch the process running the topic registered under `id`, so that the
+/// server deregisters it if it dies.
 @internal
 pub fn watch_topic(
   server: Server(model, message),
@@ -781,6 +1007,7 @@ type ConnectionState(model, message) {
 }
 
 type InternalEvent(model, message) {
+  BootId
   ClientCount
   ClientConnected(
     client_id: String,
@@ -815,10 +1042,10 @@ type InternalEvent(model, message) {
 type ServerHandle(model, message) =
   Cell(ServerState(model, message), InternalEvent(model, message), ServerReply)
 
-/// Every synchronous answer the server actor can give, in one type because a
-/// cell has a single reply type.
+/// Every synchronous answer the server actor can give.
 type ServerReply {
   CountReply(Int)
+  StringReply(String)
   RegisterReply(Result(Nil, Nil))
   WatchedReply(Option(actor_cell.Watched))
 }
@@ -839,6 +1066,12 @@ type ServerState(model, message) {
     on_topic_message_hook: fn(message, String, String) -> Nil,
     max_topics: Int,
     restarts: Dict(String, Int),
+    boot_id: String,
+    // Clients whose send closure raised during this reduction.
+    //
+    // Swept at the end of it rather than mid-handler, so one dead connection
+    // needn't be threaded back through every call site that writes to one.
+    failed_sends: Set(String),
   )
 }
 
@@ -862,9 +1095,9 @@ const default_max_topics = 100_000
 
 // How many times one topic id may be respawned before the server gives up on
 // it. A topic that crashes inside its own `on_subscribe` would otherwise
-// restart in a tight loop with the whole subscriber list re-attaching each
-// time. The count is per topic id and per registration, not a sliding window,
-// so it is cleared when a fixed topic is registered afresh.
+// restart in a tight loop, the whole subscriber list re-attaching each time.
+//
+// Per topic id and per registration, not a sliding window.
 const max_topic_restarts = 5
 
 // Ceiling in milliseconds on waiting for a supervised server to report itself
@@ -873,12 +1106,14 @@ const max_topic_restarts = 5
 const start_timeout_milliseconds = 5000
 
 // Client ids and topic ids share one watch key namespace, so topic keys carry
-// a prefix. A client id is exactly 32 hex characters, and ':' is not a hex
-// character, so the two can never collide however a topic is named.
+// a prefix.
+//
+// A client id is exactly 32 hex characters and ':' isn't a hex character, so
+// the two can never collide however a topic is named.
 const topic_watch_prefix = "topic:"
 
-/// Apply `message` to a connection's model under crash isolation, returning the
-/// new model or the crash reason. `None` session apply leaves the model as-is.
+/// Apply `message` to a connection's model under crash isolation, returning
+/// the new model or the crash reason.
 fn apply_session(
   state: ServerState(model, message),
   connection: ConnectionState(model, message),
@@ -888,6 +1123,113 @@ fn apply_session(
     option.None -> Ok(connection.model)
     option.Some(apply) -> rescue(fn() { apply(connection.model, message) })
   }
+}
+
+/// `no-store` unless the name carries a content hash, which is what makes a
+/// URL unique to its bytes and so safe to keep forever.
+fn asset_cache_control(name: String) -> String {
+  case asset_hash(name) {
+    Ok(_) -> "public, max-age=31536000, immutable"
+    Error(Nil) -> "no-store"
+  }
+}
+
+/// The media type for a requested asset name.
+///
+/// Falls back to a generic binary type rather than refusing to serve something
+/// the table hasn't met yet.
+fn asset_content_type(name: String) -> String {
+  case asset_extension(name) {
+    "css" -> "text/css; charset=utf-8"
+    "js" | "mjs" -> "text/javascript; charset=utf-8"
+    "woff2" -> "font/woff2"
+    "json" -> "application/json; charset=utf-8"
+    "svg" -> "image/svg+xml"
+    _ -> "application/octet-stream"
+  }
+}
+
+/// The precompressed sibling to send, and the encoding to declare for it.
+///
+/// Brotli is tried first, being the smaller of the two.
+fn asset_encoding(
+  path: String,
+  accepting: String,
+  exists: fn(String) -> Bool,
+) -> #(String, Option(String)) {
+  let taken =
+    [#(".br", "br"), #(".gz", "gzip")]
+    |> list.filter(fn(candidate) { encoding_accepted(accepting, candidate.1) })
+    |> list.filter(fn(candidate) { exists(path <> candidate.0) })
+
+  case taken {
+    [#(suffix, encoding), ..] -> #(path <> suffix, option.Some(encoding))
+    [] -> #(path, option.None)
+  }
+}
+
+fn asset_extension(name: String) -> String {
+  case list.reverse(string.split(name, on: ".")) {
+    [last, _, ..] -> last
+    _ -> ""
+  }
+}
+
+/// The content hash out of a `name.<8 lowercase hex>.extension` filename.
+fn asset_hash(name: String) -> Result(String, Nil) {
+  case list.reverse(string.split(name, on: ".")) {
+    [_extension, hash, _stem, ..] ->
+      case
+        string.length(hash) == 8
+        && list.all(string.to_graphemes(hash), fn(character) {
+          string.contains(does: "0123456789abcdef", contain: character)
+        })
+      {
+        True -> Ok(hash)
+        False -> Error(Nil)
+      }
+    _ -> Error(Nil)
+  }
+}
+
+/// Assets are a flat directory of generated names, so anything carrying a path
+/// separator or a parent reference didn't come from a build.
+///
+/// Refused before it can reach the filesystem.
+fn asset_name_is_safe(name: String) -> Bool {
+  name != ""
+  && !string.contains(name, "..")
+  && !string.contains(name, "/")
+  && !string.contains(name, "\\")
+}
+
+/// Whether an `accept-encoding` value offers `token`.
+///
+/// A `q=0` parameter is a refusal, so an encoding listed only to reject it
+/// isn't offered.
+fn encoding_accepted(accepting: String, token: String) -> Bool {
+  string.split(accepting, on: ",")
+  |> list.map(string.trim)
+  |> list.any(fn(entry) {
+    case string.split_once(entry, on: ";") {
+      Ok(#(name, parameters)) ->
+        string.trim(name) == token && !string.contains(parameters, "q=0")
+      Error(Nil) -> entry == token
+    }
+  })
+}
+
+/// Cast an event at the server actor.
+///
+/// A supervised server's name is briefly unregistered while it restarts, and
+/// `process.send` to an unregistered name raises rather than dropping the
+/// message. This runs in the transport's own process, so an unguarded cast
+/// would take a caller's socket down with the server.
+fn cast(
+  server: Server(model, message),
+  event: InternalEvent(model, message),
+) -> Nil {
+  rescue_or("cast", Nil, fn() { actor_cell.send(server.handle, event) })
 }
 
 /// Bump a client's session sequence and store the new model against it.
@@ -912,8 +1254,8 @@ fn find_or_create_topic(
 ) -> #(ServerState(model, message), Option(ServerTopicEntry(model, message))) {
   case dict.get(state.topics, topic_id) {
     Ok(entry) -> #(state, option.Some(entry))
-    // parametric ids come from the client, so refuse past the cap to stop one
-    // client spawning topics without bound
+    // Parametric ids come from the client, so refuse past the cap to stop one
+    // client spawning topics without bound.
     Error(_) ->
       case dict.size(state.topics) >= state.max_topics {
         True -> #(state, option.None)
@@ -925,7 +1267,15 @@ fn find_or_create_topic(
           case kind {
             Error(_) -> #(state, option.None)
             Ok(k) ->
-              case k.create(topic_id) {
+              // Any client reaches this by subscribing to an id under the
+              // prefix, so the user's `configure` runs on demand and a crash
+              // in it has to deny the subscribe rather than take down the
+              // actor every other client shares.
+              case
+                rescue_or("topic create", option.None, fn() {
+                  k.create(topic_id)
+                })
+              {
                 option.None -> #(state, option.None)
                 option.Some(entry) -> {
                   let topics = dict.insert(state.topics, topic_id, entry)
@@ -961,19 +1311,17 @@ fn handle_connect_logic(
   let clients = dict.insert(state.clients, client_id, send)
   let connection = ConnectionState(model: state.initial_model, sequence: 0)
   let sessions = dict.insert(state.sessions, client_id, connection)
-  send(transport.encode(
-    transport.Connected(client_id:),
-    serialiser: state.serialiser,
-  ))
   let state = ServerState(..state, clients:, sessions:)
-  // seeds are applied inside the actor, so they land before any inbound frame
-  // from this client can be processed. `handle_dispatch_to_logic` already
-  // isolates a crashing update and drops just that message.
+  let state =
+    push(state, client_id, send, transport.Version(hash: state.boot_id))
+  let state = push(state, client_id, send, transport.Connected(client_id:))
+  // Seeds are applied inside the actor, so they land before any inbound frame
+  // from this client can be processed.
   let state =
     list.fold(session, state, fn(acc, message) {
       handle_dispatch_to_logic(acc, client_id, message)
     })
-  state.on_connect_hook(client_id)
+  rescue_or("on_connect", Nil, fn() { state.on_connect_hook(client_id) })
   state
 }
 
@@ -981,8 +1329,8 @@ fn handle_disconnect_logic(
   state: ServerState(model, message),
   client_id: String,
 ) -> ServerState(model, message) {
-  // a close callback and a dead connection process can both land, so the hook
-  // must only fire for a client that is still registered
+  // A close callback and a dead connection process can both land, so the hook
+  // must only fire for a client that is still registered.
   use <- bool.guard(
     when: !dict.has_key(state.clients, client_id),
     return: state,
@@ -998,7 +1346,7 @@ fn handle_disconnect_logic(
   let clients = dict.delete(state.clients, client_id)
   let client_topics = dict.delete(state.client_topics, client_id)
   let sessions = dict.delete(state.sessions, client_id)
-  state.on_disconnect_hook(client_id)
+  rescue_or("on_disconnect", Nil, fn() { state.on_disconnect_hook(client_id) })
   ServerState(..state, clients:, client_topics:, sessions:)
 }
 
@@ -1019,8 +1367,8 @@ fn handle_dispatch_to_logic(
   case dict.get(state.sessions, client_id), dict.get(state.clients, client_id) {
     Ok(connection), Ok(send) ->
       case apply_session(state, connection, message) {
-        // a crashing update must not take down the shared actor and every
-        // connection on it, so drop this dispatch without sending an update
+        // A crashing update must not take down the shared actor and every
+        // connection on it, so drop this dispatch without sending an update.
         Error(reason) -> {
           logging.log(
             logging.Warning,
@@ -1030,12 +1378,13 @@ fn handle_dispatch_to_logic(
         }
         Ok(new_model) -> {
           let new_sequence = connection.sequence + 1
-          let frame =
-            transport.encode(
+          let state =
+            push(
+              state,
+              client_id,
+              send,
               transport.SessionUpdate(sequence: new_sequence, payload: message),
-              serialiser: state.serialiser,
             )
-          send(frame)
           commit_session(state, client_id, new_model, new_sequence)
         }
       }
@@ -1067,7 +1416,13 @@ fn handle_incoming_logic(
   client_id: String,
   bytes: BitArray,
 ) -> ServerState(model, message) {
-  case transport.decode(bytes, serialiser: state.serialiser) {
+  // The user's decoder runs on bytes a hostile client chose, so a crash in it
+  // has to be worth as much as a frame that fails to decode.
+  let decoded =
+    rescue_or("decode", Error(Nil), fn() {
+      transport.decode(bytes, serialiser: state.serialiser)
+    })
+  case decoded {
     Ok(transport.SessionMessage(payload:)) ->
       handle_session_message_logic(state, client_id, payload)
 
@@ -1121,8 +1476,8 @@ fn handle_register_topic_logic(
   entry: ServerTopicEntry(model, message),
 ) -> #(ServerState(model, message), Result(Nil, Nil)) {
   let already_exists = dict.has_key(state.topics, id)
-  // both directions matter, `id="room:1"` collides with kind prefix `"room:"`,
-  // and a fixed `id="room"` would shadow that prefix
+  // Both directions matter, `id="room:1"` collides with kind prefix
+  // `"room:"`, and a fixed `id="room"` would shadow that prefix.
   let kind_collision =
     list.any(state.topic_kinds, fn(kind) {
       string.starts_with(id, kind.prefix) || string.starts_with(kind.prefix, id)
@@ -1131,7 +1486,7 @@ fn handle_register_topic_logic(
     True -> #(state, Error(Nil))
     False -> {
       let topics = dict.insert(state.topics, id, entry)
-      // a fresh registration is a fresh life, so the restart budget resets
+      // A fresh registration is a fresh life, so the restart budget resets.
       let restarts = dict.delete(state.restarts, id)
       #(ServerState(..state, topics:, restarts:), Ok(Nil))
     }
@@ -1148,24 +1503,21 @@ fn handle_resync_logic(
     Ok(send) ->
       list.fold(cursors, state, fn(state, target) {
         case target {
-          transport.Session -> {
+          transport.Session ->
             case dict.get(state.sessions, client_id) {
-              Ok(connection) -> {
-                let snapshot_frame =
-                  transport.encode(
-                    transport.Snapshot(
-                      target: transport.Session,
-                      sequence: connection.sequence,
-                      state: connection.model,
-                    ),
-                    serialiser: state.serialiser,
-                  )
-                send(snapshot_frame)
-              }
-              Error(_) -> Nil
+              Error(_) -> state
+              Ok(connection) ->
+                push(
+                  state,
+                  client_id,
+                  send,
+                  transport.Snapshot(
+                    target: transport.Session,
+                    sequence: connection.sequence,
+                    state: connection.model,
+                  ),
+                )
             }
-            state
-          }
 
           transport.Topic(id) ->
             case dict.get(state.topics, id) {
@@ -1187,8 +1539,8 @@ fn handle_session_message_logic(
     Error(_) -> state
     Ok(connection) ->
       case apply_session(state, connection, message) {
-        // a crash means the frame decoded to a value update can't match, drop
-        // it without acking to keep the actor alive
+        // A crash means the frame decoded to a value update can't match, so
+        // drop it without acking to keep the actor alive.
         Error(reason) -> {
           logging.log(
             logging.Warning,
@@ -1201,21 +1553,22 @@ fn handle_session_message_logic(
         }
         Ok(new_model) -> {
           let new_sequence = connection.sequence + 1
-          case dict.get(state.clients, client_id) {
-            Ok(send) -> {
-              let ack_frame =
-                transport.encode(
-                  transport.Acknowledge(
-                    target: transport.Session,
-                    sequence: new_sequence,
-                  ),
-                  serialiser: state.serialiser,
-                )
-              send(ack_frame)
-            }
-            Error(_) -> Nil
+          let state = case dict.get(state.clients, client_id) {
+            Error(_) -> state
+            Ok(send) ->
+              push(
+                state,
+                client_id,
+                send,
+                transport.Acknowledge(
+                  target: transport.Session,
+                  sequence: new_sequence,
+                ),
+              )
           }
-          state.on_message_hook(message, new_model, client_id)
+          rescue_or("on_message", Nil, fn() {
+            state.on_message_hook(message, new_model, client_id)
+          })
           commit_session(state, client_id, new_model, new_sequence)
         }
       }
@@ -1272,9 +1625,8 @@ fn handle_set_topic_respawn_logic(
   }
 }
 
-/// Stop every topic actor (each sends a final `Acknowledge(Topic(id), seq)` to
-/// its subscribers) before the server goes away. Called from both the Erlang
-/// `Stop` arm and the JavaScript `stop()` method.
+/// Stop every topic actor before the server goes away, each sending a final
+/// `Acknowledge(Topic(id), seq)` to its subscribers.
 fn handle_stop_logic(state: ServerState(model, message)) -> Nil {
   dict.each(state.topics, fn(_id, entry) { entry.stop() })
 }
@@ -1285,8 +1637,8 @@ fn handle_subscribe_logic(
   topic_id: String,
 ) -> ServerState(model, message) {
   case dict.get(state.clients, client_id), dict.get(state.sessions, client_id) {
-    // no session means no connection context to authorise against, so skip
-    // rather than crash
+    // No session means no connection context to authorise against, so skip
+    // rather than crash.
     Error(_), _ | _, Error(_) -> state
     Ok(send), Ok(connection) ->
       case find_or_create_topic(state, topic_id) {
@@ -1294,24 +1646,24 @@ fn handle_subscribe_logic(
           entry.subscribe(client_id, connection.model, send)
           track_subscription(state, client_id, topic_id)
         }
-        #(state, option.None) -> {
-          let rejected_frame =
-            transport.encode(
-              transport.Rejected(topic_id:, reason: "not found"),
-              serialiser: state.serialiser,
-            )
-          send(rejected_frame)
-          state
-        }
+        #(state, option.None) ->
+          push(
+            state,
+            client_id,
+            send,
+            transport.Rejected(topic_id:, reason: "not found"),
+          )
       }
   }
 }
 
-/// Handle a topic whose actor died. The topic is respawned on a fresh process
-/// and every client the server had already authorised is re-attached, unless
-/// it has crashed too often or cannot be rebuilt, in which case it is
-/// forgotten. A respawned topic starts at sequence 0 with the initial model,
-/// so subscribers get a replacing `Snapshot`.
+/// Handle a topic whose actor died, respawning it on a fresh process and
+/// re-attaching every client the server had already authorised.
+///
+/// Forgotten instead if it has crashed too often or can't be rebuilt.
+///
+/// A respawned topic starts at sequence 0 with the initial model, so
+/// subscribers get a replacing `Snapshot`.
 fn handle_topic_down_logic(
   state: ServerState(model, message),
   id: String,
@@ -1320,8 +1672,8 @@ fn handle_topic_down_logic(
     Error(_) -> state
     Ok(entry) -> {
       let attempts = dict.get(state.restarts, id) |> result.unwrap(0)
-      // a respawn runs user configuration, so it can crash in turn, and it
-      // must not take the server with it
+      // A respawn runs user configuration, so it can crash in turn, and it
+      // must not take the server with it.
       let respawned = case attempts >= max_topic_restarts {
         True -> option.None
         False ->
@@ -1350,7 +1702,9 @@ fn handle_topic_message_logic(
   topic_id: String,
   message: message,
 ) -> ServerState(model, message) {
-  state.on_topic_message_hook(message, topic_id, client_id)
+  rescue_or("on_topic_message", Nil, fn() {
+    state.on_topic_message_hook(message, topic_id, client_id)
+  })
   case find_or_create_topic(state, topic_id) {
     #(state, option.Some(entry)) -> {
       entry.handle_incoming(client_id, message)
@@ -1403,15 +1757,21 @@ fn new_state(
     on_topic_message_hook: fn(_, _, _) { Nil },
     max_topics: default_max_topics,
     restarts: dict.new(),
+    failed_sends: set.new(),
+    // Fresh per incarnation, so a restart is distinguishable from a
+    // reconnect by the client that reads it.
+    boot_id: id.random_hex(8),
   )
 }
 
-/// Put an origin into the form used for the allowlist comparison. Scheme and
-/// host are case-insensitive so the whole value is lowercased, and one
-/// trailing '/' is dropped because some clients send `https://example.com/`.
+/// Put an origin into the form used for the allowlist comparison.
+///
+/// Scheme and host are case-insensitive so the whole value is lowercased, and
+/// one trailing '/' is dropped because some clients send
+/// `https://example.com/`.
+///
 /// Nothing else is rewritten, so the literal 'null' origin an opaque or
-/// sandboxed document sends only ever matches an allowlist that names it
-/// verbatim.
+/// sandboxed document sends only ever matches an allowlist naming it verbatim.
 fn normalise_origin(origin: String) -> String {
   let lowered = string.lowercase(origin)
   case string.ends_with(lowered, "/") {
@@ -1420,8 +1780,9 @@ fn normalise_origin(origin: String) -> String {
   }
 }
 
-/// Turn a dead watched process into the event that cleans up after it. Topic
-/// keys carry `topic_watch_prefix`, anything else is a client id.
+/// Turn a dead watched process into the event that cleans up after it.
+///
+/// Topic keys carry `topic_watch_prefix`, anything else is a client id.
 fn on_watch_down(key: String) -> Option(InternalEvent(model, message)) {
   case string.starts_with(key, topic_watch_prefix) {
     True -> {
@@ -1432,11 +1793,80 @@ fn on_watch_down(key: String) -> Option(InternalEvent(model, message)) {
   }
 }
 
+/// Call the server actor, falling back to `default` through a restart window
+/// for the same reason `cast` is guarded.
+fn query(
+  server: Server(model, message),
+  event: InternalEvent(model, message),
+  default: ServerReply,
+) -> ServerReply {
+  rescue_or("call", default, fn() {
+    actor_cell.call(server.handle, event, default:)
+  })
+}
+
+/// Encode `frame` and push it to one client, recording that client for
+/// eviction when its send closure raises.
+///
+/// A crash in the user's serialiser drops the frame and leaves the surrounding
+/// transition alone, since the client can ask for a resync but a commit can't
+/// be taken back.
+fn push(
+  state: ServerState(model, message),
+  client_id: String,
+  send: fn(BitArray) -> Nil,
+  frame: transport.Protocol(model, message),
+) -> ServerState(model, message) {
+  let encoded =
+    rescue_or("encode", option.None, fn() {
+      option.Some(transport.encode(frame, serialiser: state.serialiser))
+    })
+  case encoded {
+    option.None -> state
+    option.Some(bytes) ->
+      case rescue_send("client", send, bytes) {
+        True -> state
+        False ->
+          ServerState(
+            ..state,
+            failed_sends: set.insert(state.failed_sends, client_id),
+          )
+      }
+  }
+}
+
 fn reduce(
   event: InternalEvent(model, message),
   state: ServerState(model, message),
 ) -> actor_cell.Outcome(ServerState(model, message), ServerReply) {
+  case reduce_event(event, state) {
+    Continue(state) -> Continue(drop_failed_sends(state))
+    Reply(state, reply) -> Reply(drop_failed_sends(state), reply)
+    Halt(state) -> Halt(state)
+  }
+}
+
+/// Disconnect every client whose send closure raised during this reduction.
+///
+/// A closure that can't be called is a dead connection, not a bad frame, so
+/// the client goes rather than the frame.
+fn drop_failed_sends(
+  state: ServerState(model, message),
+) -> ServerState(model, message) {
+  use <- bool.guard(when: set.is_empty(state.failed_sends), return: state)
+  let failed = state.failed_sends
+  set.fold(failed, ServerState(..state, failed_sends: set.new()), fn(acc, id) {
+    handle_disconnect_logic(acc, id)
+  })
+}
+
+fn reduce_event(
+  event: InternalEvent(model, message),
+  state: ServerState(model, message),
+) -> actor_cell.Outcome(ServerState(model, message), ServerReply) {
   case event {
+    BootId -> Reply(state, StringReply(state.boot_id))
+
     ClientCount -> Reply(state, CountReply(dict.size(state.clients)))
 
     ClientConnected(client_id:, send:, session:) ->
@@ -1507,9 +1937,10 @@ fn reduce(
 }
 
 /// Put a respawned topic back in the registry and re-attach every client that
-/// was already subscribed to it. `rejoin` skips the join hooks, so a crash
-/// does not replay `on_subscribe` for every subscriber. The respawn closure
-/// has already re-watched the new process.
+/// was already subscribed to it.
+///
+/// `rejoin` skips the join hooks, so that a crash doesn't replay
+/// `on_subscribe` for every subscriber.
 fn reinstate_topic(
   state: ServerState(model, message),
   id: String,
@@ -1528,10 +1959,13 @@ fn reinstate_topic(
   ServerState(..state, topics:, restarts:)
 }
 
-/// Re-attach a client to a topic on resync. A reconnecting client carries a
-/// fresh id and a fresh `send`, so a bare snapshot would leave it holding a
-/// topic it never hears from again. Already-subscribed clients only get the
-/// snapshot, so join hooks do not replay.
+/// Re-attach a client to a topic on resync.
+///
+/// A reconnecting client carries a fresh id and a fresh `send`, so a bare
+/// snapshot would leave it holding a topic it never hears from again.
+///
+/// Already-subscribed clients only get the snapshot, so join hooks don't
+/// replay.
 fn resubscribe_after_resync(
   state: ServerState(model, message),
   client_id: String,
@@ -1560,8 +1994,8 @@ fn topic_watch_key(id: String) -> String {
   topic_watch_prefix <> id
 }
 
-/// Record that `client_id` is subscribed to `topic_id`, so disconnect can
-/// unsubscribe only the topics the client actually joined.
+/// Record that `client_id` is subscribed to `topic_id`, so that disconnect
+/// unsubscribes only the topics the client actually joined.
 fn track_subscription(
   state: ServerState(model, message),
   client_id: String,
@@ -1575,8 +2009,6 @@ fn track_subscription(
   ServerState(..state, client_topics:)
 }
 
-/// Drop `topic_id` from `client_id`'s subscription set on an explicit
-/// unsubscribe.
 fn untrack_subscription(
   state: ServerState(model, message),
   client_id: String,
@@ -1597,9 +2029,12 @@ fn untrack_subscription(
 }
 
 /// Run the configured origin policy over a request's `Origin` header.
-/// `AnyOrigin` accepts everything, including a missing header. An allowlist
-/// compares normalised values exactly and refuses a missing header outright,
-/// since a request with no origin cannot be attributed to a page.
+///
+/// `AnyOrigin` accepts everything, including a missing header.
+///
+/// An allowlist compares normalised values exactly and refuses a missing
+/// header outright, since a request with no origin can't be attributed to a
+/// page.
 fn validate_origin(
   origins: Origins,
   origin: Option(String),

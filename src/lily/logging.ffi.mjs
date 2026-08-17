@@ -1,17 +1,10 @@
 /**
  * LOGGING (JAVASCRIPT)
  *
- * Writes console lines matching the `logging` hex package format on Erlang, a
- * four-character level code (`INFO`, `EROR`, etc.), a space, then the message.
- * Lines route to the console method matching their severity so DevTools
- * colours them. Works in browsers, Node, Bun, and Deno.
- *
- * currentLevel gates messages below it, default 6 (Info). setLevel() updates
- * it, useful on JS servers with no DevTools.
- *
  * Severity (lower = more severe):
  *   0 Emergency, 1 Alert, 2 Critical, 3 Error,
  *   4 Warning, 5 Notice, 6 Info, 7 Debug
+ *
  */
 
 // =============================================================================

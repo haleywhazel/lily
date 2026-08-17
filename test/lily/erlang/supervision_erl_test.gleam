@@ -60,6 +60,8 @@ fn connect_client(
       send: process.send(subj, _),
       session: [],
     )
+  // Drain the Version and Connected frames sent on registration.
+  let _ = recv(subj)
   let _ = recv(subj)
   subj
 }
@@ -126,6 +128,7 @@ fn start_tree(
   let ready = process.new_subject()
   let child =
     server.supervised(
+      name: server.name("lily_test_server"),
       initial: test_support.initial_model(),
       serialiser: ser(),
       wiring: store.wiring(),
@@ -348,6 +351,7 @@ pub fn a_resyncing_client_resubscribes_test() {
 pub fn start_supervised_serves_and_stops_cleanly_test() {
   let assert Ok(#(_tree, srv)) =
     server.start_supervised(
+      name: server.name("lily_test_server"),
       initial: test_support.initial_model(),
       serialiser: ser(),
       wiring: store.wiring(),
@@ -409,13 +413,18 @@ pub fn a_server_crash_restarts_the_tree_test() {
     })
   let assert Ok(first) = process.receive(ready, within: 2000)
   let first_chat = topic_pid(first, "chat")
+  // Snapshot the pid rather than re-reading it through the handle, which now
+  // resolves the registered name and so follows the restart.
+  let first_pid = server_pid(first)
 
-  process.kill(server_pid(first))
+  process.kill(first_pid)
   process.sleep(200)
 
   // `started` fired again, on a genuinely new server
   let assert Ok(second) = process.receive(ready, within: 2000)
-  { server_pid(second) == server_pid(first) } |> should.equal(False)
+  { server_pid(second) == first_pid } |> should.equal(False)
+  // and the handle taken before the crash reaches the process that came back
+  { server_pid(first) == server_pid(second) } |> should.equal(True)
   // and the old topics went with the old server
   process.is_alive(first_chat) |> should.equal(False)
   process.is_alive(topic_pid(second, "chat")) |> should.equal(True)
@@ -425,9 +434,37 @@ pub fn a_server_crash_restarts_the_tree_test() {
 }
 
 @target(erlang)
+pub fn a_handle_from_before_a_restart_still_serves_test() {
+  let #(tree, ready) = start_tree(fn(_srv) { Nil })
+  let assert Ok(first) = process.receive(ready, within: 2000)
+
+  process.kill(server_pid(first))
+  process.sleep(200)
+  let assert Ok(_second) = process.receive(ready, within: 2000)
+
+  // The transport captured `first` at boot and never hears about the restart,
+  // so this is the call every reconnecting client depends on. Before the name
+  // it went to a dead pid and reported success anyway.
+  let assert Ok(Nil) =
+    server.connect(
+      first,
+      client_id: "after",
+      origin: option.None,
+      send: fn(_bytes) { Nil },
+      session: [],
+    )
+  server.client_count(first)
+  |> should.equal(1)
+
+  process.send_exit(tree)
+  process.sleep(100)
+}
+
+@target(erlang)
 pub fn topic_children_are_temporary_test() {
   let assert Ok(#(_tree, srv)) =
     server.start_supervised(
+      name: server.name("lily_test_server"),
       initial: test_support.initial_model(),
       serialiser: ser(),
       wiring: store.wiring(),

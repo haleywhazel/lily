@@ -3,7 +3,7 @@
 //// store holds a basic model type and an update function
 //// `fn(model, message) -> model`. The store is agnostic to how your frontend
 //// actually displays these components, with the view function or rendering
-//// completely detached (unlike Lustre and closer to Redux).
+//// detached (unlike Lustre and closer to Redux).
 ////
 //// Here's a minimal example of a counter:
 ////
@@ -106,7 +106,7 @@ import lily/transport.{type Target}
 /// holds them at their initial values and the client preserves them when
 /// applying a snapshot on reconnect.
 ///
-/// A single-variant type, so pattern matching gets the value back out.
+/// Pattern matching gets the value back out quite easily.
 ///
 /// ```gleam
 /// pub type Model {
@@ -224,7 +224,7 @@ pub fn topic(
 ///
 /// `extract` returns the instance key plus the sub-message, and the wire id is
 /// `prefix <> key`. `field_get`/`field_set` read and write one instance's
-/// sub-model by key, so back them with a keyed collection like
+/// sub-model by key, so they're backed with a keyed collection like
 /// `Dict(String, _)`. This one entry routes outgoing messages, incoming
 /// updates, and snapshot merges to the right key.
 ///
@@ -359,7 +359,7 @@ pub fn route_message(
   )
 }
 
-/// The apply-message function for the session store entry, if any. Used by
+/// The apply-message function for the session store entry (if any). Used by
 /// `server.gleam` to build the session-message handler at start time.
 @internal
 pub fn session_apply(
@@ -386,9 +386,6 @@ pub fn topic_apply(
 // =============================================================================
 
 /// Config for a parametric topic family (see [`topic_kind`](#topic_kind)).
-/// Unlike `TargetConfig`, apply and merge are keyed by an instance id from the
-/// message (`topic_id_of`) or the target id (`merge_snapshot` takes the key),
-/// so one config serves every instance sharing `prefix`.
 type KindConfig(model, message) {
   KindConfig(
     prefix: String,
@@ -400,8 +397,7 @@ type KindConfig(model, message) {
 }
 
 /// Outcome of routing a non-session message, either a fixed topic entry, a
-/// parametric kind, or nothing. Shared by `apply_to_topics` and `topic_target`
-/// via `match_topic_route`.
+/// parametric kind, or nothing.
 type RouteMatch(model, message) {
   MatchedTopic(id: String, config: TargetConfig(model, message))
   MatchedKind(config: KindConfig(model, message))
@@ -432,9 +428,9 @@ fn apply_to_topics(
   }
 }
 
-/// Find the exact topic entry whose extract accepts this message. Extracts are
-/// mutually exclusive (per the `route_message` contract), so the first match
-/// wins.
+/// Find the exact topic entry whose extract accepts this message.
+///
+/// First match wins.
 fn find_topic_entry(
   wiring: Wiring(model, message),
   message: message,
@@ -489,8 +485,9 @@ fn make_target_config(
 }
 
 /// Route a non-session message to its topic target using the shared rule, the
-/// exact topic entry first and then a parametric kind. Both `apply_to_topics`
-/// and `topic_target` go through this so the routing lives in one place.
+/// exact topic entry first and then a parametric kind.
+///
+/// Both `apply_to_topics` and `topic_target` go through this.
 fn match_topic_route(
   wiring: Wiring(model, message),
   message: message,
@@ -506,9 +503,7 @@ fn match_topic_route(
 }
 
 /// Find the kind whose prefix matches `id`, longest prefix wins when several
-/// match so the more specific family is chosen. A single fold keeps the best
-/// match and its prefix length so neither the intermediate list nor the
-/// incumbent's length are recomputed.
+/// match so the more specific family is chosen.
 fn matching_kind(
   wiring: Wiring(model, message),
   id: String,
@@ -530,8 +525,7 @@ fn matching_kind(
 }
 
 /// Run `on_session` with the session config when it exists and accepts the
-/// message, otherwise fall back to `on_topic`. Shared by `apply_message` and
-/// `route_message` so the session-first routing rule lives in one place.
+/// message, otherwise fall back to `on_topic`.
 fn on_session_else_topic(
   wiring: Wiring(model, message),
   message: message,
@@ -550,7 +544,7 @@ fn on_session_else_topic(
 
 /// Route a non-session message: exact topic entry first, else a parametric kind
 /// (concrete id `prefix <> key` from the message). Falls back to `Session` when
-/// nothing matches, the safe default for unrecognised messages.
+/// nothing matches.
 fn topic_target(wiring: Wiring(model, message), message: message) -> Target {
   case match_topic_route(wiring, message) {
     MatchedTopic(id, _) -> transport.Topic(id)
