@@ -1,7 +1,5 @@
-// Tests that one client's crashing callback cannot take down the actor every
-// other client shares. Asserts through synchronous calls only, so it runs on
-// both targets. Frames are checked in `erlang/isolation_erl_test`.
-
+// Tests that one client's crashing callback cannot take down the actor that
+// others share.
 import gleam/option.{None}
 
 import gleeunit/should
