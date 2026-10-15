@@ -1,9 +1,6 @@
 -module(lily_server_ffi).
--export([rescue/1]).
+-export([random_hex/1]).
 
-rescue(Operation) ->
-    try {ok, Operation()}
-    catch
-        Class:Reason ->
-            {error, iolist_to_binary(io_lib:format("~p:~p", [Class, Reason]))}
-    end.
+random_hex(ByteCount) ->
+    Bytes = crypto:strong_rand_bytes(ByteCount),
+    string:lowercase(binary:encode_hex(Bytes)).

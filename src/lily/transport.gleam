@@ -1,122 +1,79 @@
-//// This is the transport layer between the client/browser and the server,
-//// ensuring that the centralised model within [`Store`](./store.html#Store)
-//// on both sides remain in sync by exchanging serialised
-//// [`Protocol`](#Protocol) messages over this module.
+//// This is how Lily deals with the communication between client/browser and
+//// the server, ensuring that the centralised model within
+//// [`Store`](./store.html#Store) on both sides remains in sync by exchanging
+//// serialised [`Protocol`](#Protocol) messages. For most use cases, this
+//// module won't be needed but the details below will be helpful, especially
+//// if you want to supply your own transport layer.
 ////
 //// It works on both Erlang and JS targets since both ends need it, although
-//// the WebSocket and HTTP/SSE connectors are JavaScript-only.
+//// the WebSocket connector is JavaScript-only.
 ////
-//// The module provides:
+//// The wire format is the [`Protocol`](#Protocol) exchanged. A
+//// [`Serialiser`](#Serialiser) is built with [`automatic`](#automatic) for
+//// any Gleam type, or with [`serialiser`](#serialiser) from your own encoders
+//// and decoders. The connectors are [`websocket`](#websocket) (with automatic
+//// reconnection and offline queueing), [`connector`](#connector) (to wrap a
+//// transport of your own), and [`with_offline_queue`](#with_offline_queue)
+//// (to give it the same queueing and replay).
 ////
-//// - Wire format: [`Protocol`](#Protocol) envelope types for messages
-////   exchanged between client and server.
-//// - Serialisation: [`Serialiser`](#Serialiser) with automatic
-////   ([`automatic`](#automatic)) and custom ([`custom_json`](#custom_json),
-////   [`custom_binary`](#custom_binary)) variants.
-//// - WebSocket transport: the [`websocket`](#websocket) connector, with
-////   automatic reconnection and offline queueing.
-//// - HTTP/SSE transport: the [`http_connect`](#http_connect) connector using
-////   EventSource + POST.
+//// When a connection opens, the server sends `Connected` and `Version`, and
+//// the client answers with a `Resync` with the session name and every topic it
+//// wants to subscribe to. The server replies with a `Snapshot` per target,
+//// then each message travels as a `SessionMessage` or `TopicMessage` and
+//// comes back to the other subscribers as an update.
 ////
 //// For most apps, use [`transport.automatic`](#automatic) for
-//// serialisation, then pick a transport. WebSockets
-//// suit most cases, although switch to HTTP if corporate firewalls block them.
+//// serialisation and [`transport.websocket`](#websocket) to connect.
 ////
 //// ```gleam
 //// import lily/client
 //// import lily/transport
 ////
 //// pub fn main() {
-////   let runtime = client.start(
-////     app_store,
-////     wiring: shared.wiring(),
-////     serialiser: transport.automatic(
-////       format: transport.Json,
-////       max_decode_depth: 128,
-////     ),
-////   )
+////   let runtime = client.start(shared.store())
 ////
-////   client.connect(runtime,
-////     with: transport.websocket(
-////       url: "ws://localhost:8080/ws",
-////       reconnect: transport.DefaultBackoff,
-////     ),
-////   )
+////   client.connect(runtime, with: transport.websocket("/ws"))
 //// }
 //// ```
 ////
-//// Switch to HTTP/SSE when WebSocket connections are blocked:
+//// With the default functions Lily gives you, the communication is done
+//// through JSON when a page is served from `localhost` or `127.0.0.1` and
+//// MessagePack otherwise. This is mainly to make dev environments have more
+//// debuggable frames and smaller transport frames for prod.
 ////
-//// ```gleam
-//// client.connect(runtime,
-////   with: transport.http_connect(
-////     post_url: "/api/messages",
-////     events_url: "/api/events",
-////     flush_batch_size: 10,
-////   ),
-//// )
-//// ```
-////
-//// JSON frames are more easily debuggable within DevTools. You can (and
-//// probably should) use MessagePack for production for smaller transport
-//// packages.
+//// To use one format consistently (everywhere), build the serialiser yourself
+//// and pass it to [`store.sync_with`](./store.html#sync_with):
 ////
 //// ```gleam
 //// transport.automatic(
 ////   format: transport.MessagePack,
 ////   max_decode_depth: 128,
+////   modules: [transport.module("my_shared")],
 //// )
 //// ```
 ////
-//// The automatic serialiser uses positional encoding:
-//// `{"_":"ConstructorName","0":field0,"1":field1,...}`. On JavaScript,
+//// The automatic serialiser uses positional encoding. Each custom type is a
+//// map like `{"_":"ConstructorName","0":field0,"1":field1}`. On JavaScript,
 //// constructors must be registered so the decoder can reconstruct them.
-////
-//// To register constructors, your shared types module exposes a tiny FFI
-//// shim that calls `registerModule` from `transport.ffi.mjs`, this part is key
-//// do not forget:
-////
-//// ```javascript
-//// // my_shared.ffi.mjs
-//// import * as self from "./my_shared.mjs";
-//// import { registerModule } from "../lily/lily/transport.ffi.mjs";
-////
-//// export function registerTypes() { registerModule(self); }
-//// ```
+//// To register constructors, name the compiled modules that define the
+//// types you're sending via the wire when you build the store.
 ////
 //// ```gleam
-//// // my_shared.gleam
-//// pub fn serialiser() -> transport.Serialiser(Model, Message) {
-////   let _ = register_types()
-////   transport.automatic(format: transport.Json, max_decode_depth: 128)
-//// }
-////
-//// @target(javascript)
-//// @external(javascript, "./my_shared.ffi.mjs", "registerTypes")
-//// fn register_types() -> Nil { Nil }
-////
-//// @target(erlang)
-//// fn register_types() -> Nil { Nil }
+//// store.new(init: initial_model(), update: update)
+//// |> store.sync(
+////   route: route,
+////   modules: [
+////     transport.module("my_shared"),
+////     transport.module_in(package: "other_package", path: "other/types"),
+////   ],
+//// )
 //// ```
 ////
-//// For shared types split across multiple modules, call `registerModule`
-//// once per file in the FFI shim:
-////
-//// ```javascript
-//// import * as messages from "./messages.mjs";
-//// import * as model from "./model.mjs";
-//// import { registerModule } from "../lily/lily/transport.ffi.mjs";
-////
-//// export function registerTypes() {
-////   registerModule(messages);
-////   registerModule(model);
-//// }
-//// ```
-////
-//// For cases where automatic serialisation isn't suitable, you can use
-//// [`transport.custom_json`](#custom_json) or
-//// [`transport.custom_binary`](#custom_binary) for explicit encode/decode.
-////
+//// This also means that constructor names that cross the wire must be unique
+//// (per arity) across the modules as the browser matches on name and arity
+//// alone. Lily should warn you in the browser when this happens. For
+//// unavoidable clashes (e.g. you have two deps that share constructors),
+//// it might be worth it to create your own types and conversion functions.
 
 // =============================================================================
 // IMPORTS
@@ -129,134 +86,142 @@ import gleam/json.{type Json}
 import gleam/list
 import gleam/result
 import gleam/string
-import lily/internal/auto_codec
-import lily/internal/message_pack.{
+import lily/internal/codec.{
   type Value, ValueArray, ValueBytes, ValueInteger, ValueMap, ValueString,
 }
-import lily/internal/reflection
 
 // =============================================================================
 // PUBLIC TYPES
 // =============================================================================
 
-/// Opaque transport connector. Built by [`websocket`](#websocket) and
-/// [`http_connect`](#http_connect), passed to
+/// What a transport gives the client, a function to send a frame and one to
+/// close the connection.
+///
+/// `send` returns `Error` when the frame didn't go out, letting
+/// [`with_offline_queue`](#with_offline_queue) hold it and send it later.
+pub type Channel {
+  Channel(send: fn(BitArray) -> Result(Nil, Nil), close: fn() -> Nil)
+}
+
+/// A way for the client to reach the server. Build one with
+/// [`websocket`](#websocket) or [`connector`](#connector) and pass it to
 /// [`client.connect`](./client.html#connect).
 pub opaque type Connector {
-  Connector(connect: fn(Handler) -> Transport)
+  Connector(connect: fn(Handler) -> Channel, pending: fn() -> List(BitArray))
 }
 
 /// Wire format the [`automatic`](#automatic) serialiser encodes frames in.
 ///
 /// ```gleam
-/// transport.automatic(format: transport.Json, max_decode_depth: 128)
+/// transport.automatic(
+///   format: transport.Json,
+///   max_decode_depth: 128,
+///   modules: [],
+/// )
 /// ```
 pub type Format {
   Json
   MessagePack
+  /// JSON when served from `localhost` or `127.0.0.1` or MessagePack otherwise.
+  ByHost
 }
 
-/// Callbacks the runtime provides to the transport. `on_receive` fires on a
-/// message from the server, `on_reconnect` when the connection is established
-/// or restored, `on_disconnect` when it is lost.
-@internal
+/// The callbacks a transport calls. `received` for each frame from the
+/// server, `opened` every time the connection opens (the first time included),
+/// and `closed` when it is lost.
 pub type Handler {
   Handler(
-    on_receive: fn(BitArray) -> Nil,
-    on_reconnect: fn() -> Nil,
-    on_disconnect: fn() -> Nil,
+    received: fn(BitArray) -> Nil,
+    opened: fn() -> Nil,
+    closed: fn() -> Nil,
   )
 }
 
-/// Wire-format envelope between client and server.
+/// Severity of a `Diagnostic` from Lily.
+pub type Level {
+  /// Something was dropped or refused, continues as usual
+  Warning
+  /// Lily gave up on something, a topic that kept crashing for example
+  Failure
+}
+
+/// A module whose custom types are sent over the wire. Build one with
+/// [`module`](#module) or [`module_in`](#module_in) and list it in
+/// [`automatic`](#automatic).
+pub opaque type Module {
+  Module(package: String, path: String)
+}
+
+/// The frames a client and server exchange. You only handle them yourself
+/// when you write a [`serialiser`](#serialiser) of your own.
 ///
-/// Sequence numbers are server-assigned and tracked separately per
-/// [`Target`](#Target), meaning that each store stays in sync independently.
-/// These numbers help with ordering.
-@internal
+/// Sequence numbers count separately for each [`Target`](#Target).
 pub type Protocol(model, message) {
-  /// Server, after applying a `SessionMessage` or `TopicMessage` and assigning
-  /// it a sequence for the target. Also sent to a topic's subscribers when the
-  /// topic is stopped.
+  /// Server, confirming a `SessionMessage` or `TopicMessage` was applied.
   Acknowledge(target: Target, sequence: Int)
 
-  /// Server, right after a client connects, carrying the server-assigned
-  /// `client_id`. Use [`client.client_id`](./client.html#client_id) to inject
-  /// it into your model so every session carries its identity.
+  /// Server, right after a client connects, with its id. A client observer
+  /// sees it as `ClientIdAssigned`.
   Connected(client_id: String)
 
-  /// Server, directly to a topic's subscribers. No sequence, never replayed on
-  /// resync. Ephemeral by design.
-  Push(topic_id: String, payload: message)
-
-  /// Server, when a `Subscribe` is denied: missing topic or kind, invalid
-  /// topic id, or `can_subscribe` returned `False`.
+  /// Server, when a `Subscribe` is refused, with the reason `"not found"` or
+  /// `"denied"`.
   Rejected(topic_id: String, reason: String)
 
-  /// Client, requesting the current state of every known target after a full
-  /// reconnect. The server responds with a `Snapshot` per target regardless of
-  /// how far behind, so the wire form is just the target list.
+  /// Client, after it connects, listing every target it wants a `Snapshot` of.
   Resync(cursors: List(Target))
 
-  /// Client update to apply to the originating connection's session store.
+  /// Client, a message for its own session store.
   SessionMessage(payload: message)
 
-  /// Server, an applied session-store update to a single targeted client, sent
-  /// by [`server.dispatch_to`](./server.html#dispatch_to) or
-  /// [`server.dispatch_to_all`](./server.html#dispatch_to_all). Sequence is
-  /// the client's session sequence after applying.
+  /// Server, a session update sent by
+  /// [`server.dispatch_to`](./server.html#dispatch_to) or
+  /// [`server.dispatch_to_all`](./server.html#dispatch_to_all).
   SessionUpdate(sequence: Int, payload: message)
 
-  /// Server, in response to `Resync` (per target) and `Subscribe` (the
-  /// subscribed topic).
+  /// Server, the whole state of a target, in reply to `Resync` or `Subscribe`.
   Snapshot(target: Target, sequence: Int, state: model)
 
-  /// Client, to join a topic. Server replies `Snapshot(Topic(id), ...)` on
-  /// success or `Rejected(id, reason)` on failure.
+  /// Client, to join a topic. The server replies with `Snapshot` or
+  /// `Rejected`.
   Subscribe(topic_id: String)
 
-  /// Client update to apply to a shared topic store. Server fans the result
-  /// out as `TopicUpdate` to every other subscriber and `Acknowledge` to the
-  /// originator.
+  /// Client, a message for a shared topic store.
   TopicMessage(topic_id: String, payload: message)
 
-  /// Server, an applied topic-store update to every subscriber but the
-  /// originator. Sequence is the topic's sequence after applying.
+  /// Server, a topic message from another subscriber.
   TopicUpdate(topic_id: String, sequence: Int, payload: message)
 
-  /// Client, to leave a topic. Fire-and-forget, no confirmation frame back.
+  /// Client, to leave a topic. Nothing is sent back.
   Unsubscribe(topic_id: String)
 
-  /// Server, on connect and reconnect, carrying a build identifier. The client
-  /// remembers the first and compares later ones, so a change (a deploy
-  /// landed) can be surfaced to the user. See
-  /// [`client.on_version_mismatch`](./client.html#on_version_mismatch).
+  /// Server, on every connect, with a build identifier. See
+  /// [`browser.reload_on_new_version`](./browser.html#reload_on_new_version).
   Version(hash: String)
 }
 
 /// How the WebSocket connector waits between reconnection attempts.
 ///
 /// ```gleam
-/// transport.websocket(
+/// transport.websocket_with(
 ///   url: "ws://localhost:8080/ws",
 ///   reconnect: transport.DefaultBackoff,
 /// )
 /// ```
 pub type Reconnect {
-  /// Exponential backoff with the built-in settings.
-  ///
-  /// Basically the same as `Backoff(1000, 30_000, 0.25, 2.0)`.
+  /// Exponential backoff with the built-in settings, the same as
+  /// `Backoff(1000, 30_000, 0.25, 2.0)`.
   DefaultBackoff
 
   /// Tuned exponential backoff. `base_milliseconds` is the first delay,
   /// multiplied by `multiplier` after each failed attempt and capped at
   /// `max_milliseconds`.
   ///
-  /// `jitter_ratio` randomises each delay by plus or minus to prevent mass
-  /// disconnect from overwhelming the server.
+  /// `jitter_ratio` randomises each delay by plus or minus that fraction,
+  /// keeping clients dropped together from all reconnecting at once.
   ///
   /// ```gleam
-  /// transport.websocket(
+  /// transport.websocket_with(
   ///   url: "ws://localhost:8080/ws",
   ///   reconnect: transport.Backoff(
   ///     base_milliseconds: 2000,
@@ -274,87 +239,43 @@ pub type Reconnect {
   )
 }
 
-/// Serialises `Protocol` values to and from bytes. `Auto` uses positional
-/// encoding, works for any Gleam custom type without config, its `format`
-/// field selecting JSON or MessagePack. `CustomJson` and `CustomBinary` carry
-/// user-supplied codecs at a fixed format.
-///
-/// Construct via [`automatic`](#automatic), [`custom_json`](#custom_json), or
-/// [`custom_binary`](#custom_binary).
+/// Turns [`Protocol`](#Protocol) frames into bytes and back. Build one with
+/// [`automatic`](#automatic) or [`serialiser`](#serialiser).
 pub opaque type Serialiser(model, message) {
-  Auto(format: Format, codec: BinaryCodec(model, message))
-  CustomJson(
-    encode_message: fn(message) -> Json,
-    decode_message: decode.Decoder(message),
-    encode_model: fn(model) -> Json,
-    decode_model: decode.Decoder(model),
+  Auto(format: Format, max_decode_depth: Int)
+  Open(
+    encode: fn(Protocol(model, message)) -> BitArray,
+    decode: fn(BitArray) -> Result(Protocol(model, message), Nil),
   )
-  CustomBinary(codec: BinaryCodec(model, message))
 }
 
 /// Which store a frame applies to, the per-connection session store or a named
 /// shared topic store.
-@internal
 pub type Target {
   Session
   Topic(id: String)
 }
 
-/// Transport handle returned by a [`Connector`](#Connector). Carries `send`
-/// and `close`. Constructed by [`websocket`](#websocket) and
-/// [`http_connect`](#http_connect), not user-facing.
-@internal
-pub opaque type Transport {
-  Transport(send: fn(BitArray) -> Nil, close: fn() -> Nil)
-}
-
-// =============================================================================
-// PRIVATE TYPES
-// =============================================================================
-
-type BinaryCodec(model, message) {
-  BinaryCodec(
-    encode_message: fn(message) -> BitArray,
-    decode_message: fn(BitArray) -> Result(message, Nil),
-    encode_model: fn(model) -> BitArray,
-    decode_model: fn(BitArray) -> Result(model, Nil),
-    max_decode_depth: Int,
-  )
-}
-
-type Field(model, message) {
-  FieldInt(name: String, value: Int)
-  FieldMessage(name: String, value: message)
-  FieldState(name: String, value: model)
-  FieldString(name: String, value: String)
-  FieldTarget(name: String, value: Target)
-  FieldTargetList(name: String, value: List(Target))
-}
-
-@target(javascript)
-type HttpHandle
-
-@target(javascript)
-type WsHandle
-
 // =============================================================================
 // PUBLIC FUNCTIONS
 // =============================================================================
 
-/// Create an automatic serialiser. `format` picks the wire encoding, and
-/// `max_decode_depth` caps how deeply the MessagePack decoder will nest.
+/// Creates a serialiser that encodes any Gleam value, with no codecs to write.
+/// Pass it to [`store.sync_with`](./store.html#sync_with).
 ///
-/// The depth is ignored under `Json`.
+/// `format` picks what this end writes, and it reads either format whatever
+/// you pick. `max_decode_depth` caps how deeply a MessagePack frame may nest.
+///
+/// `modules` lists the modules that define the types you send. Constructor
+/// names that cross the wire must be unique per arity across them.
 ///
 /// ```gleam
-/// transport.automatic(format: transport.MessagePack, max_decode_depth: 128)
+/// transport.automatic(
+///   format: transport.MessagePack,
+///   max_decode_depth: 128,
+///   modules: [transport.module("shared")],
+/// )
 /// ```
-///
-/// On JavaScript, register constructors before connecting, else the decoder
-/// can't reconstruct types that only arrive from the server or other clients.
-/// Use an FFI shim in your shared types module calling `registerModule` from
-/// `transport.ffi.mjs`, once per file. See the module docs for the full
-/// pattern.
 ///
 /// ## Supported shapes
 ///
@@ -363,274 +284,140 @@ type WsHandle
 ///   the PascalCase constructor name.
 /// - Lists, as arrays.
 /// - Tuples, `#(a, b)` as tag-less maps with positional keys
-///   (`{"0":a,"1":b}`), told from custom types by the absent `_`.
+///   (`{"0":a,"1":b}`).
 /// - `gleam/dict.Dict`, as `{"_":"$dict","0":[[k,v],...]}`.
 /// - `gleam/set.Set`, as `{"_":"$set","0":[v,...]}`.
 ///
 /// ## Not supported
 ///
-/// `BitArray` fields in synced types are not auto-encoded. Erlang represents
-/// both `String` and `BitArray` as native binaries, so reflection can't tell
-/// them apart.
-///
-/// For raw bytes, wrap them in a marker CustomType and encode yourself with
-/// [`custom_binary`](#custom_binary) or [`custom_json`](#custom_json):
+/// `BitArray` fields are not encoded, since on Erlang they can't be told
+/// apart from a `String`. Wrap raw bytes in a type of your own and write a
+/// [`serialiser`](#serialiser) that base64-encodes them:
 ///
 /// ```gleam
 /// pub type Bytes {
 ///   Bytes(data: BitArray)
 /// }
 /// ```
-///
-/// Then provide custom encode/decode functions that base64-encode the inner
-/// field.
 pub fn automatic(
   format format: Format,
   max_decode_depth max_decode_depth: Int,
+  modules modules: List(Module),
 ) -> Serialiser(model, message) {
-  Auto(format:, codec: auto_binary_codec(max_decode_depth))
+  list.each(modules, fn(entry) {
+    codec.request_module(entry.package, entry.path)
+  })
+  Auto(format:, max_decode_depth:)
 }
 
-/// Close the transport connection. Cleans up resources and stops reconnecting.
-@internal
-pub fn close(transport: Transport) -> Nil {
-  transport.close()
-}
-
-/// Create a serialiser from explicit binary encode/decode functions, for a
-/// custom binary codec (MessagePack, CBOR, any binary format). The format is
-/// fixed to binary.
+/// Wraps a `connect` function as a [`Connector`](#Connector), for a transport
+/// of your own.
 ///
-/// `max_decode_depth` bounds how deeply the MessagePack envelope around your
-/// payloads may nest, capping stack use on a hostile frame. 128 is generous.
-pub fn custom_binary(
-  encode_message encode_message: fn(message) -> BitArray,
-  decode_message decode_message: fn(BitArray) -> Result(message, Nil),
-  encode_model encode_model: fn(model) -> BitArray,
-  decode_model decode_model: fn(BitArray) -> Result(model, Nil),
-  max_decode_depth max_decode_depth: Int,
-) -> Serialiser(model, message) {
-  CustomBinary(BinaryCodec(
-    encode_message:,
-    decode_message:,
-    encode_model:,
-    decode_model:,
-    max_decode_depth:,
-  ))
+/// `connect` gets the [`Handler`](#Handler) to call and returns the
+/// [`Channel`](#Channel) to send frames through. Wrap the result in
+/// [`with_offline_queue`](#with_offline_queue) to queue frames sent while it
+/// is down.
+pub fn connector(connect connect: fn(Handler) -> Channel) -> Connector {
+  Connector(connect:, pending: fn() { [] })
 }
 
-/// Create a serialiser from explicit JSON encode/decode functions, when the
-/// auto format is not suitable (third-party APIs, human-readable JSON,
-/// backwards compatibility). The format is fixed to JSON.
-pub fn custom_json(
-  encode_message encode_message: fn(message) -> Json,
-  decode_message decode_message: decode.Decoder(message),
-  encode_model encode_model: fn(model) -> Json,
-  decode_model decode_model: decode.Decoder(model),
-) -> Serialiser(model, message) {
-  CustomJson(encode_message:, decode_message:, encode_model:, decode_model:)
-}
-
-/// Decode `BitArray` bytes into a [`Protocol`](#Protocol) result.
+/// Decodes bytes into a [`Protocol`](#Protocol) frame.
 pub fn decode(
   bytes: BitArray,
   serialiser serialiser: Serialiser(model, message),
 ) -> Result(Protocol(model, message), Nil) {
   case serialiser {
-    Auto(format: Json, ..) ->
-      decode_json(
-        bytes,
-        decode.new_primitive_decoder("Auto", ffi_auto_decode),
-        decode.new_primitive_decoder("Auto", ffi_auto_decode),
-      )
-    Auto(format: MessagePack, codec:) ->
-      decode_message_pack_protocol(bytes, codec)
-    CustomJson(decode_message:, decode_model:, ..) ->
-      decode_json(bytes, decode_message, decode_model)
-    CustomBinary(codec:) -> decode_message_pack_protocol(bytes, codec)
+    Auto(max_decode_depth:, ..) ->
+      case detect_format(bytes) {
+        Ok(Json) -> decode_json(bytes)
+        Ok(MessagePack) -> decode_message_pack(bytes, max_decode_depth)
+        Ok(ByHost) | Error(Nil) -> Error(Nil)
+      }
+    Open(decode:, ..) -> decode(bytes)
   }
 }
 
-/// Encode a `Protocol` into bytes. MessagePack for a binary serialiser
-/// (`custom_binary`, or [`automatic`](#automatic) with the `MessagePack`
-/// format), JSON otherwise.
+/// Encodes a [`Protocol`](#Protocol) frame into bytes, in the serialiser's
+/// format.
+///
+/// `ByHost` writes MessagePack where there is no page, such as on the server.
 pub fn encode(
   protocol: Protocol(model, message),
   serialiser serialiser: Serialiser(model, message),
 ) -> BitArray {
   case serialiser {
-    Auto(format: Json, ..) ->
-      encode_json(protocol, ffi_auto_encode, ffi_auto_encode)
-    Auto(format: MessagePack, codec:) ->
-      encode_message_pack_protocol(protocol, codec)
-    CustomJson(encode_message:, encode_model:, ..) ->
-      encode_json(protocol, encode_message, encode_model)
-    CustomBinary(codec:) -> encode_message_pack_protocol(protocol, codec)
+    Auto(format:, ..) -> encode_in(protocol, format)
+    Open(encode:, ..) -> encode(protocol)
   }
 }
 
-/// Encode a model as an inline hydration payload for pre-rendered HTML.
-/// Returns `<script type="application/json" id="lily-snapshot">...</script>`
-/// wrapping a JSON `Snapshot(Session, 0, model)` frame.
-/// [`client.start`](./client.html#start) reads it as the initial state, saving
-/// a round-trip on first paint.
+/// Names a module whose types are sent over the wire, by its path.
 ///
-/// A fixed initial state baked into the page, not per-request data.
-///
-/// Always JSON regardless of the serialiser format, since binary MessagePack
-/// isn't safe to inline in HTML. A `CustomBinary` serialiser produces a
-/// base16-encoded payload, so prefer `automatic` or `custom_json` here.
+/// The first segment is taken as the package, meaning `module("shared")` is
+/// module `shared` in package `shared`, and `module("shared/views/note")` is
+/// that package's `views/note`. Use [`module_in`](#module_in) when the package
+/// has another name.
+pub fn module(path: String) -> Module {
+  let package = case string.split(path, "/") {
+    [first, ..] -> first
+    [] -> path
+  }
+  Module(package:, path:)
+}
+
+/// Names a module in `package`, for when the package isn't the first segment
+/// of the path, as with a dependency.
 ///
 /// ```gleam
-/// let body = "<!DOCTYPE html><html><body>"
-///   <> "<div id=\"app\">" <> rendered_html <> "</div>"
-///   <> transport.encode_initial_snapshot(
-///     serialiser: shared.serialiser(),
-///     model: initial_model,
-///   )
-///   <> "</body></html>"
+/// transport.module_in(package: "some_dep", path: "some/dep/module")
 /// ```
-///
-/// Not proper SSR, only the initial snapshot.
-pub fn encode_initial_snapshot(
-  serialiser serialiser: Serialiser(model, message),
-  model model: model,
-) -> String {
-  let frame = Snapshot(target: Session, sequence: 0, state: model)
-  // Force JSON for the inline payload. A CustomBinary serialiser has no JSON
-  // form, so its MessagePack bytes cannot round-trip through `to_string` and
-  // are base16-encoded to keep the payload non-empty and match the documented
-  // format.
-  let #(json_serialiser, binary) = case serialiser {
-    Auto(_, codec) -> #(Auto(Json, codec), False)
-    CustomJson(_, _, _, _) -> #(serialiser, False)
-    CustomBinary(_) -> #(serialiser, True)
-  }
-  let bytes = encode(frame, serialiser: json_serialiser)
-  let payload_text = case binary {
-    True -> bit_array.base16_encode(bytes)
-    False -> bit_array.to_string(bytes) |> result.unwrap("")
-  }
-  "<script type=\"application/json\" id=\"lily-snapshot\">"
-  <> payload_text
-  <> "</script>"
+pub fn module_in(package package: String, path path: String) -> Module {
+  Module(package:, path:)
+}
+
+/// Creates a serialiser from your own functions that encode and decode a
+/// whole [`Protocol`](#Protocol) frame, for when [`automatic`](#automatic)
+/// doesn't fit.
+pub fn serialiser(
+  encode encode: fn(Protocol(model, message)) -> BitArray,
+  decode decode: fn(BitArray) -> Result(Protocol(model, message), Nil),
+) -> Serialiser(model, message) {
+  Open(encode:, decode:)
 }
 
 @target(javascript)
-/// Returns a connector establishing an HTTP/SSE connection. Pass to
-/// `client.connect`. `post_url` sends messages to the server, `events_url`
-/// receives Server-Sent Events.
+/// Connects to the server over a WebSocket at `url`, reconnecting with the
+/// default backoff. Pass it to [`client.connect`](./client.html#connect).
 ///
-/// `flush_batch_size` is the most queued messages POSTed in parallel on
-/// reconnect. Lower limits concurrent POSTs during a burst, higher flushes
-/// faster. 10 seems like a reasonable number.
+/// `url` may be relative, `/ws` becomes `wss://host/ws` on an https page.
+/// Frames sent while disconnected are queued and sent when it reconnects.
 ///
 /// ```gleam
-/// client.connect(runtime,
-///   with: transport.http_connect(
-///     post_url: "/api/messages",
-///     events_url: "/api/events",
-///     flush_batch_size: 10,
+/// client.connect(runtime, with: transport.websocket("/ws"))
+/// ```
+pub fn websocket(url: String) -> Connector {
+  websocket_with(url:, reconnect: DefaultBackoff)
+}
+
+@target(javascript)
+/// Like [`websocket`](#websocket), with a [`Reconnect`](#Reconnect) policy of
+/// your own.
+///
+/// ```gleam
+/// transport.websocket_with(
+///   url: "/ws",
+///   reconnect: transport.Backoff(
+///     base_milliseconds: 2000,
+///     max_milliseconds: 60_000,
+///     jitter_ratio: 0.25,
+///     multiplier: 2.0,
 ///   ),
 /// )
 /// ```
-pub fn http_connect(
-  post_url post_url: String,
-  events_url events_url: String,
-  flush_batch_size flush_batch_size: Int,
+pub fn websocket_with(
+  url url: String,
+  reconnect reconnect: Reconnect,
 ) -> Connector {
-  Connector(connect: fn(handler: Handler) {
-    let handle =
-      ffi_http_connect(post_url, events_url, flush_batch_size, handler)
-    new(send: fn(bytes) { ffi_http_send(handle, bytes) }, close: fn() {
-      ffi_http_close(handle)
-    })
-  })
-}
-
-/// Wrap a `connect` function as a [`Connector`](#Connector). Used by
-/// [`websocket`](#websocket), [`http_connect`](#http_connect), and transport
-/// fakes in tests.
-@internal
-pub fn make_connector(connect: fn(Handler) -> Transport) -> Connector {
-  Connector(connect:)
-}
-
-/// Create a [`Transport`](#Transport) from send and close functions. Used by
-/// transport implementations (WebSocket, HTTP) to build the handle they return
-/// from their connector.
-@internal
-pub fn new(
-  send send: fn(BitArray) -> Nil,
-  close close: fn() -> Nil,
-) -> Transport {
-  Transport(send:, close:)
-}
-
-/// Run a connector with the runtime's handler. Used by
-/// [`client.connect`](./client.html#connect).
-@internal
-pub fn run_connector(connector: Connector, handler: Handler) -> Transport {
-  connector.connect(handler)
-}
-
-/// Send bytes through the transport, a serialised
-/// [`Protocol`](#Protocol) message.
-@internal
-pub fn send(transport: Transport, bytes: BitArray) -> Nil {
-  transport.send(bytes)
-}
-
-/// Parse a sequence-cursor storage key back into a [`Target`](#Target).
-@internal
-pub fn target_from_key(key: String) -> Result(Target, Nil) {
-  case key {
-    "session" -> Ok(Session)
-    _ ->
-      case string.starts_with(key, "topic:") {
-        True -> Ok(Topic(string.drop_start(key, 6)))
-        False -> Error(Nil)
-      }
-  }
-}
-
-/// Encode a [`Target`](#Target) as the stable string key the client uses to
-/// track per-target sequence cursors in session storage.
-@internal
-pub fn target_key(target: Target) -> String {
-  case target {
-    Session -> "session"
-    Topic(id) -> "topic:" <> id
-  }
-}
-
-@target(javascript)
-/// Derive a WebSocket URL from the browser's current location, using `wss:`
-/// for HTTPS pages and `ws:` for HTTP. `path` is the endpoint path.
-///
-/// ```gleam
-/// // On https://example.com:3000/app
-/// transport.url_from_current_location(path: "/ws")
-/// // Returns "wss://example.com:3000/ws"
-/// ```
-pub fn url_from_current_location(path path: String) -> String {
-  ffi_ws_url_from_current_location(path)
-}
-
-@target(javascript)
-/// Returns a connector establishing a WebSocket connection to `url`. Pass to
-/// `client.connect`. `reconnect` controls the delay between reconnection
-/// attempts, see [`Reconnect`](#Reconnect).
-///
-/// ```gleam
-/// client.connect(runtime,
-///   with: transport.websocket(
-///     url: "ws://localhost:8080/ws",
-///     reconnect: transport.DefaultBackoff,
-///   ),
-/// )
-/// ```
-pub fn websocket(url url: String, reconnect reconnect: Reconnect) -> Connector {
   let #(base_milliseconds, max_milliseconds, jitter_ratio, multiplier) = case
     reconnect
   {
@@ -642,254 +429,325 @@ pub fn websocket(url url: String, reconnect reconnect: Reconnect) -> Connector {
       multiplier,
     )
   }
-  Connector(connect: fn(handler: Handler) {
-    let handle =
-      ffi_ws_connect(
-        url,
-        base_milliseconds,
-        max_milliseconds,
-        jitter_ratio,
-        multiplier,
-        handler,
-      )
-    new(send: fn(bytes) { ffi_ws_send(handle, bytes) }, close: fn() {
-      ffi_ws_close(handle)
-    })
+  connector(fn(handler: Handler) {
+    ffi_websocket_connect(
+      url,
+      base_milliseconds,
+      max_milliseconds,
+      jitter_ratio,
+      multiplier,
+      handler,
+      Channel,
+    )
   })
+  |> with_offline_queue(storage_key: "lily_ws_pending")
+}
+
+@target(javascript)
+/// Holds frames a connector couldn't send and sends them, in order, when it
+/// next opens.
+///
+/// The queue is kept in `sessionStorage` under `storage_key`, letting it
+/// survive a reload without being shared between tabs. Your
+/// [`Channel`](#Channel)'s `send` must return `Error` for a frame that didn't
+/// go out.
+pub fn with_offline_queue(
+  inner: Connector,
+  storage_key storage_key: String,
+) -> Connector {
+  Connector(
+    connect: fn(handler: Handler) {
+      ffi_offline_connect(inner.connect, storage_key, handler, Handler, Channel)
+    },
+    pending: fn() { ffi_offline_pending(storage_key) },
+  )
+}
+
+// =============================================================================
+// INTERNAL FUNCTIONS
+// =============================================================================
+
+/// A serialiser of your own ignores `format`.
+@internal
+pub fn encode_as(
+  protocol: Protocol(model, message),
+  serialiser serialiser: Serialiser(model, message),
+  format format: Format,
+) -> BitArray {
+  case serialiser {
+    Auto(..) -> encode_in(protocol, format)
+    Open(encode:, ..) -> encode(protocol)
+  }
+}
+
+@internal
+pub fn format_for_host(format: Format, hostname: String) -> Format {
+  case format {
+    Json -> Json
+    MessagePack -> MessagePack
+    ByHost ->
+      case is_local_host(hostname) {
+        True -> Json
+        False -> MessagePack
+      }
+  }
+}
+
+@internal
+pub fn frame_format(
+  bytes: BitArray,
+  serialiser serialiser: Serialiser(model, message),
+) -> Result(Format, Nil) {
+  case serialiser {
+    Auto(..) -> detect_format(bytes)
+    Open(..) -> Error(Nil)
+  }
+}
+
+@internal
+pub fn is_local_host(hostname: String) -> Bool {
+  hostname == "localhost" || hostname == "127.0.0.1"
+}
+
+@internal
+pub fn is_local_page() -> Bool {
+  is_local_host(page_hostname())
+}
+
+/// Includes frames left over from before a reload.
+@internal
+pub fn pending(connector: Connector) -> List(BitArray) {
+  connector.pending()
+}
+
+@internal
+pub fn resolve_for_page(
+  serialiser: Serialiser(model, message),
+) -> Serialiser(model, message) {
+  case serialiser {
+    Auto(format:, max_decode_depth:) ->
+      Auto(format: format_for_host(format, page_hostname()), max_decode_depth:)
+    Open(..) -> serialiser
+  }
+}
+
+@internal
+pub fn run_connector(connector: Connector, handler: Handler) -> Channel {
+  connector.connect(handler)
+}
+
+/// What a server writes before a client has said which format it speaks.
+@internal
+pub fn server_format(serialiser: Serialiser(model, message)) -> Format {
+  case serialiser {
+    Auto(format:, ..) -> format_for_host(format, "")
+    Open(..) -> MessagePack
+  }
+}
+
+// =============================================================================
+// PRIVATE TYPES
+// =============================================================================
+
+type Reader(model, message) {
+  Reader(
+    int: fn(String) -> Result(Int, Nil),
+    message: fn(String) -> Result(message, Nil),
+    model: fn(String) -> Result(model, Nil),
+    string: fn(String) -> Result(String, Nil),
+    target: fn(String) -> Result(Target, Nil),
+    targets: fn(String) -> Result(List(Target), Nil),
+  )
+}
+
+type Writer(model, message, field) {
+  Writer(
+    int: fn(Int) -> field,
+    message: fn(message) -> field,
+    model: fn(model) -> field,
+    string: fn(String) -> field,
+    target: fn(Target) -> field,
+    targets: fn(List(Target)) -> field,
+  )
 }
 
 // =============================================================================
 // PRIVATE FUNCTIONS
 // =============================================================================
 
-fn acknowledge_decoder() -> decode.Decoder(Protocol(model, message)) {
-  use target <- decode.field("target", target_decoder())
-  use sequence <- decode.field("sequence", decode.int)
-  decode.success(Acknowledge(target:, sequence:))
-}
-
-fn auto_binary_codec(max_decode_depth: Int) -> BinaryCodec(model, message) {
-  BinaryCodec(
-    encode_message: ffi_auto_encode_message_pack,
-    decode_message: fn(bytes) {
-      ffi_auto_decode_message_pack(bytes, max_decode_depth)
-    },
-    encode_model: ffi_auto_encode_message_pack,
-    decode_model: fn(bytes) {
-      ffi_auto_decode_message_pack(bytes, max_decode_depth)
-    },
-    max_decode_depth:,
-  )
-}
-
-fn connected_decoder() -> decode.Decoder(Protocol(model, message)) {
-  use client_id <- decode.field("client_id", decode.string)
-  decode.success(Connected(client_id:))
-}
-
-fn decode_json(
-  bytes: BitArray,
-  decode_message: decode.Decoder(message),
-  decode_model: decode.Decoder(model),
-) -> Result(Protocol(model, message), Nil) {
-  let decoder = protocol_decoder(decode_message, decode_model)
-  bit_array.to_string(bytes)
-  |> result.try(fn(text) {
-    json.parse(from: text, using: decoder)
-    |> result.replace_error(Nil)
+// failure value never read, only needs the decoder's type
+fn auto_decoder() -> decode.Decoder(value) {
+  decode.new_primitive_decoder("Auto", fn(value) {
+    case codec.decode_json(value) {
+      Ok(decoded) -> Ok(codec.passthrough(decoded))
+      Error(_) -> Error(codec.passthrough(value))
+    }
   })
 }
 
-fn decode_message_pack_envelope(
-  entries: List(#(Value, Value)),
-  codec: BinaryCodec(model, message),
+// shared by both formats so they agree on a frame's fields
+fn build(
+  reader: Reader(model, message),
 ) -> Result(Protocol(model, message), Nil) {
-  use type_name <- result.try(lookup_string(entries, "type"))
-  case type_name {
+  use tag <- result.try(reader.string("type"))
+  case tag {
     "acknowledge" -> {
-      use target <- result.try(lookup_target(entries, "target"))
-      use sequence <- result.try(lookup_int(entries, "sequence"))
+      use target <- result.try(reader.target("target"))
+      use sequence <- result.try(reader.int("sequence"))
       Ok(Acknowledge(target:, sequence:))
     }
-
     "connected" -> {
-      use client_id <- result.try(lookup_string(entries, "client_id"))
+      use client_id <- result.try(reader.string("client_id"))
       Ok(Connected(client_id:))
     }
-
-    "push" -> {
-      use topic_id <- result.try(lookup_string(entries, "topic_id"))
-      use payload <- result.try(lookup_message(entries, "payload", codec))
-      Ok(Push(topic_id:, payload:))
-    }
-
     "rejected" -> {
-      use topic_id <- result.try(lookup_string(entries, "topic_id"))
-      use reason <- result.try(lookup_string(entries, "reason"))
+      use topic_id <- result.try(reader.string("topic_id"))
+      use reason <- result.try(reader.string("reason"))
       Ok(Rejected(topic_id:, reason:))
     }
-
     "resync" -> {
-      use cursors_value <- result.try(message_pack.lookup_string_key(
-        entries,
-        "cursors",
-      ))
-      use cursors <- result.try(value_array(cursors_value))
-      use targets <- result.try(list.try_map(
-        cursors,
-        decode_target_message_pack,
-      ))
-      Ok(Resync(cursors: targets))
+      use cursors <- result.try(reader.targets("cursors"))
+      Ok(Resync(cursors:))
     }
-
     "session_message" -> {
-      use payload <- result.try(lookup_message(entries, "payload", codec))
+      use payload <- result.try(reader.message("payload"))
       Ok(SessionMessage(payload:))
     }
-
     "session_update" -> {
-      use sequence <- result.try(lookup_int(entries, "sequence"))
-      use payload <- result.try(lookup_message(entries, "payload", codec))
+      use sequence <- result.try(reader.int("sequence"))
+      use payload <- result.try(reader.message("payload"))
       Ok(SessionUpdate(sequence:, payload:))
     }
-
     "snapshot" -> {
-      use target <- result.try(lookup_target(entries, "target"))
-      use sequence <- result.try(lookup_int(entries, "sequence"))
-      use state_value <- result.try(message_pack.lookup_string_key(
-        entries,
-        "state",
-      ))
-      use state_bytes <- result.try(value_bytes(state_value))
-      use state <- result.try(codec.decode_model(state_bytes))
+      use target <- result.try(reader.target("target"))
+      use sequence <- result.try(reader.int("sequence"))
+      use state <- result.try(reader.model("state"))
       Ok(Snapshot(target:, sequence:, state:))
     }
-
-    "subscribe" -> decode_topic_id_variant(entries, Subscribe)
-
+    "subscribe" -> {
+      use topic_id <- result.try(reader.string("topic_id"))
+      Ok(Subscribe(topic_id:))
+    }
     "topic_message" -> {
-      use topic_id <- result.try(lookup_string(entries, "topic_id"))
-      use payload <- result.try(lookup_message(entries, "payload", codec))
+      use topic_id <- result.try(reader.string("topic_id"))
+      use payload <- result.try(reader.message("payload"))
       Ok(TopicMessage(topic_id:, payload:))
     }
-
     "topic_update" -> {
-      use topic_id <- result.try(lookup_string(entries, "topic_id"))
-      use sequence <- result.try(lookup_int(entries, "sequence"))
-      use payload <- result.try(lookup_message(entries, "payload", codec))
+      use topic_id <- result.try(reader.string("topic_id"))
+      use sequence <- result.try(reader.int("sequence"))
+      use payload <- result.try(reader.message("payload"))
       Ok(TopicUpdate(topic_id:, sequence:, payload:))
     }
-
-    "unsubscribe" -> decode_topic_id_variant(entries, Unsubscribe)
-
+    "unsubscribe" -> {
+      use topic_id <- result.try(reader.string("topic_id"))
+      Ok(Unsubscribe(topic_id:))
+    }
     "version" -> {
-      use hash <- result.try(lookup_string(entries, "hash"))
+      use hash <- result.try(reader.string("hash"))
       Ok(Version(hash:))
     }
-
     _ -> Error(Nil)
   }
 }
 
-/// Decode MessagePack bytes to a Protocol.
-fn decode_message_pack_protocol(
+fn decode_json(bytes: BitArray) -> Result(Protocol(model, message), Nil) {
+  use text <- result.try(bit_array.to_string(bytes))
+  use value <- result.try(
+    json.parse(from: text, using: decode.dynamic)
+    |> result.replace_error(Nil),
+  )
+  build(json_reader(value))
+}
+
+fn decode_message_pack(
   bytes: BitArray,
-  codec: BinaryCodec(model, message),
+  max_depth: Int,
 ) -> Result(Protocol(model, message), Nil) {
-  use #(top_value, _) <- result.try(message_pack.decode_bounded(
-    bytes,
-    codec.max_decode_depth,
-  ))
+  use #(top_value, _) <- result.try(codec.decode_bounded(bytes, max_depth))
   case top_value {
-    ValueMap(entries) -> decode_message_pack_envelope(entries, codec)
+    ValueMap(entries) -> build(message_pack_reader(entries, max_depth))
     _ -> Error(Nil)
   }
 }
 
 fn decode_target_message_pack(value: Value) -> Result(Target, Nil) {
   case value {
-    ValueMap(entries) -> {
-      use kind <- result.try(lookup_string(entries, "kind"))
-      case kind {
-        "session" -> Ok(Session)
-        "topic" -> {
-          use id <- result.try(lookup_string(entries, "id"))
-          Ok(Topic(id:))
-        }
-        _ -> Error(Nil)
+    ValueMap(entries) ->
+      case
+        codec.lookup_string_key(entries, "kind"),
+        codec.lookup_string_key(entries, "id")
+      {
+        Ok(ValueString("session")), _ -> Ok(Session)
+        Ok(ValueString("topic")), Ok(ValueString(id)) -> Ok(Topic(id:))
+        _, _ -> Error(Nil)
       }
-    }
     _ -> Error(Nil)
   }
 }
 
-/// Decode a MessagePack envelope carrying a single `topic_id` string, applying
-/// `build` to it.
-fn decode_topic_id_variant(
-  entries: List(#(Value, Value)),
-  build: fn(String) -> Protocol(model, message),
-) -> Result(Protocol(model, message), Nil) {
-  use topic_id <- result.try(lookup_string(entries, "topic_id"))
-  Ok(build(topic_id))
+// every frame is a map (JSON object or MessagePack map), first byte decides
+fn detect_format(bytes: BitArray) -> Result(Format, Nil) {
+  case bytes {
+    <<0xDE, _:bits>> | <<0xDF, _:bits>> -> Ok(MessagePack)
+    <<marker, _:bits>> if marker >= 0x80 && marker <= 0x8F -> Ok(MessagePack)
+    _ -> detect_json_format(bytes)
+  }
 }
 
-fn encode_json(
-  protocol: Protocol(model, message),
-  encode_message: fn(message) -> Json,
-  encode_model: fn(model) -> Json,
-) -> BitArray {
-  let #(tag, fields) = protocol_fields(protocol)
-  let entries =
-    list.map(fields, fn(field) {
-      case field {
-        FieldInt(name:, value:) -> #(name, json.int(value))
-        FieldString(name:, value:) -> #(name, json.string(value))
-        FieldMessage(name:, value:) -> #(name, encode_message(value))
-        FieldState(name:, value:) -> #(name, encode_model(value))
-        FieldTarget(name:, value:) -> #(name, encode_target_json(value))
-        FieldTargetList(name:, value:) -> #(
-          name,
-          json.array(value, encode_target_json),
-        )
-      }
-    })
-  json.object([#("type", json.string(tag)), ..entries])
+// leading whitespace is never a MessagePack map marker, making it JSON
+fn detect_json_format(bytes: BitArray) -> Result(Format, Nil) {
+  case bytes {
+    <<0x7B, _:bits>> -> Ok(Json)
+    <<0x20, rest:bits>>
+    | <<0x09, rest:bits>>
+    | <<0x0A, rest:bits>>
+    | <<0x0D, rest:bits>> -> detect_json_format(rest)
+    _ -> Error(Nil)
+  }
+}
+
+fn encode_in(protocol: Protocol(model, message), format: Format) -> BitArray {
+  case format {
+    Json -> encode_json(protocol)
+    MessagePack -> encode_message_pack(protocol)
+    ByHost -> encode_in(protocol, format_for_host(ByHost, page_hostname()))
+  }
+}
+
+fn encode_json(protocol: Protocol(model, message)) -> BitArray {
+  let writer =
+    Writer(
+      int: json.int,
+      message: codec.encode_json,
+      model: codec.encode_json,
+      string: json.string,
+      target: encode_target_json,
+      targets: json.array(_, encode_target_json),
+    )
+  let #(tag, fields) = frame_fields(protocol, writer)
+  json.object([#("type", json.string(tag)), ..fields])
   |> json.to_string
   |> bit_array.from_string
 }
 
-/// Encode a Protocol to MessagePack bytes.
-fn encode_message_pack_protocol(
-  protocol: Protocol(model, message),
-  codec: BinaryCodec(model, message),
-) -> BitArray {
-  let str = message_pack.encode_string
-  let bin = message_pack.encode_bin
-  let #(tag, fields) = protocol_fields(protocol)
+fn encode_message_pack(protocol: Protocol(model, message)) -> BitArray {
+  let encode_string = codec.encode_string
+  let writer =
+    Writer(
+      int: codec.encode_int,
+      message: payload_bin,
+      model: payload_bin,
+      string: encode_string,
+      target: encode_target_message_pack,
+      targets: fn(targets) {
+        codec.encode_array(list.map(targets, encode_target_message_pack))
+      },
+    )
+  let #(tag, fields) = frame_fields(protocol, writer)
   let entries =
-    list.map(fields, fn(field) {
-      case field {
-        FieldInt(name:, value:) -> #(str(name), message_pack.encode_int(value))
-        FieldString(name:, value:) -> #(str(name), str(value))
-        FieldMessage(name:, value:) -> #(
-          str(name),
-          bin(codec.encode_message(value)),
-        )
-        FieldState(name:, value:) -> #(
-          str(name),
-          bin(codec.encode_model(value)),
-        )
-        FieldTarget(name:, value:) -> #(
-          str(name),
-          encode_target_message_pack(value),
-        )
-        FieldTargetList(name:, value:) -> #(
-          str(name),
-          message_pack.encode_array(list.map(value, encode_target_message_pack)),
-        )
-      }
-    })
-  message_pack.encode_map([#(str("type"), str(tag)), ..entries])
+    list.map(fields, fn(field) { #(encode_string(field.0), field.1) })
+  codec.encode_map([#(encode_string("type"), encode_string(tag)), ..entries])
 }
 
 fn encode_target_json(target: Target) -> Json {
@@ -904,198 +762,131 @@ fn encode_target_json(target: Target) -> Json {
 }
 
 fn encode_target_message_pack(target: Target) -> BitArray {
-  let str = message_pack.encode_string
+  let encode_string = codec.encode_string
   case target {
-    Session -> message_pack.encode_map([#(str("kind"), str("session"))])
+    Session ->
+      codec.encode_map([#(encode_string("kind"), encode_string("session"))])
     Topic(id:) ->
-      message_pack.encode_map([
-        #(str("kind"), str("topic")),
-        #(str("id"), str(id)),
+      codec.encode_map([
+        #(encode_string("kind"), encode_string("topic")),
+        #(encode_string("id"), encode_string(id)),
       ])
   }
 }
 
-fn ffi_auto_decode(value: Dynamic) -> Result(a, a) {
-  case auto_codec.decode_json(value) {
-    Ok(decoded) -> Ok(reflection.passthrough(decoded))
-    Error(_) -> Error(reflection.passthrough(value))
-  }
-}
-
-fn ffi_auto_decode_message_pack(
-  bytes: BitArray,
-  max_depth: Int,
-) -> Result(a, Nil) {
-  case auto_codec.decode_message_pack_bounded(bytes, max_depth) {
-    Ok(value) -> Ok(reflection.passthrough(value))
-    Error(_) -> Error(Nil)
-  }
-}
-
-fn ffi_auto_encode(value: a) -> Json {
-  auto_codec.encode_json(value)
-}
-
-fn ffi_auto_encode_message_pack(value: a) -> BitArray {
-  auto_codec.encode_message_pack(value)
-}
-
-/// Look up an integer-valued MessagePack field by string key.
-fn lookup_int(entries: List(#(Value, Value)), key: String) -> Result(Int, Nil) {
-  message_pack.lookup_string_key(entries, key)
-  |> result.try(value_int)
-}
-
-/// Look up a bytes-valued MessagePack field by string key and decode it into a
-/// message with the codec.
-fn lookup_message(
-  entries: List(#(Value, Value)),
-  key: String,
-  codec: BinaryCodec(model, message),
-) -> Result(message, Nil) {
-  message_pack.lookup_string_key(entries, key)
-  |> result.try(value_bytes)
-  |> result.try(codec.decode_message)
-}
-
-/// Look up a string-valued MessagePack field by string key.
-fn lookup_string(
-  entries: List(#(Value, Value)),
-  key: String,
-) -> Result(String, Nil) {
-  message_pack.lookup_string_key(entries, key)
-  |> result.try(value_string)
-}
-
-/// Look up a `target`-shaped MessagePack field by string key and decode it.
-fn lookup_target(
-  entries: List(#(Value, Value)),
-  key: String,
-) -> Result(Target, Nil) {
-  message_pack.lookup_string_key(entries, key)
-  |> result.try(decode_target_message_pack)
-}
-
-fn protocol_decoder(
-  decode_message: decode.Decoder(message),
-  decode_model: decode.Decoder(model),
-) -> decode.Decoder(Protocol(model, message)) {
-  use protocol_type <- decode.then(decode.at(["type"], decode.string))
-  case protocol_type {
-    "acknowledge" -> acknowledge_decoder()
-    "connected" -> connected_decoder()
-    "push" -> push_decoder(decode_message)
-    "rejected" -> rejected_decoder()
-    "resync" -> resync_decoder()
-    "session_message" -> session_message_decoder(decode_message)
-    "session_update" -> session_update_decoder(decode_message)
-    "snapshot" -> snapshot_decoder(decode_model)
-    "subscribe" -> subscribe_decoder()
-    "topic_message" -> topic_message_decoder(decode_message)
-    "topic_update" -> topic_update_decoder(decode_message)
-    "unsubscribe" -> unsubscribe_decoder()
-    "version" -> version_decoder()
-    _ -> decode.failure(Acknowledge(Session, 0), "Protocol")
-  }
-}
-
-/// Wire tag and ordered fields for each `Protocol` variant. Field order must
-/// match the encoders exactly to keep the wire format unchanged.
-fn protocol_fields(
+// field order is part of the wire format
+fn frame_fields(
   protocol: Protocol(model, message),
-) -> #(String, List(Field(model, message))) {
+  writer: Writer(model, message, field),
+) -> #(String, List(#(String, field))) {
   case protocol {
     Acknowledge(target:, sequence:) -> #("acknowledge", [
-      FieldTarget("target", target),
-      FieldInt("sequence", sequence),
+      #("target", writer.target(target)),
+      #("sequence", writer.int(sequence)),
     ])
     Connected(client_id:) -> #("connected", [
-      FieldString("client_id", client_id),
-    ])
-    Push(topic_id:, payload:) -> #("push", [
-      FieldString("topic_id", topic_id),
-      FieldMessage("payload", payload),
+      #("client_id", writer.string(client_id)),
     ])
     Rejected(topic_id:, reason:) -> #("rejected", [
-      FieldString("topic_id", topic_id),
-      FieldString("reason", reason),
+      #("topic_id", writer.string(topic_id)),
+      #("reason", writer.string(reason)),
     ])
-    Resync(cursors:) -> #("resync", [FieldTargetList("cursors", cursors)])
+    Resync(cursors:) -> #("resync", [#("cursors", writer.targets(cursors))])
     SessionMessage(payload:) -> #("session_message", [
-      FieldMessage("payload", payload),
+      #("payload", writer.message(payload)),
     ])
     SessionUpdate(sequence:, payload:) -> #("session_update", [
-      FieldInt("sequence", sequence),
-      FieldMessage("payload", payload),
+      #("sequence", writer.int(sequence)),
+      #("payload", writer.message(payload)),
     ])
     Snapshot(target:, sequence:, state:) -> #("snapshot", [
-      FieldTarget("target", target),
-      FieldInt("sequence", sequence),
-      FieldState("state", state),
+      #("target", writer.target(target)),
+      #("sequence", writer.int(sequence)),
+      #("state", writer.model(state)),
     ])
-    Subscribe(topic_id:) -> #("subscribe", [FieldString("topic_id", topic_id)])
+    Subscribe(topic_id:) -> #("subscribe", [
+      #("topic_id", writer.string(topic_id)),
+    ])
     TopicMessage(topic_id:, payload:) -> #("topic_message", [
-      FieldString("topic_id", topic_id),
-      FieldMessage("payload", payload),
+      #("topic_id", writer.string(topic_id)),
+      #("payload", writer.message(payload)),
     ])
     TopicUpdate(topic_id:, sequence:, payload:) -> #("topic_update", [
-      FieldString("topic_id", topic_id),
-      FieldInt("sequence", sequence),
-      FieldMessage("payload", payload),
+      #("topic_id", writer.string(topic_id)),
+      #("sequence", writer.int(sequence)),
+      #("payload", writer.message(payload)),
     ])
     Unsubscribe(topic_id:) -> #("unsubscribe", [
-      FieldString("topic_id", topic_id),
+      #("topic_id", writer.string(topic_id)),
     ])
-    Version(hash:) -> #("version", [FieldString("hash", hash)])
+    Version(hash:) -> #("version", [#("hash", writer.string(hash))])
   }
 }
 
-fn push_decoder(
-  decode_message: decode.Decoder(message),
-) -> decode.Decoder(Protocol(model, message)) {
-  use topic_id <- decode.field("topic_id", decode.string)
-  use payload <- decode.field("payload", decode_message)
-  decode.success(Push(topic_id:, payload:))
+fn json_field(
+  value: Dynamic,
+  key: String,
+  decoder: decode.Decoder(field),
+) -> Result(field, Nil) {
+  decode.run(value, decode.at([key], decoder))
+  |> result.replace_error(Nil)
 }
 
-fn rejected_decoder() -> decode.Decoder(Protocol(model, message)) {
-  use topic_id <- decode.field("topic_id", decode.string)
-  use reason <- decode.field("reason", decode.string)
-  decode.success(Rejected(topic_id:, reason:))
+fn json_reader(value: Dynamic) -> Reader(model, message) {
+  Reader(
+    int: json_field(value, _, decode.int),
+    message: json_field(value, _, auto_decoder()),
+    model: json_field(value, _, auto_decoder()),
+    string: json_field(value, _, decode.string),
+    target: json_field(value, _, target_decoder()),
+    targets: json_field(value, _, decode.list(target_decoder())),
+  )
 }
 
-fn resync_decoder() -> decode.Decoder(Protocol(model, message)) {
-  use cursors <- decode.field("cursors", decode.list(target_decoder()))
-  decode.success(Resync(cursors:))
+fn message_pack_payload(
+  value: Result(Value, Nil),
+  max_depth: Int,
+) -> Result(payload, Nil) {
+  case value {
+    Ok(ValueBytes(bytes)) ->
+      codec.decode_message_pack(bytes, max_depth)
+      |> result.map(codec.passthrough)
+    _ -> Error(Nil)
+  }
 }
 
-fn session_message_decoder(
-  decode_message: decode.Decoder(message),
-) -> decode.Decoder(Protocol(model, message)) {
-  use payload <- decode.field("payload", decode_message)
-  decode.success(SessionMessage(payload:))
+fn message_pack_reader(
+  entries: List(#(Value, Value)),
+  max_depth: Int,
+) -> Reader(model, message) {
+  let lookup = codec.lookup_string_key(entries, _)
+  Reader(
+    int: fn(key) {
+      case lookup(key) {
+        Ok(ValueInteger(value)) -> Ok(value)
+        _ -> Error(Nil)
+      }
+    },
+    message: fn(key) { message_pack_payload(lookup(key), max_depth) },
+    model: fn(key) { message_pack_payload(lookup(key), max_depth) },
+    string: fn(key) {
+      case lookup(key) {
+        Ok(ValueString(text)) -> Ok(text)
+        _ -> Error(Nil)
+      }
+    },
+    target: fn(key) { lookup(key) |> result.try(decode_target_message_pack) },
+    targets: fn(key) {
+      case lookup(key) {
+        Ok(ValueArray(items)) -> list.try_map(items, decode_target_message_pack)
+        _ -> Error(Nil)
+      }
+    },
+  )
 }
 
-fn session_update_decoder(
-  decode_message: decode.Decoder(message),
-) -> decode.Decoder(Protocol(model, message)) {
-  use sequence <- decode.field("sequence", decode.int)
-  use payload <- decode.field("payload", decode_message)
-  decode.success(SessionUpdate(sequence:, payload:))
-}
-
-fn snapshot_decoder(
-  decode_model: decode.Decoder(model),
-) -> decode.Decoder(Protocol(model, message)) {
-  use target <- decode.field("target", target_decoder())
-  use sequence <- decode.field("sequence", decode.int)
-  use state <- decode.field("state", decode_model)
-  decode.success(Snapshot(target:, sequence:, state:))
-}
-
-fn subscribe_decoder() -> decode.Decoder(Protocol(model, message)) {
-  use topic_id <- decode.field("topic_id", decode.string)
-  decode.success(Subscribe(topic_id:))
+fn payload_bin(value: payload) -> BitArray {
+  codec.encode_bin(codec.encode_message_pack(value))
 }
 
 fn target_decoder() -> decode.Decoder(Target) {
@@ -1110,115 +901,41 @@ fn target_decoder() -> decode.Decoder(Target) {
   }
 }
 
-fn topic_message_decoder(
-  decode_message: decode.Decoder(message),
-) -> decode.Decoder(Protocol(model, message)) {
-  use topic_id <- decode.field("topic_id", decode.string)
-  use payload <- decode.field("payload", decode_message)
-  decode.success(TopicMessage(topic_id:, payload:))
-}
-
-fn topic_update_decoder(
-  decode_message: decode.Decoder(message),
-) -> decode.Decoder(Protocol(model, message)) {
-  use topic_id <- decode.field("topic_id", decode.string)
-  use sequence <- decode.field("sequence", decode.int)
-  use payload <- decode.field("payload", decode_message)
-  decode.success(TopicUpdate(topic_id:, sequence:, payload:))
-}
-
-fn unsubscribe_decoder() -> decode.Decoder(Protocol(model, message)) {
-  use topic_id <- decode.field("topic_id", decode.string)
-  decode.success(Unsubscribe(topic_id:))
-}
-
-fn value_array(value: Value) -> Result(List(Value), Nil) {
-  case value {
-    ValueArray(items) -> Ok(items)
-    _ -> Error(Nil)
-  }
-}
-
-fn value_bytes(value: Value) -> Result(BitArray, Nil) {
-  case value {
-    ValueBytes(b) -> Ok(b)
-    _ -> Error(Nil)
-  }
-}
-
-fn value_int(value: Value) -> Result(Int, Nil) {
-  case value {
-    ValueInteger(n) -> Ok(n)
-    _ -> Error(Nil)
-  }
-}
-
-fn value_string(value: Value) -> Result(String, Nil) {
-  case value {
-    ValueString(s) -> Ok(s)
-    _ -> Error(Nil)
-  }
-}
-
-fn version_decoder() -> decode.Decoder(Protocol(model, message)) {
-  use hash <- decode.field("hash", decode.string)
-  decode.success(Version(hash:))
-}
-
 // =============================================================================
 // PRIVATE FFI
 // =============================================================================
 
 @target(javascript)
-@external(javascript, "./transport.ffi.mjs", "transportClose")
-fn ffi_http_close(_handle: HttpHandle) -> Nil {
-  Nil
-}
-
-@target(javascript)
-@external(javascript, "./transport.ffi.mjs", "httpConnect")
-fn ffi_http_connect(
-  _post_url: String,
-  _events_url: String,
-  _flush_batch_size: Int,
+@external(javascript, "./transport.ffi.mjs", "offlineConnect")
+fn ffi_offline_connect(
+  _connect: fn(Handler) -> Channel,
+  _storage_key: String,
   _handler: Handler,
-) -> HttpHandle {
-  panic as "JavaScript only"
+  _make_handler: fn(fn(BitArray) -> Nil, fn() -> Nil, fn() -> Nil) -> Handler,
+  _make_channel: fn(fn(BitArray) -> Result(Nil, Nil), fn() -> Nil) -> Channel,
+) -> Channel {
+  Channel(send: fn(_) { Error(Nil) }, close: fn() { Nil })
 }
 
 @target(javascript)
-@external(javascript, "./transport.ffi.mjs", "transportSend")
-fn ffi_http_send(_handle: HttpHandle, _bytes: BitArray) -> Nil {
-  Nil
+@external(javascript, "./transport.ffi.mjs", "offlinePending")
+fn ffi_offline_pending(_storage_key: String) -> List(BitArray) {
+  []
 }
 
 @target(javascript)
-@external(javascript, "./transport.ffi.mjs", "transportClose")
-fn ffi_ws_close(_handle: WsHandle) -> Nil {
-  Nil
-}
-
-@target(javascript)
-@external(javascript, "./transport.ffi.mjs", "wsConnect")
-fn ffi_ws_connect(
+@external(javascript, "./transport.ffi.mjs", "websocketConnect")
+fn ffi_websocket_connect(
   _url: String,
-  _reconnect_base_ms: Int,
-  _reconnect_max_ms: Int,
+  _reconnect_base_milliseconds: Int,
+  _reconnect_max_milliseconds: Int,
   _reconnect_jitter_ratio: Float,
   _reconnect_multiplier: Float,
   _handler: Handler,
-) -> WsHandle {
-  panic as "JavaScript only"
-}
+  _make_channel: fn(fn(BitArray) -> Result(Nil, Nil), fn() -> Nil) -> Channel,
+) -> Channel
 
-@target(javascript)
-@external(javascript, "./transport.ffi.mjs", "transportSend")
-fn ffi_ws_send(_handle: WsHandle, _bytes: BitArray) -> Nil {
-  Nil
-}
-
-@target(javascript)
-@external(javascript, "./transport.ffi.mjs", "wsUrlFromCurrentLocation")
-fn ffi_ws_url_from_current_location(_path: String) -> String {
+@external(javascript, "./transport.ffi.mjs", "pageHostname")
+fn page_hostname() -> String {
   ""
 }

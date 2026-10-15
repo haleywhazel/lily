@@ -1,260 +1,40 @@
-// Tests for the Erlang auto-serialiser (pure Gleam auto_codec + reflection FFI).
-// All functions are @target(erlang), skipped on JavaScript.
+// automatic serialiser module list on Erlang, shared roundtrips live in
+// test/lily/shared/transport_auto_test.gleam
+
+// =============================================================================
+// IMPORTS
+// =============================================================================
 
 @target(erlang)
 import gleeunit/should
 @target(erlang)
-import lily/test_support.{Decrement, Increment, Noop, Reset, SetName}
+import lily/test_support.{type Message, type Model}
 @target(erlang)
-import lily/transport.{
-  Acknowledge, Resync, Session, SessionMessage, Snapshot, TopicUpdate,
-}
+import lily/transport.{Acknowledge, Session}
 
 // =============================================================================
-// HELPERS
+// MODULES
 // =============================================================================
 
 @target(erlang)
-fn ser() {
-  transport.automatic(format: transport.Json, max_decode_depth: 128)
-}
-
-@target(erlang)
-fn roundtrip_message(
-  message: test_support.Message,
-) -> Result(transport.Protocol(test_support.Model, test_support.Message), Nil) {
-  let encoded =
-    transport.encode(SessionMessage(payload: message), serialiser: ser())
-  transport.decode(encoded, serialiser: ser())
-}
-
-@target(erlang)
-fn roundtrip_snapshot(
-  model: test_support.Model,
-  seq: Int,
-) -> Result(transport.Protocol(test_support.Model, test_support.Message), Nil) {
-  let encoded =
-    transport.encode(
-      Snapshot(target: Session, sequence: seq, state: model),
-      serialiser: ser(),
+pub fn auto_erl_modules_do_not_change_the_wire_on_the_server_test() {
+  // modules are for the browser, the server already has every type compiled in
+  let with_modules: transport.Serialiser(Model, Message) =
+    transport.automatic(format: transport.Json, max_decode_depth: 128, modules: [
+      transport.module("shared"),
+      transport.module_in(package: "lily_ui", path: "lily/ui/theme"),
+    ])
+  let plain =
+    transport.automatic(
+      format: transport.Json,
+      max_decode_depth: 128,
+      modules: [],
     )
-  transport.decode(encoded, serialiser: ser())
-}
+  let frame = Acknowledge(target: Session, sequence: 4)
 
-// =============================================================================
-// ROUNDTRIPS, ZERO-FIELD CONSTRUCTORS
-// =============================================================================
-
-@target(erlang)
-pub fn auto_erl_roundtrip_zero_field_test() {
-  roundtrip_message(Increment)
-  |> should.equal(Ok(SessionMessage(payload: Increment)))
-}
-
-@target(erlang)
-pub fn auto_erl_roundtrip_decrement_test() {
-  roundtrip_message(Decrement)
-  |> should.equal(Ok(SessionMessage(payload: Decrement)))
-}
-
-@target(erlang)
-pub fn auto_erl_roundtrip_reset_test() {
-  roundtrip_message(Reset)
-  |> should.equal(Ok(SessionMessage(payload: Reset)))
-}
-
-@target(erlang)
-pub fn auto_erl_roundtrip_noop_test() {
-  roundtrip_message(Noop)
-  |> should.equal(Ok(SessionMessage(payload: Noop)))
-}
-
-// =============================================================================
-// ROUNDTRIPS, SINGLE-FIELD CONSTRUCTOR
-// =============================================================================
-
-@target(erlang)
-pub fn auto_erl_roundtrip_single_field_test() {
-  roundtrip_message(SetName("Alice"))
-  |> should.equal(Ok(SessionMessage(payload: SetName("Alice"))))
-}
-
-@target(erlang)
-pub fn auto_erl_roundtrip_empty_string_test() {
-  roundtrip_message(SetName(""))
-  |> should.equal(Ok(SessionMessage(payload: SetName(""))))
-}
-
-// =============================================================================
-// ROUNDTRIPS, MULTI-FIELD CONSTRUCTOR (Model in Snapshot)
-// =============================================================================
-
-@target(erlang)
-pub fn auto_erl_roundtrip_multi_field_test() {
-  let model =
-    test_support.Model(
-      ..test_support.initial_model(),
-      count: 5,
-      name: "Bob",
-      connected: False,
-    )
-  roundtrip_snapshot(model, 1)
-  |> should.equal(Ok(Snapshot(target: Session, sequence: 1, state: model)))
-}
-
-@target(erlang)
-pub fn auto_erl_roundtrip_boolean_field_test() {
-  let model =
-    test_support.Model(
-      ..test_support.initial_model(),
-      count: 0,
-      name: "",
-      connected: True,
-    )
-  roundtrip_snapshot(model, 0)
-  |> should.equal(Ok(Snapshot(target: Session, sequence: 0, state: model)))
-}
-
-// =============================================================================
-// ROUNDTRIPS, PROTOCOL VARIANTS
-// =============================================================================
-
-@target(erlang)
-pub fn auto_erl_roundtrip_topic_update_test() {
-  let encoded =
-    transport.encode(
-      TopicUpdate(topic_id: "chat", sequence: 7, payload: Increment),
-      serialiser: ser(),
-    )
-  transport.decode(encoded, serialiser: ser())
-  |> should.equal(
-    Ok(TopicUpdate(topic_id: "chat", sequence: 7, payload: Increment)),
-  )
-}
-
-@target(erlang)
-pub fn auto_erl_roundtrip_resync_test() {
-  let encoded = transport.encode(Resync(cursors: [Session]), serialiser: ser())
-  transport.decode(encoded, serialiser: ser())
-  |> should.equal(Ok(Resync(cursors: [Session])))
-}
-
-@target(erlang)
-pub fn auto_erl_roundtrip_acknowledge_test() {
-  let encoded =
-    transport.encode(
-      Acknowledge(target: Session, sequence: 2),
-      serialiser: ser(),
-    )
-  transport.decode(encoded, serialiser: ser())
-  |> should.equal(Ok(Acknowledge(target: Session, sequence: 2)))
-}
-
-// =============================================================================
-// ROUNDTRIPS, NESTED TYPES
-// =============================================================================
-
-@target(erlang)
-pub fn auto_erl_roundtrip_nested_test() {
-  let inner =
-    test_support.Model(
-      ..test_support.initial_model(),
-      count: 3,
-      name: "Eve",
-      connected: False,
-    )
-  let nested = test_support.Nested(inner:)
-  let nested_ser: transport.Serialiser(
-    test_support.Nested,
-    test_support.Message,
-  ) = transport.automatic(format: transport.Json, max_decode_depth: 128)
-  let encoded =
-    transport.encode(
-      Snapshot(target: Session, sequence: 1, state: nested),
-      serialiser: nested_ser,
-    )
-  transport.decode(encoded, serialiser: nested_ser)
-  |> should.equal(Ok(Snapshot(target: Session, sequence: 1, state: nested)))
-}
-
-@target(erlang)
-pub fn auto_erl_roundtrip_list_field_test() {
-  let with_list = test_support.WithList(items: [1, 2, 3])
-  let list_ser: transport.Serialiser(
-    test_support.WithList,
-    test_support.Message,
-  ) = transport.automatic(format: transport.Json, max_decode_depth: 128)
-  let encoded =
-    transport.encode(
-      Snapshot(target: Session, sequence: 0, state: with_list),
-      serialiser: list_ser,
-    )
-  transport.decode(encoded, serialiser: list_ser)
-  |> should.equal(Ok(Snapshot(target: Session, sequence: 0, state: with_list)))
-}
-
-// =============================================================================
-// FORMAT ISOLATION
-// =============================================================================
-
-@target(erlang)
-pub fn auto_erl_message_pack_bytes_fail_under_json_test() {
-  let mp_bytes =
-    transport.encode(
-      Acknowledge(target: Session, sequence: 1),
-      serialiser: transport.automatic(
-        format: transport.MessagePack,
-        max_decode_depth: 128,
-      ),
-    )
-  let json_ser =
-    transport.automatic(format: transport.Json, max_decode_depth: 128)
-  transport.decode(mp_bytes, serialiser: json_ser)
-  |> should.be_error
-}
-
-// =============================================================================
-// FORMAT SELECTION
-// =============================================================================
-
-@target(erlang)
-pub fn auto_erl_json_format_roundtrip_test() {
-  let json_ser =
-    transport.automatic(format: transport.Json, max_decode_depth: 128)
-  let encoded =
-    transport.encode(
-      Acknowledge(target: Session, sequence: 9),
-      serialiser: json_ser,
-    )
-  transport.decode(encoded, serialiser: json_ser)
-  |> should.equal(Ok(Acknowledge(target: Session, sequence: 9)))
-}
-
-@target(erlang)
-pub fn auto_erl_message_pack_format_roundtrip_test() {
-  let mp_ser =
-    transport.automatic(format: transport.MessagePack, max_decode_depth: 128)
-  let encoded =
-    transport.encode(
-      Acknowledge(target: Session, sequence: 5),
-      serialiser: mp_ser,
-    )
-  transport.decode(encoded, serialiser: mp_ser)
-  |> should.equal(Ok(Acknowledge(target: Session, sequence: 5)))
-}
-
-// =============================================================================
-// ERROR PATHS
-// =============================================================================
-
-@target(erlang)
-pub fn auto_erl_empty_bytes_returns_error_test() {
-  transport.decode(<<>>, serialiser: ser())
-  |> should.be_error
-}
-
-@target(erlang)
-pub fn auto_erl_invalid_bytes_returns_error_test() {
-  transport.decode(<<0xFF, 0xFE, 0x00>>, serialiser: ser())
-  |> should.be_error
+  transport.encode(frame, serialiser: with_modules)
+  |> should.equal(transport.encode(frame, serialiser: plain))
+  transport.encode(frame, serialiser: with_modules)
+  |> transport.decode(serialiser: plain)
+  |> should.equal(Ok(frame))
 }

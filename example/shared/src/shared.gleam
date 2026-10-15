@@ -200,38 +200,37 @@ pub fn initial_room() -> Room {
 }
 
 // =============================================================================
-// WIRING
+// STORE
 // =============================================================================
 
-pub fn wiring() -> store.Wiring(Model, Message) {
-  store.wiring()
-  |> store.session(
-    extract: fn(message) {
+pub fn store() -> store.Store(Model, Message, store.Synced) {
+  store.new(init: initial_model(), update: update)
+  |> store.sync(
+    route: fn(message) {
       case message {
-        Session(m) -> Ok(m)
-        RoomMessage(..) -> Error(Nil)
+        Session(_) -> store.Session
+        RoomMessage(room_id:, ..) -> store.Topic("room:" <> room_id)
       }
     },
-    update: session_update,
-    field_get: fn(model: Model) { model.session },
-    field_set: fn(model, session) { Model(..model, session:) },
+    modules: [transport.module("shared")],
   )
-  |> store.topic_kind(
+  |> store.session(
+    get: fn(model: Model) { model.session },
+    set: fn(model, session) { Model(..model, session:) },
+  )
+  |> store.topic(
     prefix: "room:",
-    extract: fn(message) {
-      case message {
-        RoomMessage(room_id:, message:) -> Ok(#(room_id, message))
-        Session(_) -> Error(Nil)
-      }
-    },
-    update: room_update,
-    field_get: fn(model: Model, key) {
+    get: fn(model: Model, key) {
       dict.get(model.rooms, key) |> result.unwrap(initial_room())
     },
-    field_set: fn(model: Model, key, room) {
+    set: fn(model: Model, key, room) {
       Model(..model, rooms: dict.insert(model.rooms, key, room))
     },
+    access: store.Open,
   )
+  |> store.subscriptions(fn(model: Model) {
+    list.map(model.session.joined_rooms, fn(room_id) { "room:" <> room_id })
+  })
 }
 
 // =============================================================================
@@ -265,24 +264,4 @@ pub fn decode_theme() -> decode.Decoder(Theme) {
       Error(Nil) -> decode.failure(Dark, "Theme")
     }
   })
-}
-
-// =============================================================================
-// SERIALISER
-// =============================================================================
-
-pub fn serialiser() -> transport.Serialiser(Model, Message) {
-  let _ = register_types()
-  transport.automatic(format: transport.Json, max_decode_depth: 128)
-}
-
-@target(javascript)
-@external(javascript, "./shared.ffi.mjs", "registerTypes")
-fn register_types() -> Nil {
-  Nil
-}
-
-@target(erlang)
-fn register_types() -> Nil {
-  Nil
 }

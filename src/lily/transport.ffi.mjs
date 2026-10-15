@@ -1,147 +1,85 @@
 /**
- * TRANSPORT FFI
+ * TRANSPORT
  *
- * Auto-serialisation for both JSON and MessagePack lives in
- * lily/internal/auto_codec.gleam
+ * Browser side of the built-in transports, WebSocket with backoff plus a
+ * sessionStorage offline queue.
  */
 
 // =============================================================================
 // IMPORTS
 // =============================================================================
 
-import { BitArray } from "../gleam.mjs";
-import { registerModule as registerReflectionModule } from "./internal/reflection.ffi.mjs";
+import { BitArray, Error as GleamError, Ok, toList } from "../gleam.mjs";
+
+// re-exported for user FFIs, the registry lives in codec
+export { registerModule } from "./internal/codec.ffi.mjs";
 
 // =============================================================================
 // EXPORT FUNCTIONS
 // =============================================================================
 
-/**
- * Register the CustomType classes in a module namespace so the auto-decoder
- * can reconstruct them. Pass the result of `import * as mod from "..."`.
- */
-export function registerModule(moduleNamespace) {
-  registerReflectionModule(moduleNamespace);
+/** `makeHandler` and `makeChannel` are passed-in Gleam constructors. */
+export function offlineConnect(
+  connect,
+  storageKey,
+  handler,
+  makeHandler,
+  makeChannel,
+) {
+  const queue = createOfflineQueue(storageKey);
+  let channel = null;
+
+  function flush() {
+    if (!channel || queue.size === 0) return;
+    let sent = 0;
+    for (const frame of queue.all()) {
+      if (channel.send(new BitArray(frame)) instanceof GleamError) break;
+      sent++;
+    }
+    queue.drainSent(sent);
+  }
+
+  channel = connect(
+    makeHandler(
+      handler.received,
+      () => {
+        flush();
+        handler.opened();
+      },
+      handler.closed,
+    ),
+  );
+
+  return makeChannel(
+    (bytes) => {
+      const result = channel.send(bytes);
+      if (result instanceof GleamError) queue.queuePending(bytes.rawBuffer);
+      return result;
+    },
+    () => channel.close(),
+  );
 }
 
-// =============================================================================
-// HTTP TRANSPORT
-// =============================================================================
-
-/**
- * Establish HTTP/SSE transport connection with offline queueing.
- */
-export function httpConnect(postUrl, eventsUrl, flushBatchSize, handler) {
-  const queue = createOfflineQueue(STORAGE_KEY_HTTP_PENDING);
-  let eventSource = null;
-  let isConnected = false;
-  let isFlushing = false;
-
-  function postFrame(frame) {
-    return fetch(postUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/octet-stream" },
-      body: frame,
-    });
-  }
-
-  async function flushPending() {
-    if (isFlushing) return;
-    queue.loadIfEmpty();
-    if (queue.size === 0) return;
-
-    isFlushing = true;
-    let totalSent = 0;
-
-    for (let i = 0; i < queue.size; i += flushBatchSize) {
-      if (!isConnected) break;
-      const batch = queue.slice(i, i + flushBatchSize);
-      const results = await Promise.allSettled(batch.map(postFrame));
-      // Count only the leading run of fulfilled frames.
-      //
-      // drainSent removes from the front, so a middle rejection must stop the
-      // count or we would drop an unsent frame and re-send an
-      // already-delivered one
-      let sent = 0;
-      while (sent < results.length && results[sent].status === "fulfilled") {
-        sent++;
-      }
-      totalSent += sent;
-      if (sent < batch.length) break;
-    }
-
-    queue.drainSent(totalSent);
-    isFlushing = false;
-  }
-
-  try {
-    eventSource = new EventSource(eventsUrl);
-  } catch (error) {
-    console.error("Failed to create EventSource:", error);
-    return { send() {}, close() {} };
-  }
-
-  eventSource.onopen = function () {
-    isConnected = true;
-    flushPending();
-    handler.on_reconnect();
-  };
-
-  eventSource.onmessage = function (event) {
-    if (typeof event.data === "string") {
-      handler.on_receive(new BitArray(new TextEncoder().encode(event.data)));
-    }
-  };
-
-  eventSource.onerror = function (_error) {
-    isConnected = false;
-    handler.on_disconnect();
-  };
-
-  return {
-    send(bytes) {
-      const frame = bytes.rawBuffer;
-      if (isConnected) {
-        postFrame(frame)
-          .then(function () {})
-          .catch(function (error) {
-            console.error("Failed to POST message:", error);
-            queue.queuePending(frame);
-          });
-      } else {
-        queue.queuePending(frame);
-      }
-    },
-    close() {
-      isConnected = false;
-      if (eventSource) {
-        eventSource.close();
-        eventSource = null;
-      }
-    },
-  };
+export function offlinePending(storageKey) {
+  return toList(readQueue(storageKey).map((frame) => new BitArray(frame)));
 }
 
-// =============================================================================
-// WEBSOCKET TRANSPORT
-// =============================================================================
+export function pageHostname() {
+  return globalThis.location?.hostname ?? "";
+}
 
-/**
- * Establish WebSocket connection with exponential-backoff reconnection and
- * offline queueing.
- */
-export function wsConnect(
+export function websocketConnect(
   url,
-  reconnectBaseMs,
-  reconnectMaxMs,
+  reconnectBase,
+  reconnectMax,
   jitterRatio,
   multiplier,
   handler,
+  makeChannel,
 ) {
-  let ws = null;
-  let reconnectDelay = null;
+  let socket = null;
+  let reconnectDelay = reconnectBase;
   let reconnectTimer = null;
-  const queue = createOfflineQueue(STORAGE_KEY_WS_PENDING);
 
   function openConnection() {
     if (reconnectTimer) {
@@ -150,43 +88,38 @@ export function wsConnect(
     }
 
     try {
-      ws = new WebSocket(url);
-      ws.binaryType = "arraybuffer";
+      socket = new WebSocket(resolveSocketUrl(url));
+      socket.binaryType = "arraybuffer";
     } catch (_error) {
       scheduleReconnect();
       return;
     }
 
-    ws.onopen = function () {
-      reconnectDelay = reconnectBaseMs;
-      flushPending();
-      handler.on_reconnect();
+    socket.onopen = function () {
+      reconnectDelay = reconnectBase;
+      handler.opened();
     };
 
-    ws.onmessage = function (event) {
+    socket.onmessage = function (event) {
       if (event.data instanceof ArrayBuffer) {
-        handler.on_receive(new BitArray(new Uint8Array(event.data)));
+        handler.received(new BitArray(new Uint8Array(event.data)));
       } else if (typeof event.data === "string") {
-        handler.on_receive(new BitArray(new TextEncoder().encode(event.data)));
+        handler.received(new BitArray(TEXT_ENCODER.encode(event.data)));
       }
     };
 
-    ws.onclose = function () {
-      ws = null;
-      handler.on_disconnect();
+    // an error is always followed by a close
+    socket.onclose = function () {
+      socket = null;
+      handler.closed();
       scheduleReconnect();
-    };
-
-    ws.onerror = function () {
-      // onclose fires after onerror, which triggers reconnect
     };
   }
 
   function scheduleReconnect() {
     if (reconnectTimer) return;
-    if (reconnectDelay === null) reconnectDelay = reconnectBaseMs;
 
-    // Jitter spreads reconnects after a mass disconnect
+    // jitter spreads reconnects after a mass disconnect
     const jitteredDelay =
       reconnectDelay * (1 - jitterRatio + Math.random() * jitterRatio * 2);
     reconnectTimer = setTimeout(function () {
@@ -194,94 +127,49 @@ export function wsConnect(
       openConnection();
     }, jitteredDelay);
 
-    // Advance the progression regardless of jitter so the ceiling is reached
-    // in a predictable number of attempts
-    reconnectDelay = Math.min(reconnectDelay * multiplier, reconnectMaxMs);
-  }
-
-  function flushPending() {
-    queue.loadIfEmpty();
-    if (queue.size === 0) return;
-
-    let sent = 0;
-    for (const frame of queue.all()) {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(frame);
-        sent++;
-      } else {
-        break;
-      }
-    }
-    queue.drainSent(sent);
+    // backoff advances regardless of jitter
+    reconnectDelay = Math.min(reconnectDelay * multiplier, reconnectMax);
   }
 
   openConnection();
 
-  return {
-    send(bytes) {
-      const frame = bytes.rawBuffer;
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(frame);
-      } else {
-        queue.queuePending(frame);
+  return makeChannel(
+    (bytes) => {
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        return new GleamError(undefined);
       }
+      socket.send(bytes.rawBuffer);
+      return new Ok(undefined);
     },
-    close() {
+    () => {
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
       }
-      if (ws) {
-        ws.close();
-        ws = null;
+      if (socket) {
+        socket.close();
+        socket = null;
       }
     },
-  };
-}
-
-/**
- * Derive a WebSocket URL from the current browser location. Uses `wss:`
- * for HTTPS and `ws:` for HTTP.
- */
-export function wsUrlFromCurrentLocation(path) {
-  const protocol = globalThis.location.protocol === "https:" ? "wss:" : "ws:";
-  return protocol + "//" + globalThis.location.host + path;
-}
-
-// =============================================================================
-// WRAPPER EXPORTS
-// =============================================================================
-
-/** Close a transport handle (HTTP or WebSocket). */
-export function transportClose(handle) {
-  handle.close();
-}
-
-/** Send bytes through a transport handle (HTTP or WebSocket). */
-export function transportSend(handle, bytes) {
-  handle.send(bytes);
+  );
 }
 
 // =============================================================================
 // FUNCTIONS
 // =============================================================================
 
-/** Decode a base64 string back to a Uint8Array. */
-function base64ToFrame(b64) {
-  const binary = globalThis.atob(b64);
+function base64ToFrame(text) {
+  const binary = globalThis.atob(text);
   const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
+  for (let index = 0; index < binary.length; index++) {
+    bytes[index] = binary.charCodeAt(index);
   }
   return bytes;
 }
 
-/**
- * Creates something that returns a closure-scoped offline queue backed by
- * sessionStorage, per-tab, so tabs don't share (and corrupt) one key.
- */
+/** Seeded from storage, letting early frames join an earlier page's queue. */
 function createOfflineQueue(storageKey) {
-  let pending = [];
+  let pending = readQueue(storageKey);
   let persistScheduled = false;
 
   function persist() {
@@ -291,7 +179,7 @@ function createOfflineQueue(storageKey) {
         JSON.stringify(pending.map(frameToBase64)),
       );
     } catch (_error) {
-      // Quota exceeded, frames remain in-memory and are sent on reconnect
+      // quota exceeded, frames stay in memory
     }
   }
 
@@ -302,26 +190,13 @@ function createOfflineQueue(storageKey) {
     get size() {
       return pending.length;
     },
-    slice(start, end) {
-      return pending.slice(start, end);
-    },
-    loadIfEmpty() {
-      if (pending.length > 0) return;
-      try {
-        const raw = sessionStorage.getItem(storageKey);
-        if (raw) pending = JSON.parse(raw).map(base64ToFrame);
-      } catch (_error) {
-        pending = [];
-      }
-    },
     queuePending(frame) {
       const wasEmpty = pending.length === 0;
       pending.push(frame);
       if (wasEmpty) {
         persist();
       } else if (!persistScheduled) {
-        // Coalesce subsequent writes to avoid O(n^2) sessionStorage writes
-        // during rapid bursts.
+        // batched, avoids quadratic storage writes in bursts
         persistScheduled = true;
         queueMicrotask(function () {
           persistScheduled = false;
@@ -331,8 +206,12 @@ function createOfflineQueue(storageKey) {
     },
     drainSent(count) {
       if (count === pending.length) {
-        sessionStorage.removeItem(storageKey);
         pending = [];
+        try {
+          sessionStorage.removeItem(storageKey);
+        } catch (_error) {
+          // storage unavailable, memory queue already empty
+        }
       } else if (count > 0) {
         pending = pending.slice(count);
         persist();
@@ -341,21 +220,41 @@ function createOfflineQueue(storageKey) {
   };
 }
 
-/** Encode a Uint8Array to a base64 string for sessionStorage persistence. */
 function frameToBase64(frame) {
-  // Chunked to avoid the arg-count limit on a whole-frame apply and the O(n2)
-  // cost of per-byte concat
-  const CHUNK = 0x8000;
+  // chunked, fromCharCode.apply has an argument limit
   const parts = [];
-  for (let i = 0; i < frame.byteLength; i += CHUNK) {
-    parts.push(String.fromCharCode.apply(null, frame.subarray(i, i + CHUNK)));
+  for (let index = 0; index < frame.byteLength; index += BASE64_CHUNK) {
+    parts.push(
+      String.fromCharCode.apply(
+        null,
+        frame.subarray(index, index + BASE64_CHUNK),
+      ),
+    );
   }
   return globalThis.btoa(parts.join(""));
+}
+
+function readQueue(storageKey) {
+  try {
+    const raw = sessionStorage.getItem(storageKey);
+    return raw ? JSON.parse(raw).map(base64ToFrame) : [];
+  } catch (_error) {
+    return [];
+  }
+}
+
+function resolveSocketUrl(url) {
+  if (/^wss?:/i.test(url) || !globalThis.location) return url;
+  const resolved = new URL(url, globalThis.location.href);
+  resolved.protocol = resolved.protocol === "https:" ? "wss:" : "ws:";
+  return resolved.href;
 }
 
 // =============================================================================
 // PRIVATE CONSTANTS
 // =============================================================================
 
-const STORAGE_KEY_HTTP_PENDING = "lily_http_pending";
-const STORAGE_KEY_WS_PENDING = "lily_ws_pending";
+// bytes per fromCharCode call
+const BASE64_CHUNK = 0x8000;
+
+const TEXT_ENCODER = new TextEncoder();

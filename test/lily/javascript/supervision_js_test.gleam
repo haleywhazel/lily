@@ -1,121 +1,69 @@
-// Pins the no-op contract of the watch surface on JavaScript, so an
-// Erlang-only field never becomes reachable here.
-// All functions are @target(javascript), skipped on Erlang.
+// watch and supervision stay inert on JS, Erlang-only behaviour stays out
+
+// =============================================================================
+// IMPORTS
+// =============================================================================
 
 @target(javascript)
-import gleam/list
-@target(javascript)
-import gleam/result
+import gleam/option
 @target(javascript)
 import gleeunit/should
 @target(javascript)
-import lily/internal/actor_cell
-@target(javascript)
 import lily/server
 @target(javascript)
-import lily/test_support.{Increment}
+import lily/test_support
 @target(javascript)
-import lily/topic
-@target(javascript)
-import lily/transport
+import lily/wire_support
 
 // =============================================================================
-// HELPERS
+// WATCHING IS INERT
 // =============================================================================
 
 @target(javascript)
-fn ser() {
-  test_support.custom_serialiser()
-}
+pub fn supervision_connect_watching_the_caller_changes_nothing_test() {
+  let app = test_support.new_server()
 
-@target(javascript)
-fn decode(bytes: BitArray) -> transport.Protocol(_, _) {
-  let assert Ok(protocol) = transport.decode(bytes, serialiser: ser())
-  protocol
-}
+  let assert Ok(_) =
+    server.connect(app, origin: option.None, send: fn(_) { Nil })
 
-// =============================================================================
-// WATCH IS INERT
-// =============================================================================
-
-@target(javascript)
-pub fn watch_returns_nil_test() {
-  let srv = test_support.new_server()
-  let _drain = test_support.connect_client(srv, "c1")
-  // Inert on JavaScript, so bind the Nil rather than leave a bare statement.
-  let _ =
-    server.watch(srv, client_id: "c1")
-    |> should.equal(Nil)
-}
-
-@target(javascript)
-pub fn watch_changes_nothing_test() {
-  let srv = test_support.new_server()
-  let _drain = test_support.connect_client(srv, "c1")
-  server.client_count(srv)
-  |> should.equal(1)
-  // Inert on JavaScript, so bind the Nil rather than leave a bare statement.
-  let _ = server.watch(srv, client_id: "c1")
-  server.client_count(srv)
+  test_support.client_count(app)
   |> should.equal(1)
 }
 
 @target(javascript)
-pub fn topics_still_round_trip_after_watch_test() {
-  let srv = test_support.new_server()
-  let assert Ok(chat) = topic.new(srv, id: "chat")
-  let chat = topic.with_store(chat)
-  let drain = test_support.connect_client(srv, "c1")
-  // Inert on JavaScript, so bind the Nil rather than leave a bare statement.
-  let _ = server.watch(srv, client_id: "c1")
-  server.incoming(
-    srv,
-    client_id: "c1",
-    bytes: transport.encode(
-      transport.Subscribe(topic_id: "chat"),
-      serialiser: ser(),
-    ),
-  )
-  let _ = drain()
-  topic.subscriber_count(chat)
+pub fn supervision_connect_as_watch_caller_changes_nothing_test() {
+  let app = test_support.new_server()
+
+  let assert Ok(_) =
+    server.connect_as(
+      app,
+      origin: option.None,
+      send: fn(_) { Nil },
+      client_id: "c1",
+      session: [],
+      watch: server.WatchCaller,
+    )
+
+  test_support.client_count(app)
   |> should.equal(1)
-
-  topic.dispatch(chat, Increment)
-  drain()
-  |> list.map(decode)
-  |> should.equal([
-    transport.TopicUpdate(topic_id: "chat", sequence: 1, payload: Increment),
-  ])
 }
 
 @target(javascript)
-pub fn disconnect_stays_idempotent_test() {
-  let srv = test_support.new_server()
-  let _drain = test_support.connect_client(srv, "c1")
-  // Inert on JavaScript, so bind the Nil rather than leave a bare statement.
-  let _ = server.watch(srv, client_id: "c1")
-  server.disconnect(srv, client_id: "c1")
-  server.disconnect(srv, client_id: "c1")
-  server.client_count(srv)
-  |> should.equal(0)
-}
+pub fn supervision_topics_still_round_trip_for_a_watched_client_test() {
+  let app = test_support.new_topic_server()
+  let assert Ok(connection) =
+    server.connect_as(
+      app,
+      origin: option.None,
+      send: fn(_) { Nil },
+      client_id: "c1",
+      session: [],
+      watch: server.WatchCaller,
+    )
 
-@target(javascript)
-pub fn resync_resubscribes_test() {
-  let srv = test_support.new_server()
-  let assert Ok(chat) = topic.new(srv, id: "chat")
-  let chat = topic.with_store(chat)
-  let drain = test_support.connect_client(srv, "c1")
-  server.incoming(
-    srv,
-    client_id: "c1",
-    bytes: transport.encode(
-      transport.Resync(cursors: [transport.Topic("chat")]),
-      serialiser: ser(),
-    ),
-  )
-  let _ = drain()
-  topic.subscriber_count(chat)
+  wire_support.subscribe(connection, "chat")
+
+  test_support.subscriber_count(app, "chat")
   |> should.equal(1)
 }
 
@@ -124,51 +72,10 @@ pub fn resync_resubscribes_test() {
 // =============================================================================
 
 @target(javascript)
-pub fn the_supervisor_is_inert_test() {
-  let srv = test_support.new_server()
-  actor_cell.no_supervisor()
-  |> should.equal(server.supervisor(srv))
-}
-
-@target(javascript)
-pub fn topics_start_without_a_supervisor_test() {
-  let srv = test_support.new_server()
-  let assert Ok(chat) = topic.new(srv, id: "chat")
-  let chat = topic.with_store(chat)
-  let drain = test_support.connect_client(srv, "c1")
-  server.incoming(
-    srv,
-    client_id: "c1",
-    bytes: transport.encode(
-      transport.Subscribe(topic_id: "chat"),
-      serialiser: ser(),
-    ),
+pub fn supervision_the_supervisor_is_inert_test() {
+  // every server shares the same empty supervisor
+  test_support.inspect(test_support.new_server()).supervisor
+  |> should.equal(
+    test_support.inspect(test_support.new_topic_server()).supervisor,
   )
-  let _ = drain()
-  topic.subscriber_count(chat)
-  |> should.equal(1)
-}
-
-@target(javascript)
-pub fn chained_configuration_still_applies_test() {
-  // config recording must not change what a chained topic actually does
-  let srv = test_support.new_server()
-  let assert Ok(chat) =
-    topic.new(srv, id: "chat")
-    |> result.map(topic.with_store)
-    |> result.map(topic.can_subscribe(_, fn(_, _, _) { False }))
-  let drain = test_support.connect_client(srv, "c1")
-  server.incoming(
-    srv,
-    client_id: "c1",
-    bytes: transport.encode(
-      transport.Subscribe(topic_id: "chat"),
-      serialiser: ser(),
-    ),
-  )
-  drain()
-  |> list.map(decode)
-  |> should.equal([transport.Rejected(topic_id: "chat", reason: "denied")])
-  topic.subscriber_count(chat)
-  |> should.equal(0)
 }

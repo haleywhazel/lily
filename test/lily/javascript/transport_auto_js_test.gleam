@@ -1,301 +1,196 @@
-// Tests for the JavaScript auto-serialiser (transport.ffi.mjs).
-// All functions are @target(javascript), skipped on Erlang.
+// JS auto-serialiser constructor registry and `ByHost` on the jsdom page
+// (localhost), shared roundtrips in test/lily/shared/transport_auto_test.gleam
+
+// =============================================================================
+// IMPORTS
+// =============================================================================
 
 @target(javascript)
 import gleam/bit_array
 @target(javascript)
+import gleam/javascript/promise
+@target(javascript)
+import gleam/list
+@target(javascript)
+import gleam/option.{None, Some}
+@target(javascript)
+import gleam/string
+@target(javascript)
 import gleeunit/should
 @target(javascript)
-import lily/test_support.{
-  type Message, type Model, Decrement, Increment, Noop, Reset, SetName,
-}
+import lily/internal/codec
 @target(javascript)
-import lily/transport.{
-  Acknowledge, Resync, Session, SessionMessage, Snapshot, TopicUpdate,
-}
+import lily/javascript/verdict_fixture
+@target(javascript)
+import lily/test_support.{SetName}
+@target(javascript)
+import lily/transport.{SessionMessage}
 
 // =============================================================================
 // HELPERS
 // =============================================================================
 
 @target(javascript)
-fn ser() {
-  transport.automatic(format: transport.Json, max_decode_depth: 128)
-}
-
-@target(javascript)
-fn roundtrip_message(
-  message: Message,
-) -> Result(transport.Protocol(Model, Message), Nil) {
-  let encoded =
-    transport.encode(SessionMessage(payload: message), serialiser: ser())
-  transport.decode(encoded, serialiser: ser())
-}
-
-@target(javascript)
-fn roundtrip_snapshot(
-  model: Model,
-  seq: Int,
-) -> Result(transport.Protocol(Model, Message), Nil) {
-  let encoded =
-    transport.encode(
-      Snapshot(target: Session, sequence: seq, state: model),
-      serialiser: ser(),
-    )
-  transport.decode(encoded, serialiser: ser())
-}
-
-// =============================================================================
-// ROUNDTRIPS, ZERO-FIELD CONSTRUCTORS
-// =============================================================================
-
-@target(javascript)
-pub fn auto_js_roundtrip_zero_field_test() {
-  roundtrip_message(Increment)
-  |> should.equal(Ok(SessionMessage(payload: Increment)))
-}
-
-@target(javascript)
-pub fn auto_js_roundtrip_decrement_test() {
-  roundtrip_message(Decrement)
-  |> should.equal(Ok(SessionMessage(payload: Decrement)))
-}
-
-@target(javascript)
-pub fn auto_js_roundtrip_reset_test() {
-  roundtrip_message(Reset)
-  |> should.equal(Ok(SessionMessage(payload: Reset)))
-}
-
-@target(javascript)
-pub fn auto_js_roundtrip_noop_test() {
-  roundtrip_message(Noop)
-  |> should.equal(Ok(SessionMessage(payload: Noop)))
-}
-
-// =============================================================================
-// ROUNDTRIPS, SINGLE-FIELD CONSTRUCTOR
-// =============================================================================
-
-@target(javascript)
-pub fn auto_js_roundtrip_single_field_test() {
-  roundtrip_message(SetName("Alice"))
-  |> should.equal(Ok(SessionMessage(payload: SetName("Alice"))))
-}
-
-@target(javascript)
-pub fn auto_js_roundtrip_empty_string_test() {
-  roundtrip_message(SetName(""))
-  |> should.equal(Ok(SessionMessage(payload: SetName(""))))
-}
-
-// =============================================================================
-// ROUNDTRIPS, MULTI-FIELD CONSTRUCTOR (Model in Snapshot)
-// =============================================================================
-
-@target(javascript)
-pub fn auto_js_roundtrip_multi_field_test() {
-  let model =
-    test_support.Model(
-      ..test_support.initial_model(),
-      count: 5,
-      name: "Bob",
-      connected: False,
-    )
-  roundtrip_snapshot(model, 1)
-  |> should.equal(Ok(Snapshot(target: Session, sequence: 1, state: model)))
-}
-
-@target(javascript)
-pub fn auto_js_roundtrip_boolean_test() {
-  let model =
-    test_support.Model(
-      ..test_support.initial_model(),
-      count: 0,
-      name: "",
-      connected: True,
-    )
-  roundtrip_snapshot(model, 0)
-  |> should.equal(Ok(Snapshot(target: Session, sequence: 0, state: model)))
-}
-
-// =============================================================================
-// ROUNDTRIPS, PROTOCOL VARIANTS
-// =============================================================================
-
-@target(javascript)
-pub fn auto_js_roundtrip_topic_update_test() {
-  let encoded =
-    transport.encode(
-      TopicUpdate(topic_id: "chat", sequence: 7, payload: Increment),
-      serialiser: ser(),
-    )
-  transport.decode(encoded, serialiser: ser())
-  |> should.equal(
-    Ok(TopicUpdate(topic_id: "chat", sequence: 7, payload: Increment)),
-  )
-}
-
-@target(javascript)
-pub fn auto_js_roundtrip_resync_test() {
-  let encoded = transport.encode(Resync(cursors: [Session]), serialiser: ser())
-  transport.decode(encoded, serialiser: ser())
-  |> should.equal(Ok(Resync(cursors: [Session])))
-}
-
-@target(javascript)
-pub fn auto_js_roundtrip_acknowledge_test() {
-  let encoded =
-    transport.encode(
-      Acknowledge(target: Session, sequence: 2),
-      serialiser: ser(),
-    )
-  transport.decode(encoded, serialiser: ser())
-  |> should.equal(Ok(Acknowledge(target: Session, sequence: 2)))
-}
-
-// =============================================================================
-// REGISTRY, MODULE REGISTRATION ENABLES DECODE
-// =============================================================================
-
-@target(javascript)
-@external(javascript, "./transport_auto_js_test.ffi.mjs", "registerTestFixtures")
-fn register_test_fixtures() -> Nil {
-  Nil
-}
-
-@target(javascript)
-pub fn auto_js_register_enables_decode_test() {
-  register_test_fixtures()
-  let encoded =
-    transport.encode(
-      TopicUpdate(topic_id: "t", sequence: 1, payload: SetName("Registered")),
-      serialiser: ser(),
-    )
-  transport.decode(encoded, serialiser: ser())
-  |> should.equal(
-    Ok(TopicUpdate(topic_id: "t", sequence: 1, payload: SetName("Registered"))),
-  )
-}
-
-// =============================================================================
-// ROUNDTRIPS, JSON PATH (Json format)
-// =============================================================================
-
-@target(javascript)
-pub fn auto_js_json_roundtrip_test() {
-  register_test_fixtures()
-  let json_ser =
-    transport.automatic(format: transport.Json, max_decode_depth: 128)
-  let json_bytes =
+/// Decode handwritten JSON, leaving no prior encode to register the type.
+fn decode_payload(
+  json: String,
+) -> Result(transport.Protocol(Nil, message), Nil) {
+  transport.decode(
     bit_array.from_string(
-      "{\"type\":\"session_message\",\"payload\":{\"_\":\"SetName\",\"0\":\"JsonPath\"}}",
-    )
-  transport.decode(json_bytes, serialiser: json_ser)
+      "{\"type\":\"session_message\",\"payload\":" <> json <> "}",
+    ),
+    serialiser: transport.automatic(
+      format: transport.Json,
+      max_decode_depth: 128,
+      modules: [],
+    ),
+  )
+}
+
+// =============================================================================
+// DECODING
+// =============================================================================
+
+@target(javascript)
+pub fn auto_js_json_decodes_a_registered_constructor_test() {
+  test_support.register_fixtures()
+
+  decode_payload("{\"_\":\"SetName\",\"0\":\"JsonPath\"}")
   |> should.equal(Ok(SessionMessage(payload: SetName("JsonPath"))))
 }
 
+@target(javascript)
+pub fn auto_js_decodes_option_without_registration_test() {
+  decode_payload("{\"_\":\"Some\",\"0\":1}")
+  |> should.equal(Ok(SessionMessage(payload: Some(1))))
+  decode_payload("{\"_\":\"None\"}")
+  |> should.equal(Ok(SessionMessage(payload: None)))
+}
+
+@target(javascript)
+pub fn auto_js_decodes_prelude_result_without_registration_test() {
+  decode_payload("{\"_\":\"Ok\",\"0\":1}")
+  |> should.equal(Ok(SessionMessage(payload: Ok(1))))
+  decode_payload("{\"_\":\"Error\",\"0\":1}")
+  |> should.equal(Ok(SessionMessage(payload: Error(1))))
+}
+
 // =============================================================================
-// ROUNDTRIPS, NESTED TYPES
+// REGISTRY
 // =============================================================================
 
 @target(javascript)
-pub fn auto_js_roundtrip_nested_test() {
-  let inner =
-    test_support.Model(
-      ..test_support.initial_model(),
-      count: 3,
-      name: "Eve",
-      connected: False,
+pub fn auto_js_registry_tells_same_name_apart_by_arity_test() {
+  register_this_module()
+
+  decode_payload("{\"_\":\"Error\"}")
+  |> should.equal(Ok(SessionMessage(payload: verdict_fixture.Error)))
+  decode_payload("{\"_\":\"Error\",\"0\":1}")
+  |> should.equal(Ok(SessionMessage(payload: Error(1))))
+}
+
+@target(javascript)
+pub fn auto_js_a_crashing_registration_callback_spares_the_rest_test() -> promise.Promise(
+  Nil,
+) {
+  let ran = test_support.new(False)
+
+  codec.request_module("lily", "lily/javascript/verdict_fixture")
+  codec.when_registered(fn() { panic as "registration callback blew up" })
+  codec.when_registered(fn() { test_support.set(ran, True) })
+
+  promise.wait(50)
+  |> promise.map(fn(_) {
+    test_support.get(ran) |> should.be_true
+    Nil
+  })
+}
+
+@target(javascript)
+pub fn auto_js_unknown_constructor_logs_once_test() {
+  let lines =
+    test_support.capture_logs(fn() {
+      let _ = decode_payload("{\"_\":\"NeverRegistered\",\"0\":1}")
+      let _ = decode_payload("{\"_\":\"NeverRegistered\",\"0\":2}")
+      Nil
+    })
+
+  lines
+  |> list.filter(string.contains(_, "NeverRegistered/1"))
+  |> list.length
+  |> should.equal(1)
+}
+
+@target(javascript)
+pub fn auto_js_registering_a_clashing_constructor_warns_once_test() {
+  test_support.capture_logs(fn() { register_twins() })
+  |> list.filter(string.contains(_, "Twin/1"))
+  |> list.length
+  |> should.equal(1)
+}
+
+@target(javascript)
+pub fn auto_js_replacing_a_built_in_constructor_warns_test() {
+  test_support.capture_logs(fn() { register_impostor_some() })
+  |> list.filter(string.contains(_, "built-in constructor Some/1"))
+  |> list.length
+  |> should.equal(1)
+}
+
+// =============================================================================
+// BY HOST
+// =============================================================================
+
+@target(javascript)
+pub fn auto_js_jsdom_page_is_local_test() {
+  transport.is_local_page() |> should.be_true
+}
+
+@target(javascript)
+pub fn auto_js_by_host_writes_json_on_a_local_page_test() {
+  let serialiser: transport.Serialiser(Nil, Nil) =
+    transport.automatic(
+      format: transport.ByHost,
+      max_decode_depth: 128,
+      modules: [],
     )
-  let nested = test_support.Nested(inner:)
-  let nested_ser: transport.Serialiser(test_support.Nested, Message) =
-    transport.automatic(format: transport.Json, max_decode_depth: 128)
-  let encoded =
-    transport.encode(
-      Snapshot(target: Session, sequence: 1, state: nested),
-      serialiser: nested_ser,
+
+  transport.encode(transport.Connected(client_id: "c1"), serialiser:)
+  |> transport.frame_format(serialiser:)
+  |> should.equal(Ok(transport.Json))
+}
+
+@target(javascript)
+pub fn auto_js_resolve_for_page_settles_by_host_to_json_test() {
+  let serialiser: transport.Serialiser(Nil, Nil) =
+    transport.automatic(
+      format: transport.ByHost,
+      max_decode_depth: 128,
+      modules: [],
     )
-  transport.decode(encoded, serialiser: nested_ser)
-  |> should.equal(Ok(Snapshot(target: Session, sequence: 1, state: nested)))
-}
+    |> transport.resolve_for_page
 
-@target(javascript)
-pub fn auto_js_roundtrip_list_field_test() {
-  let with_list = test_support.WithList(items: [1, 2, 3])
-  let list_ser: transport.Serialiser(test_support.WithList, Message) =
-    transport.automatic(format: transport.Json, max_decode_depth: 128)
-  let encoded =
-    transport.encode(
-      Snapshot(target: Session, sequence: 0, state: with_list),
-      serialiser: list_ser,
-    )
-  transport.decode(encoded, serialiser: list_ser)
-  |> should.equal(Ok(Snapshot(target: Session, sequence: 0, state: with_list)))
+  transport.encode_as(
+    transport.Connected(client_id: "c1"),
+    serialiser:,
+    format: transport.server_format(serialiser),
+  )
+  |> transport.frame_format(serialiser:)
+  |> should.equal(Ok(transport.Json))
 }
 
 // =============================================================================
-// FORMAT ISOLATION
+// PRIVATE FFI
 // =============================================================================
 
 @target(javascript)
-pub fn auto_js_message_pack_bytes_fail_under_json_test() {
-  let mp_bytes =
-    transport.encode(
-      Acknowledge(target: Session, sequence: 1),
-      serialiser: transport.automatic(
-        format: transport.MessagePack,
-        max_decode_depth: 128,
-      ),
-    )
-  let json_ser =
-    transport.automatic(format: transport.Json, max_decode_depth: 128)
-  transport.decode(mp_bytes, serialiser: json_ser)
-  |> should.be_error
-}
-
-// =============================================================================
-// FORMAT SELECTION
-// =============================================================================
+@external(javascript, "./transport_auto_js_test.ffi.mjs", "registerImpostorSome")
+fn register_impostor_some() -> Nil
 
 @target(javascript)
-pub fn auto_js_json_format_roundtrip_test() {
-  let json_ser =
-    transport.automatic(format: transport.Json, max_decode_depth: 128)
-  let encoded =
-    transport.encode(
-      Acknowledge(target: Session, sequence: 9),
-      serialiser: json_ser,
-    )
-  transport.decode(encoded, serialiser: json_ser)
-  |> should.equal(Ok(Acknowledge(target: Session, sequence: 9)))
-}
+@external(javascript, "./transport_auto_js_test.ffi.mjs", "registerThisModule")
+fn register_this_module() -> Nil
 
 @target(javascript)
-pub fn auto_js_message_pack_format_roundtrip_test() {
-  let mp_ser =
-    transport.automatic(format: transport.MessagePack, max_decode_depth: 128)
-  let encoded =
-    transport.encode(
-      Acknowledge(target: Session, sequence: 5),
-      serialiser: mp_ser,
-    )
-  transport.decode(encoded, serialiser: mp_ser)
-  |> should.equal(Ok(Acknowledge(target: Session, sequence: 5)))
-}
-
-// =============================================================================
-// ERROR PATHS
-// =============================================================================
-
-@target(javascript)
-pub fn auto_js_empty_bytes_returns_error_test() {
-  transport.decode(<<>>, serialiser: ser())
-  |> should.be_error
-}
-
-@target(javascript)
-pub fn auto_js_invalid_bytes_returns_error_test() {
-  transport.decode(<<0xFF, 0xFE, 0x00>>, serialiser: ser())
-  |> should.be_error
-}
+@external(javascript, "./transport_auto_js_test.ffi.mjs", "registerTwins")
+fn register_twins() -> Nil

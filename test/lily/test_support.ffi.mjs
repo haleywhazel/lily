@@ -1,44 +1,412 @@
 /**
- * TEST SUPPORT FFI
+ * TEST SUPPORT
  *
- * Consolidated JavaScript helpers for the lily test suite: jsdom setup and
- * mock browser APIs, DOM inspection and event dispatch, a mutable reference
- * cell, and storage helpers. Module-level side effects run once on first
- * import, patching globals before any test code runs. Each test should call
- * resetDom() to get a clean slate.
+ * jsdom with mock WebSocket, EventSource and fetch. Globals are patched once
+ * on first import, call resetDom() for a clean slate.
  */
 
-import { JSDOM } from "jsdom";
-import { NonEmpty, Empty } from "../gleam.mjs";
+// =============================================================================
+// IMPORTS
+// =============================================================================
+
+import { JSDOM, VirtualConsole } from "jsdom";
+import { Empty, NonEmpty, toList } from "../gleam.mjs";
 
 // =============================================================================
-// JSDOM ENVIRONMENT
+// EXPORT FUNCTIONS
 // =============================================================================
+
+/** Empty when nothing has focus. */
+export function activeElementId() {
+  return document.activeElement ? document.activeElement.id ?? "" : "";
+}
+
+/** `#(method, text)` per console line. */
+export function captureLogLevels(thunk) {
+  const seen = [];
+  const original = {};
+  for (const level of ["debug", "info", "warn", "error"]) {
+    original[level] = console[level];
+    console[level] = (...parts) => seen.push([level, parts.join(" ")]);
+  }
+  try {
+    thunk();
+  } finally {
+    Object.assign(console, original);
+  }
+  return toList(seen);
+}
+
+/** Console error and warn lines. */
+export function captureLogs(thunk) {
+  const lines = [];
+  const original = { error: console.error, warn: console.warn };
+  console.error = (...parts) => lines.push(parts.join(" "));
+  console.warn = (...parts) => lines.push(parts.join(" "));
+  try {
+    thunk();
+  } finally {
+    console.error = original.error;
+    console.warn = original.warn;
+  }
+  return toList(lines);
+}
+
+/** Bubbling, cancelable, at the first match. */
+export function click(selector) {
+  const element = document.querySelector(selector);
+  if (element)
+    element.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, cancelable: true }),
+    );
+}
+
+export function clickPrevented(selector) {
+  const element = document.querySelector(selector);
+  if (!element) return false;
+  const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+  element.dispatchEvent(event);
+  return event.defaultPrevented;
+}
+
+export function clickPreventedWithCtrl(selector) {
+  const element = document.querySelector(selector);
+  if (!element) return false;
+  const event = new MouseEvent("click", {
+    bubbles: true,
+    cancelable: true,
+    ctrlKey: true,
+  });
+  element.dispatchEvent(event);
+  return event.defaultPrevented;
+}
+
+/** `#(querySelector calls, insertBefore calls)` made by the thunk. */
+export function countDomCalls(thunk) {
+  const documentProto = dom.window.Document.prototype;
+  const nodeProto = dom.window.Node.prototype;
+  const originalQuery = documentProto.querySelector;
+  const originalInsert = nodeProto.insertBefore;
+  let queries = 0;
+  let inserts = 0;
+  documentProto.querySelector = function (...parts) {
+    queries++;
+    return originalQuery.apply(this, parts);
+  };
+  nodeProto.insertBefore = function (...parts) {
+    inserts++;
+    return originalInsert.apply(this, parts);
+  };
+  try {
+    thunk();
+  } finally {
+    documentProto.querySelector = originalQuery;
+    nodeProto.insertBefore = originalInsert;
+  }
+  return [queries, inserts];
+}
+
+/** Sets checked, then fires change. */
+export function dispatchCheckEvent(selector, checked) {
+  const element = document.querySelector(selector);
+  if (!element) return;
+  element.checked = checked;
+  element.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+/** Sets value, then fires `input` and `change`. */
+export function dispatchInputEvent(selector, value) {
+  const element = document.querySelector(selector);
+  if (!element) return;
+  element.value = value;
+  element.dispatchEvent(new Event("input", { bubbles: true }));
+  element.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+/** Bubbling, at the first match. */
+export function dispatchKeyEvent(selector, eventName, key) {
+  const element = document.querySelector(selector);
+  if (element) {
+    element.dispatchEvent(new KeyboardEvent(eventName, { key, bubbles: true }));
+  }
+}
+
+/** Bubbling, at a viewport position. */
+export function dispatchMouseEvent(selector, eventName, clientX, clientY) {
+  const element = document.querySelector(selector);
+  if (element)
+    element.dispatchEvent(
+      new MouseEvent(eventName, {
+        clientX,
+        clientY,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+}
+
+/** Whether a handler prevented the default. */
+export function dispatchSubmit(selector) {
+  const element = document.querySelector(selector);
+  if (!element) return false;
+  const event = new Event("submit", { bubbles: true, cancelable: true });
+  element.dispatchEvent(event);
+  return event.defaultPrevented;
+}
+
+/** Drops listeners left by earlier tests. */
+export function dropDocumentClickListeners() {
+  for (const [listener, options] of documentClickListeners) {
+    dom.window.document.removeEventListener("click", listener, options);
+  }
+  documentClickListeners.length = 0;
+}
+
+/** Bubbling, at the first match. */
+export function fireAnimationEnd(selector) {
+  const element = document.querySelector(selector);
+  if (!element) return;
+  const event = new dom.window.Event("animationend", { bubbles: true });
+  element.dispatchEvent(event);
+}
+
+/** Bubbling, detail is { value }. */
+export function fireCustomEvent(selector, eventName, value) {
+  const element = document.querySelector(selector);
+  if (element) {
+    element.dispatchEvent(
+      new CustomEvent(eventName, { bubbles: true, detail: { value } }),
+    );
+  }
+}
+
+/** Plain event at the first match. */
+export function fireEvent(selector, eventName, bubbles) {
+  const element = document.querySelector(selector);
+  if (element) {
+    element.dispatchEvent(new Event(eventName, { bubbles, cancelable: true }));
+  }
+}
+
+export function focus(selector) {
+  const element = document.querySelector(selector);
+  if (element && typeof element.focus === "function") element.focus();
+}
+
+/** Empty when absent. */
+export function getAttribute(selector, name) {
+  const element = document.querySelector(selector);
+  return element ? element.getAttribute(name) ?? "" : "";
+}
+
+/** False when absent. */
+export function getChecked(selector) {
+  return document.querySelector(selector)?.checked === true;
+}
+
+/** Empty when absent. */
+export function getInnerHtml(selector) {
+  const element = document.querySelector(selector);
+  return element ? element.innerHTML : "";
+}
+
+/** Null after a reset. */
+export function getLastEventSource() {
+  return lastEventSource;
+}
+
+/** Null after a reset. */
+export function getLastWebSocket() {
+  return lastWebSocket;
+}
+
+export function getRef(ref) {
+  return ref.value;
+}
+
+/** Empty when absent. */
+export function getText(selector) {
+  const element = document.querySelector(selector);
+  return element ? element.textContent ?? "" : "";
+}
+
+/** Empty when absent. */
+export function getValue(selector) {
+  const element = document.querySelector(selector);
+  return element ? (element.value ?? "") : "";
+}
+
+/** Oldest first, as text. */
+export function getWebSocketSent(socket) {
+  // decoded to text so tests can string.contains() them
+  let result = new Empty();
+  for (let index = socket._sent.length - 1; index >= 0; index--) {
+    let item = socket._sent[index];
+    if (item instanceof ArrayBuffer || item instanceof Uint8Array) {
+      item = new TextDecoder().decode(item);
+    }
+    result = new NonEmpty(item, result);
+  }
+  return result;
+}
+
+export function historyLength() {
+  return dom.window.history.length;
+}
+
+/** The script `store.initial_snapshot` would render. */
+export function injectSnapshotScript(base64) {
+  const script = dom.window.document.createElement("script");
+  script.type = "application/octet-stream";
+  script.id = "lily-snapshot";
+  script.textContent = base64;
+  dom.window.document.body.appendChild(script);
+}
+
+/** Reloads and assigns jsdom was asked for. */
+export function navigationCount() {
+  return navigations;
+}
+
+export function newRef(value) {
+  return { value };
+}
+
+/** No history entry. */
+export function popstateTo(path) {
+  dom.window.history.replaceState({}, "", path);
+  dom.window.dispatchEvent(new dom.window.PopStateEvent("popstate"));
+}
+
+/** Empty when absent. */
+export function readLocalStorage(key) {
+  return localStorage.getItem(key) ?? "";
+}
+
+/** Empty when absent. */
+export function readSessionStorage(key) {
+  return sessionStorage.getItem(key) ?? "";
+}
+
+/** Empty mount points, both storages cleared. */
+export function resetDom() {
+  dom.window.document.body.innerHTML =
+    '<div id="app"></div><div id="overlays"></div>';
+  dom.window.localStorage.clear();
+  dom.window.sessionStorage.clear();
+}
+
+export function resetHotReloadInstalled() {
+  delete dom.window.__lilyHotReloadInstalled;
+}
+
+export function resetMocks() {
+  lastWebSocket = null;
+  lastEventSource = null;
+}
+
+export function resetUrl() {
+  // jsdom keeps history across tests
+  dom.window.history.replaceState({}, "", "/");
+}
+
+export function setInnerHtml(selector, html) {
+  const element = document.querySelector(selector);
+  if (element) element.innerHTML = html;
+}
+
+export function setRef(ref, value) {
+  ref.value = value;
+  return undefined;
+}
+
+/** As a dropped stream does. */
+export function triggerEventSourceError(source) {
+  source.readyState = 0;
+  if (source.onerror) source.onerror(new globalThis.Event("error"));
+}
+
+export function triggerEventSourceMessage(source, data) {
+  if (source.onmessage) source.onmessage({ data });
+}
+
+export function triggerEventSourceOpen(source) {
+  source.readyState = 1;
+  if (source.onopen) source.onopen();
+}
+
+/** Server-side close. */
+export function triggerWebSocketClose(socket) {
+  socket.readyState = MockWebSocket.CLOSED;
+  if (socket.onclose) socket.onclose();
+}
+
+export function triggerWebSocketMessage(socket, data) {
+  if (socket.onmessage) socket.onmessage({ data });
+}
+
+export function triggerWebSocketOpen(socket) {
+  socket.readyState = MockWebSocket.OPEN;
+  if (socket.onopen) socket.onopen();
+}
+
+export function websocketUrl(socket) {
+  return socket.url;
+}
+
+export function writeLocalStorage(key, value) {
+  localStorage.setItem(key, value);
+}
+
+export function writeSessionStorage(key, value) {
+  sessionStorage.setItem(key, value);
+}
+
+// =============================================================================
+// PRIVATE CONSTANTS
+// =============================================================================
+
+// jsdom's not-implemented errors from reload() and assign() count page loads
+let navigations = 0;
+const virtualConsole = new VirtualConsole();
+virtualConsole.sendTo(console, { omitJSDOMErrors: true });
+virtualConsole.on("jsdomError", (error) => {
+  if (String(error.message).includes("navigation")) navigations++;
+  else console.error(error);
+});
 
 const dom = new JSDOM(
-  '<!DOCTYPE html><html><body><div id="app"></div><div id="overlays"></div></body></html>',
-  { url: "http://localhost:8080", pretendToBeVisual: true },
+  "<!DOCTYPE html><html><body>" +
+    '<div id="app"></div><div id="overlays"></div></body></html>',
+  { url: "http://localhost:8080", pretendToBeVisual: true, virtualConsole },
 );
 
 globalThis.window = dom.window;
 globalThis.document = dom.window.document;
 globalThis.localStorage = dom.window.localStorage;
 globalThis.sessionStorage = dom.window.sessionStorage;
-// Use a synchronous requestAnimationFrame stub so notifications flush
-// immediately in tests. jsdom's RAF uses setTimeout internally which causes
-// recursion when globalThis.setTimeout is replaced.
-globalThis.requestAnimationFrame = (cb) => { cb(0); };
+// sync RAF, jsdom's recurses through a replaced setTimeout
+globalThis.requestAnimationFrame = (callback) => {
+  callback(0);
+};
 globalThis.location = dom.window.location;
 globalThis.Event = dom.window.Event;
 globalThis.FormData = dom.window.FormData;
+globalThis.CustomEvent = dom.window.CustomEvent;
 globalThis.HTMLFormElement = dom.window.HTMLFormElement;
 globalThis.KeyboardEvent = dom.window.KeyboardEvent;
 globalThis.MouseEvent = dom.window.MouseEvent;
 globalThis.WheelEvent = dom.window.WheelEvent;
 
-// =============================================================================
-// MOCK WEBSOCKET
-// =============================================================================
+// recorded so tests can drop leftovers, runtimes never die in a shared jsdom
+const documentClickListeners = [];
+const addDocumentListener = dom.window.document.addEventListener.bind(
+  dom.window.document,
+);
+dom.window.document.addEventListener = (type, listener, options) => {
+  if (type === "click") documentClickListeners.push([listener, options]);
+  addDocumentListener(type, listener, options);
+};
 
 class MockWebSocket {
   static OPEN = 1;
@@ -52,7 +420,7 @@ class MockWebSocket {
     this.onmessage = null;
     this.onclose = null;
     this.onerror = null;
-    lastWs = this;
+    lastWebSocket = this;
   }
 
   send(data) {
@@ -67,10 +435,6 @@ class MockWebSocket {
 
 globalThis.WebSocket = MockWebSocket;
 
-// =============================================================================
-// MOCK EVENTSOURCE
-// =============================================================================
-
 class MockEventSource {
   constructor(url) {
     this.url = url;
@@ -78,7 +442,7 @@ class MockEventSource {
     this.onopen = null;
     this.onmessage = null;
     this.onerror = null;
-    lastEs = this;
+    lastEventSource = this;
   }
 
   close() {
@@ -88,264 +452,7 @@ class MockEventSource {
 
 globalThis.EventSource = MockEventSource;
 
-// =============================================================================
-// MOCK FETCH (Node 18+ has fetch, but ensure consistent behaviour)
-// =============================================================================
+globalThis.fetch = async (_url, _options) => ({ ok: true, status: 200 });
 
-globalThis.fetch = async (_url, _opts) => ({ ok: true, status: 200 });
-
-// =============================================================================
-// LAST-CREATED MOCK TRACKING
-// =============================================================================
-
-let lastWs = null;
-let lastEs = null;
-
-// =============================================================================
-// SETUP / RESET EXPORTS
-// =============================================================================
-
-export function setup() {
-  // Globals already patched at import time, this is a no-op kept for
-  // explicitness when test files call setup() at the top of each test.
-}
-
-export function resetDom() {
-  dom.window.document.body.innerHTML =
-    '<div id="app"></div><div id="overlays"></div>';
-  dom.window.localStorage.clear();
-  dom.window.sessionStorage.clear();
-}
-
-export function resetHotReloadInstalled() {
-  delete dom.window.__lilyHotReloadInstalled;
-}
-
-export function historyLength() {
-  return dom.window.history.length;
-}
-
-export function resetUrl() {
-  // jsdom keeps history across tests, reset to "/" so URL-sensitive tests
-  // start from a known state.
-  dom.window.history.replaceState({}, "", "/");
-}
-
-export function injectSnapshotScript(json) {
-  // Mimic what transport.encode_initial_snapshot produces server-side, so
-  // client.hydrate tests can read it via document.getElementById.
-  const script = dom.window.document.createElement("script");
-  script.type = "application/json";
-  script.id = "lily-snapshot";
-  script.textContent = json;
-  dom.window.document.body.appendChild(script);
-}
-
-export function resetMocks() {
-  lastWs = null;
-  lastEs = null;
-}
-
-export function getLastWebSocket() {
-  return lastWs;
-}
-
-export function getLastEventSource() {
-  return lastEs;
-}
-
-// WebSocket test helpers, trigger lifecycle events on a mock instance
-export function triggerWebSocketOpen(ws) {
-  ws.readyState = MockWebSocket.OPEN;
-  if (ws.onopen) ws.onopen();
-}
-
-export function triggerWebSocketMessage(ws, data) {
-  if (ws.onmessage) ws.onmessage({ data });
-}
-
-export function triggerWebSocketClose(ws) {
-  ws.readyState = MockWebSocket.CLOSED;
-  if (ws.onclose) ws.onclose();
-}
-
-export function getWebSocketSent(ws) {
-  // Convert JS array to Gleam list, decode ArrayBuffers to UTF-8 strings so
-  // tests can use string.contains() on the sent frames.
-  let result = new Empty();
-  for (let i = ws._sent.length - 1; i >= 0; i--) {
-    let item = ws._sent[i];
-    if (item instanceof ArrayBuffer || item instanceof Uint8Array) {
-      item = new TextDecoder().decode(item);
-    }
-    result = new NonEmpty(item, result);
-  }
-  return result;
-}
-
-// EventSource test helpers
-export function triggerEventSourceOpen(es) {
-  if (es.onopen) es.onopen();
-}
-
-export function triggerEventSourceMessage(es, data) {
-  if (es.onmessage) es.onmessage({ data });
-}
-
-export function triggerEventSourceError(es) {
-  if (es.onerror) es.onerror(new globalThis.Event("error"));
-}
-
-// =============================================================================
-// DOM INSPECTION AND EVENT DISPATCH
-// =============================================================================
-
-export function getInnerHtml(selector) {
-  const el = document.querySelector(selector);
-  return el ? el.innerHTML : "";
-}
-
-export function setInnerHtml(selector, html) {
-  const el = document.querySelector(selector);
-  if (el) el.innerHTML = html;
-}
-
-export function click(selector) {
-  const el = document.querySelector(selector);
-  if (el)
-    el.dispatchEvent(
-      new MouseEvent("click", { bubbles: true, cancelable: true }),
-    );
-}
-
-export function dispatchMouseEvent(selector, eventName, clientX, clientY) {
-  const el = document.querySelector(selector);
-  if (el)
-    el.dispatchEvent(
-      new MouseEvent(eventName, { clientX, clientY, bubbles: true, cancelable: true }),
-    );
-}
-
-export function dispatchKeyEvent(selector, eventName, key) {
-  const el = document.querySelector(selector);
-  if (el) el.dispatchEvent(new KeyboardEvent(eventName, { key, bubbles: true }));
-}
-
-/**
- * Dispatch a cancelable key event and report whether a handler consumed it
- * (called preventDefault). Lets a test observe a keydown handler's effect
- * directly, without depending on document-delegated listeners that persist
- * and interfere across tests.
- */
-export function dispatchKeyEventDefaultPrevented(selector, eventName, key) {
-  const el = document.querySelector(selector);
-  if (!el) return false;
-  const event = new KeyboardEvent(eventName, {
-    key,
-    bubbles: true,
-    cancelable: true,
-  });
-  el.dispatchEvent(event);
-  return event.defaultPrevented;
-}
-
-export function dispatchInputEvent(selector, value) {
-  const el = document.querySelector(selector);
-  if (!el) return;
-  el.value = value;
-  el.dispatchEvent(new Event("input", { bubbles: true }));
-  el.dispatchEvent(new Event("change", { bubbles: true }));
-}
-
-export function dispatchWheelEvent(selector, deltaX, deltaY) {
-  const el = document.querySelector(selector);
-  if (el)
-    el.dispatchEvent(
-      new WheelEvent("wheel", { deltaX, deltaY, bubbles: true }),
-    );
-}
-
-export function dispatchSimpleEvent(selector, eventName) {
-  const el = document.querySelector(selector);
-  if (!el) return;
-  // blur/focus don't bubble, dispatch their bubbling equivalents so document-
-  // delegated listeners (focusout/focusin) fire correctly in tests.
-  const actualEvent =
-    eventName === "blur" ? "focusout" :
-    eventName === "focus" ? "focusin" :
-    eventName;
-  el.dispatchEvent(new Event(actualEvent, { bubbles: true }));
-}
-
-export function getAttribute(selector, name) {
-  const el = document.querySelector(selector);
-  return el ? el.getAttribute(name) ?? "" : "";
-}
-
-export function hasAttribute(selector, name) {
-  const el = document.querySelector(selector);
-  return el ? el.hasAttribute(name) : false;
-}
-
-export function getText(selector) {
-  const el = document.querySelector(selector);
-  return el ? el.textContent ?? "" : "";
-}
-
-export function focus(selector) {
-  const el = document.querySelector(selector);
-  if (el && typeof el.focus === "function") el.focus();
-}
-
-export function activeElementId() {
-  return document.activeElement ? document.activeElement.id ?? "" : "";
-}
-
-export function setLocalStorageItem(key, value) {
-  localStorage.setItem(key, value);
-}
-
-export function getLocalStorageItem(key) {
-  return localStorage.getItem(key) ?? "";
-}
-
-export function hasLocalStorageItem(key) {
-  return localStorage.getItem(key) !== null;
-}
-
-// =============================================================================
-// STORAGE HELPERS
-// =============================================================================
-
-export function writeLocalStorage(key, value) {
-  localStorage.setItem(key, value);
-}
-
-export function readLocalStorage(key) {
-  return localStorage.getItem(key) ?? "";
-}
-
-export function writeSessionStorage(key, value) {
-  sessionStorage.setItem(key, value);
-}
-
-export function readSessionStorage(key) {
-  return sessionStorage.getItem(key) ?? "";
-}
-
-// =============================================================================
-// REFERENCE CELL
-// =============================================================================
-
-export function newRef(value) {
-  return { value };
-}
-
-export function getRef(ref) {
-  return ref.value;
-}
-
-export function setRef(ref, value) {
-  ref.value = value;
-  return undefined;
-}
+let lastWebSocket = null;
+let lastEventSource = null;

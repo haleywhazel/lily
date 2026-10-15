@@ -1,104 +1,132 @@
-// Tests that one client's crashing callback cannot take down the actor that
-// others share.
-import gleam/option.{None}
+// one client's crashing callback must not take down the shared actor
 
+// =============================================================================
+// IMPORTS
+// =============================================================================
+
+import gleam/dynamic/decode
 import gleeunit/should
-
 import lily/server
 import lily/store
-import lily/topic
-import lily/transport
-
 import lily/test_support.{type Message, type Model, Increment, SetName}
+import lily/transport
+import lily/wire_support
 
 // =============================================================================
 // HELPERS
 // =============================================================================
 
-/// Connect a client whose send closure raises on every frame, standing in for
-/// a transport whose socket has gone.
-fn connect_broken_client(
-  srv: server.Server(Model, Message),
-  client_id: String,
-) -> Nil {
-  let assert Ok(Nil) =
-    server.connect(
-      srv,
-      client_id: client_id,
-      origin: None,
-      send: fn(_bytes) { panic as "send closure is gone" },
-      session: [],
-    )
-  Nil
-}
-
-fn incoming(
-  srv: server.Server(Model, Message),
-  client_id: String,
-  frame: transport.Protocol(Model, Message),
-) -> Nil {
-  server.incoming(
-    srv,
-    client_id:,
-    bytes: transport.encode(frame, serialiser: test_support.custom_serialiser()),
-  )
-}
-
-/// Force every queued message through before asserting. `client_count` is a
-/// synchronous call and the actor's mailbox is ordered, so anything cast
-/// before it has already been handled by the time it answers. A sleep would
-/// work on Erlang only, and this file has to hold on both targets.
-fn settle(srv: server.Server(Model, Message)) -> Nil {
-  let _ = server.client_count(srv)
-  Nil
-}
-
-/// The same, for a topic actor. Server-to-topic traffic crosses two mailboxes,
-/// so settle the server first or the topic may not have been told yet.
-fn settle_topic(topic: topic.Topic(Model, Message, kind)) -> Nil {
-  let _ = topic.subscriber_count(topic)
-  Nil
+/// Topic-store server whose observer panics where `crash_on` holds.
+fn server_with_crashing_observer(
+  crash_on: fn(server.ServerEvent(Model, Message)) -> Bool,
+) -> server.Server(Model, Message) {
+  server.observe(test_support.topic_builder(), fn(event, _server) {
+    case crash_on(event) {
+      True -> panic as "observer blew up"
+      False -> Nil
+    }
+  })
+  |> test_support.start_server
 }
 
 // =============================================================================
-// SERVER HOOKS
+// OBSERVERS
 // =============================================================================
 
-pub fn crashing_on_connect_keeps_the_server_alive_test() {
-  let srv = test_support.new_server()
-  server.on_connect(srv, fn(_client_id) { panic as "on_connect blew up" })
+pub fn crashing_observer_on_connect_keeps_the_server_alive_test() {
+  let app =
+    server_with_crashing_observer(fn(event) {
+      case event {
+        server.ClientConnected(..) -> True
+        _ -> False
+      }
+    })
 
-  let _drain = test_support.connect_client(srv, "a")
+  let _ = wire_support.open(app, "a")
 
-  // Registered despite the hook, and still able to take another connection.
-  server.client_count(srv)
+  // registered anyway, and still accepting connections
+  test_support.client_count(app)
   |> should.equal(1)
-  let _second = test_support.connect_client(srv, "b")
-  server.client_count(srv)
+  let _ = wire_support.open(app, "b")
+  test_support.client_count(app)
   |> should.equal(2)
 }
 
-pub fn crashing_on_disconnect_keeps_the_server_alive_test() {
-  let srv = test_support.new_server()
-  let _drain = test_support.connect_client(srv, "a")
-  server.on_disconnect(srv, fn(_client_id) { panic as "on_disconnect blew up" })
+pub fn crashing_observer_on_disconnect_keeps_the_server_alive_test() {
+  let app =
+    server_with_crashing_observer(fn(event) {
+      case event {
+        server.ClientDisconnected(..) -> True
+        _ -> False
+      }
+    })
+  let #(connection, _frames) = wire_support.open(app, "a")
 
-  server.disconnect(srv, client_id: "a")
+  server.disconnect(connection)
 
-  // The cleanup either side of the hook still committed.
-  server.client_count(srv)
+  // cleanup either side of the observer still committed
+  test_support.client_count(app)
   |> should.equal(0)
 }
 
+pub fn crashing_observer_on_message_still_acknowledges_test() {
+  let app =
+    server.observe(test_support.session_builder(), fn(_event, _server) {
+      panic as "observer blew up"
+    })
+    |> test_support.start_server
+  let #(connection, frames) = wire_support.open(app, "a")
+
+  wire_support.session_message(connection, Increment)
+
+  // ack before observers, meaning a client never waits on an applied message
+  frames()
+  |> should.equal([
+    transport.Acknowledge(target: transport.Session, sequence: 1),
+  ])
+}
+
 pub fn crashing_decoder_drops_the_frame_test() {
-  let srv = test_support.new_server()
-  let _drain = test_support.connect_client(srv, "a")
+  let app = test_support.new_server()
+  let #(connection, frames) = wire_support.open(app, "a")
 
-  server.incoming(srv, client_id: "a", bytes: <<"not a frame at all":utf8>>)
-  settle(srv)
+  server.incoming(connection, bytes: <<"not a frame at all":utf8>>)
 
-  // Dropped rather than fatal.
-  server.client_count(srv)
+  // dropped, not fatal
+  frames()
+  |> should.equal([])
+  test_support.client_count(app)
+  |> should.equal(1)
+}
+
+pub fn crashing_decoder_in_the_user_serialiser_drops_the_frame_test() {
+  // decoder runs on client bytes, a crash counts as a failed decode
+  let decoder =
+    decode.then(decode.at(["tag"], decode.string), fn(tag) {
+      case tag {
+        "Reset" -> panic as "decoder blew up"
+        _ -> test_support.message_decoder()
+      }
+    })
+  let serialiser =
+    test_support.json_envelope(
+      encode_message: test_support.encode_message,
+      message_decoder: decoder,
+      encode_model: test_support.encode_model,
+      model_decoder: test_support.model_decoder(),
+    )
+  let app =
+    store.new(init: test_support.initial_model(), update: test_support.update)
+    |> store.sync_with(route: fn(_) { store.Session }, serialiser:)
+    |> server.new(origins: server.AnyOrigin)
+    |> test_support.start_server
+  let #(connection, frames) = wire_support.open(app, "a")
+
+  wire_support.session_message(connection, test_support.Reset)
+
+  frames()
+  |> should.equal([])
+  test_support.client_count(app)
   |> should.equal(1)
 }
 
@@ -107,50 +135,76 @@ pub fn crashing_decoder_drops_the_frame_test() {
 // =============================================================================
 
 pub fn crashing_send_drops_only_that_client_test() {
-  let srv = test_support.new_server()
-  connect_broken_client(srv, "broken")
-  let _healthy = test_support.connect_client(srv, "healthy")
+  let app = test_support.new_server()
+  let _broken = wire_support.open_broken(app, "broken")
+  let _ = wire_support.open(app, "healthy")
 
-  server.dispatch_to_all(srv, message: Increment)
-  settle(srv)
+  server.dispatch_to_all(app, message: Increment)
 
-  // Only the broken one goes.
-  server.client_count(srv)
+  // only the broken one goes
+  test_support.client_count(app)
   |> should.equal(1)
 }
 
-pub fn crashing_on_subscribe_still_admits_test() {
-  let srv = test_support.new_server()
-  let assert Ok(chat) = topic.new(srv, id: "chat")
-  let chat =
-    chat
-    |> topic.with_store
-    |> topic.on_subscribe(fn(_client_id) { panic as "on_subscribe blew up" })
-  let _drain = test_support.connect_client(srv, "a")
+// =============================================================================
+// TOPIC OBSERVERS
+// =============================================================================
 
-  incoming(srv, "a", transport.Subscribe(topic_id: "chat"))
-  settle(srv)
+pub fn crashing_observer_on_subscribed_still_admits_test() {
+  let app =
+    server_with_crashing_observer(fn(event) {
+      case event {
+        server.Subscribed(..) -> True
+        _ -> False
+      }
+    })
+  let #(connection, _frames) = wire_support.open(app, "a")
 
-  // Membership is committed before the hook runs, so the join stands.
-  topic.subscriber_count(chat)
+  wire_support.subscribe(connection, "chat")
+  wire_support.settle(app)
+
+  // membership committed before observers, letting the join stand
+  test_support.subscriber_count(app, "chat")
   |> should.equal(1)
 }
 
-pub fn crashing_on_unsubscribe_still_removes_test() {
-  let srv = test_support.new_server()
-  let assert Ok(chat) = topic.new(srv, id: "chat")
-  let chat =
-    chat
-    |> topic.with_store
-    |> topic.on_unsubscribe(fn(_client_id) { panic as "on_unsubscribe blew up" })
-  let _drain = test_support.connect_client(srv, "a")
-  incoming(srv, "a", transport.Subscribe(topic_id: "chat"))
+pub fn crashing_observer_on_unsubscribed_still_removes_test() {
+  let app =
+    server_with_crashing_observer(fn(event) {
+      case event {
+        server.Unsubscribed(..) -> True
+        _ -> False
+      }
+    })
+  let #(connection, _frames) = wire_support.open(app, "a")
+  wire_support.subscribe(connection, "chat")
+  wire_support.settle(app)
 
-  incoming(srv, "a", transport.Unsubscribe(topic_id: "chat"))
-  settle(srv)
+  wire_support.unsubscribe(connection, "chat")
+  wire_support.settle(app)
 
-  topic.subscriber_count(chat)
+  test_support.subscriber_count(app, "chat")
   |> should.equal(0)
+}
+
+pub fn crashing_allow_predicate_denies_and_leaves_the_topic_unstarted_test() {
+  let app =
+    test_support.new_topic_server_with_access(
+      store.Allow(fn(_client_id, _topic_id, _session) {
+        panic as "predicate blew up"
+      }),
+    )
+  let #(connection, frames) = wire_support.open(app, "a")
+
+  wire_support.subscribe(connection, "chat")
+
+  // fails closed and reports it, nobody else affected
+  frames()
+  |> should.equal([transport.Rejected(topic_id: "chat", reason: "denied")])
+  test_support.subscriber_count(app, "chat")
+  |> should.equal(-1)
+  test_support.client_count(app)
+  |> should.equal(1)
 }
 
 // =============================================================================
@@ -158,45 +212,131 @@ pub fn crashing_on_unsubscribe_still_removes_test() {
 // =============================================================================
 
 pub fn crashing_subscriber_send_is_pruned_test() {
-  let srv = test_support.new_server()
-  let assert Ok(chat) = topic.new(srv, id: "chat")
-  let chat = topic.with_store(chat)
-  connect_broken_client(srv, "broken")
-  let _healthy = test_support.connect_client(srv, "healthy")
-  incoming(srv, "broken", transport.Subscribe(topic_id: "chat"))
-  incoming(srv, "healthy", transport.Subscribe(topic_id: "chat"))
-  settle(srv)
-  settle_topic(chat)
+  let app = test_support.new_topic_server()
+  let broken = wire_support.open_broken(app, "broken")
+  let #(healthy, _frames) = wire_support.open(app, "healthy")
+  wire_support.subscribe(broken, "chat")
+  wire_support.subscribe(healthy, "chat")
+  wire_support.settle(app)
 
-  topic.broadcast(chat, SetName("hello"))
-  settle_topic(chat)
+  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  wire_support.settle(app)
 
-  // The room loses the dead socket and keeps everybody else.
-  topic.subscriber_count(chat)
+  // dead socket dropped, everyone else kept
+  test_support.subscriber_count(app, "chat")
   |> should.equal(1)
 }
 
-pub fn crashing_session_update_drops_the_message_test() {
-  let assert Ok(srv) =
-    server.start(
-      initial: test_support.initial_model(),
+pub fn crashing_subscriber_send_leaves_the_room_serving_test() {
+  let app = test_support.new_topic_server()
+  let broken = wire_support.open_broken(app, "broken")
+  wire_support.subscribe(broken, "chat")
+  wire_support.settle(app)
+  let #(healthy, frames) = wire_support.open(app, "healthy")
+
+  wire_support.subscribe(healthy, "chat")
+
+  // dead socket pruned on its failed snapshot, the next joiner still served
+  case frames() {
+    [transport.Snapshot(target: transport.Topic("chat"), ..)] -> Nil
+    _ -> should.fail()
+  }
+  test_support.subscriber_count(app, "chat")
+  |> should.equal(1)
+}
+
+pub fn crashing_topic_update_drops_the_message_test() {
+  let crashing =
+    store.new(init: test_support.initial_model(), update: fn(model, message) {
+      case message {
+        SetName(_) -> panic as "update blew up"
+        _ -> test_support.update(model, message)
+      }
+    })
+    |> store.sync_with(
+      route: test_support.topic_route,
       serialiser: test_support.custom_serialiser(),
-      wiring: store.wiring()
-        |> store.session(
-          extract: fn(message) { Ok(message) },
-          update: fn(_model, _message) { panic as "update blew up" },
-          field_get: fn(model) { model },
-          field_set: fn(_, model) { model },
-        ),
-      origins: server.AnyOrigin,
     )
-  let _drain = test_support.connect_client(srv, "a")
+    |> store.topic(
+      prefix: "room:",
+      get: fn(model, _) { model },
+      set: fn(_, _, model) { model },
+      access: store.Open,
+    )
+  let app =
+    test_support.start_server(server.new(crashing, origins: server.AnyOrigin))
+  let #(connection, _frames) = wire_support.open(app, "a")
+  wire_support.subscribe(connection, "room:1")
+  wire_support.settle(app)
 
-  incoming(srv, "a", transport.SessionMessage(payload: Increment))
-  settle(srv)
+  wire_support.topic_message(connection, "room:1", SetName("room:1"))
+  wire_support.settle(app)
 
-  // Already covered by `apply_session`, kept here so the whole policy reads in
-  // one place.
-  server.client_count(srv)
+  // topic and subscriber both survive
+  test_support.subscriber_count(app, "room:1")
+  |> should.equal(1)
+}
+
+pub fn crashing_encode_on_a_topic_update_drops_only_that_frame_test() {
+  // an unencodable message drops nobody, the next one still goes out
+  let serialiser =
+    test_support.json_envelope(
+      encode_message: fn(message) {
+        case message {
+          test_support.Decrement -> panic as "cannot encode"
+          _ -> test_support.encode_message(message)
+        }
+      },
+      message_decoder: test_support.message_decoder(),
+      encode_model: test_support.encode_model,
+      model_decoder: test_support.model_decoder(),
+    )
+  let crashing =
+    store.new(init: test_support.initial_model(), update: test_support.update)
+    |> store.sync_with(route: test_support.topic_route, serialiser:)
+    |> store.topic(
+      prefix: "chat",
+      get: fn(model, _) { model },
+      set: fn(_, _, model) { model },
+      access: store.Open,
+    )
+  let app =
+    test_support.start_server(server.new(crashing, origins: server.AnyOrigin))
+  let #(connection, frames) = wire_support.open(app, "a")
+  wire_support.subscribe(connection, "chat")
+  let _ = frames()
+
+  server.dispatch_topic(app, topic_id: "chat", message: test_support.Decrement)
+  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+
+  // sequence 1 spent on the unencodable frame
+  frames()
+  |> should.equal([
+    transport.TopicUpdate(topic_id: "chat", sequence: 2, payload: Increment),
+  ])
+  test_support.client_count(app)
+  |> should.equal(1)
+}
+
+// =============================================================================
+// SESSION
+// =============================================================================
+
+pub fn crashing_session_update_drops_the_message_test() {
+  let crashing =
+    store.new(init: test_support.initial_model(), update: fn(_model, _message) {
+      panic as "update blew up"
+    })
+    |> store.sync_with(
+      route: fn(_) { store.Session },
+      serialiser: test_support.custom_serialiser(),
+    )
+  let app =
+    test_support.start_server(server.new(crashing, origins: server.AnyOrigin))
+  let #(connection, _frames) = wire_support.open(app, "a")
+
+  wire_support.session_message(connection, Increment)
+
+  test_support.client_count(app)
   |> should.equal(1)
 }

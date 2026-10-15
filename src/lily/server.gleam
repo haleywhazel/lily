@@ -1,146 +1,159 @@
-//// The [`Server`](#Server) is the authoritative half of a Lily app. Clients
-//// apply their own changes optimistically, the server has the final say and
-//// streams the corrected state back, so the two stay in sync (see
-//// [transport](./transport.html) for the frames that carry it).
+//// The [`Server`](#Server) is, well, the server of a Lily app. Clients can
+//// apply their own changes optimistically, although the server has the final
+//// say and streams the corrected state back, keeping the two in sync (see
+//// [transport](./transport.html) for the frames that carry it). This means
+//// that ultimately, the server is usually authoritative when it comes to
+//// decisions but this can be managed by you in more detail.
 ////
-//// Every message a client sends lands in one of two places, either that
-//// client's own per-connection session store, or a named
-//// [topic](./topic.html) store shared between clients.
+//// Every message a client sends to the server lands in one of two places,
+//// either that client's own per-connection session model, or a topic model
+//// shared between clients. (The client can also keep a message to itself.)
+//// See [store](./store.html) for how topics are declared.
 ////
-//// It compiles for both targets, but not using the Erlang one means that you
-//// aren't leveraging BEAM's model and a full-stack JS model might be better
-//// suited.
+//// The server starts a topic the first time anyone subscribes to it, and
+//// starts it again from the same declaration if it crashes. Each topic's
+//// [`Access`](./store.html#Access) rule is checked on every subscribe, and
+//// again on a resync, keeping a client out of a topic its rule refuses. A
+//// subscribe to an id no declaration covers is rejected too.
 ////
-//// You [`start`](#start) a server with the same three values your client
-//// gets, the initial model, the serialiser, and the shared
-//// [`Wiring`](./store.html#Wiring), plus an [`Origins`](#Origins) policy
-//// saying which browser origins may open a connection.
+//// While the server compiles for both targets, not using the Erlang one means
+//// that you aren't leveraging BEAM's model and a full-stack JS model might be
+//// better suited.
 ////
-//// Here's a server with one chat topic registered:
+//// To build an Erlang server from the same synced store your client gets,
+//// plus an [`Origins`](#Origins) policy saying which browser origins may open
+//// a connection, you can do this:
 ////
 //// ```gleam
-//// import gleam/result
-////
 //// import lily/server
-//// import lily/topic
 ////
 //// pub fn main() {
 ////   let assert Ok(server) =
-////     server.start(
-////       initial: shared.initial_model(),
-////       serialiser: shared.serialiser(),
-////       wiring: shared.wiring(),
-////       origins: server.AllowedOrigins(["https://example.com"]),
-////     )
-////
-////   let assert Ok(_) =
-////     topic.new(server, id: "chat")
-////     |> result.map(topic.with_store)
+////     server.new(shared.store(), origins: server.AllowedOrigins([
+////       "http://localhost:8080",
+////     ]))
+////     |> server.observe(log_events)
+////     |> server.start_supervised
 //// }
 //// ```
 ////
-//// On Erlang, prefer [`start_supervised`](#start_supervised), which puts the
-//// server and its topics in an OTP supervision tree so that a crash restarts
-//// them instead of taking the node down. Register topics in its `started`
-//// callback, which runs again on every restart.
+//// Using [`start_supervised`](#start_supervised) rather than [`start`](#start)
+//// ensures that the server and the topics are placed in an OTP supervision
+//// tree so the crash can be isolated and restarted rather than taking the node
+//// down with it.
 ////
-//// [`supervised`](#supervised) gives you the child specification for a tree
-//// you already have.
-////
-//// Handing those same three values to [`client.start`](./client.html#start) is
-//// what makes both ends agree on the model, the update logic, and the wire
-//// encoding, so define them once in your `shared` package and pass the same
-//// values to each side. See [store](./store.html) for how the `Wiring` splits
-//// the model into a session slice and topic slices.
-////
-//// The server never imports `mist` or `wisp`, it's completely
-//// transport-agnostic (the same way Lustre leaves the transport to you), so
-//// you wire it into whatever WebSocket or HTTP handler you're running with
-//// three calls. Create a stable id with
-//// [`generate_client_id`](#generate_client_id), register it with
-//// [`connect`](#connect), feed every inbound frame to
-//// [`incoming`](#incoming), and call [`disconnect`](#disconnect) when the
-//// socket closes:
+//// The server never imports `mist` or `wisp` or `ewe`, it's completely
+//// transport-agnostic (the same way Lustre leaves the transport to you),
+//// leaving you to wire it into whatever WebSocket or HTTP handler you're
+//// running. Open a [`Connection`](#Connection) with [`connect`](#connect),
+//// feed every inbound frame to [`incoming`](#incoming), and call
+//// [`disconnect`](#disconnect) when the socket closes:
 ////
 //// ```gleam
-//// let client_id = server.generate_client_id()
-//// let assert Ok(Nil) =
+//// let assert Ok(connection) =
 ////   server.connect(
 ////     server,
-////     client_id:,
 ////     origin: request.get_header(req, "origin") |> option.from_result,
 ////     send: process.send(outgoing_subject, _),
-////     session: [SignedInAs(user)],
 ////   )
 ////
-//// // for every frame the socket receives:
-//// server.incoming(server, client_id:, bytes:)
+//// // for every frame the socket receives
+//// server.incoming(connection, bytes:)
 ////
-//// // when it closes:
-//// server.disconnect(server, client_id:)
+//// // when it closes
+//// server.disconnect(connection)
 //// ```
 ////
-//// `connect` takes the request's `Origin` header, the `send` callback the
-//// server pushes frames back through, and any messages that should seed this
-//// connection's session before the first frame arrives.
+//// With `connect` watching the process that calls it, the server runs the
+//// same cleanup `disconnect` does if that process dies. A transport that
+//// connects from a short-lived process, such as an HTTP request, uses
+//// [`connect_as`](#connect_as) with `Unwatched`.
 ////
-//// A transport that wants to refuse the upgrade outright, with a 403 rather
-//// than an accepted socket that immediately closes, can run the same policy
-//// ahead of time with [`check_origin`](#check_origin).
+//// Most apps then just need [`observe`](#observe). An observer sees every
+//// [`ServerEvent`](#ServerEvent), a client coming and going, a session message
+//// applied, a client joining, leaving or being refused a topic, together with
+//// the server it happened on. This is the place to notice events and do
+//// quick work rather than slower work (e.g. database writes, process
+//// sleeps, side effects) to prevent stalling the observer.
 ////
-//// From there most apps just need the lifecycle hooks.
-//// [`on_connect`](#on_connect) and [`on_disconnect`](#on_disconnect) fire with
-//// the client id for presence tracking or audit logging,
-//// [`on_message`](#on_message) runs after each session message is applied, and
-//// [`on_topic_message`](#on_topic_message) fires for each client-incoming
-//// topic message:
+//// When the server itself needs to change state, rather than react to
+//// something a client sent, use [`dispatch_to`](#dispatch_to) for a single
+//// client's session or [`dispatch_topic`](#dispatch_topic) for a shared topic.
+//// Both are safe to call from any process (an observer included) where they
+//// apply once the current event is done. Thus an observer can answer a client
+//// joining straight away, and something slow can be spawned and dispatch when
+//// it's ready.
 ////
-//// ```gleam
-//// server.on_connect(server, fn(client_id) {
-////   logging.log(logging.Info, "client connected: " <> client_id)
-//// })
-////
-//// server.on_message(server, fn(message, _model, client_id) {
-////   case message {
-////     // Spawned a process so that sync writes don't stall other clients
-////     Session(SaveDocument(doc)) ->
-////       process.spawn(fn() {
-////         let saved = db.write(doc)
-////         server.dispatch_to(server, client_id:, message: Saved(saved))
-////       })
-////     _ -> Nil
-////   }
-//// })
-//// ```
-////
-//// That goes for every hook. They run inside the one actor every connection
-//// shares, so they're the place to notice something rather than the place to
-//// do it.
-////
-//// When the server itself needs to change a client's state, rather than react
-//// to something the client sent, reach for [`dispatch_to`](#dispatch_to). It
-//// applies a message to one client's session store and pushes the update
-//// straight back to them.
-////
-//// For seeding a session right after connect, or for delivering
-//// the result of some async work once it lands. It's safe to call from any
-//// process, so spawn the slow thing and dispatch when it's ready:
-////
-//// ```gleam
-//// server.on_connect(server, fn(client_id) {
-////   server.dispatch_to(server, client_id:, message: WelcomeUser(client_id))
-//// })
-//// ```
-////
-//// [`dispatch_to_all`](#dispatch_to_all) does the same to every connected
-//// client at once, for a server-wide change that also mutates session state.
-////
-//// If you only want to send something out without touching session state,
-//// broadcast through a [topic](./topic.html#broadcast) instead.
+//// A topic whose state lives somewhere else, like a database, can load it
+//// with [`topic_init`](#topic_init). Running inside the topic itself when it
+//// starts and every time it restarts, a slow loader only holds up that topic.
 ////
 //// Shut a server down with [`stop`](#stop), which asks every topic to stop
 //// first so that subscribers' slices reset before the underlying actor
 //// terminates.
+////
+//// Sample server combining everything together (using mist):
+////
+//// ```gleam
+//// import gleam/bytes_tree
+//// import gleam/erlang/process
+//// import gleam/http/request
+//// import gleam/http/response
+//// import gleam/option
+////
+//// import lily/server
+//// import mist
+////
+//// import shared
+////
+//// pub fn main() {
+////   let assert Ok(#(_supervisor, app)) =
+////     server.new(
+////       shared.store(),
+////       origins: server.AllowedOrigins(["http://localhost:8080"]),
+////     )
+////     |> server.start_supervised
+////
+////   let assert Ok(_) =
+////     mist.new(fn(http_request) {
+////       let origin =
+////         request.get_header(http_request, "origin") |> option.from_result
+////       case server.open(app, origin:) {
+////         Error(_) ->
+////           response.new(403)
+////           |> response.set_body(mist.Bytes(bytes_tree.new()))
+////         Ok(opened) ->
+////           mist.websocket(
+////             request: http_request,
+////             on_init: fn(_socket) {
+////               let #(connection, frames) = server.attach(opened)
+////               #(connection, option.Some(frames))
+////             },
+////             on_close: server.disconnect,
+////             handler: fn(connection, message, socket) {
+////               case message {
+////                 mist.Binary(bytes) -> {
+////                   server.incoming(connection, bytes:)
+////                   mist.continue(connection)
+////                 }
+////                 mist.Custom(Ok(bytes)) -> {
+////                   let _ = mist.send_binary_frame(socket, bytes)
+////                   mist.continue(connection)
+////                 }
+////                 mist.Text(_) -> mist.continue(connection)
+////                 mist.Custom(Error(Nil)) | mist.Closed | mist.Shutdown ->
+////                   mist.stop()
+////               }
+////             },
+////           )
+////       }
+////     })
+////     |> mist.port(8080)
+////     |> mist.start
+////
+////   process.sleep_forever()
+//// }
+//// ```
 
 // =============================================================================
 // IMPORTS
@@ -148,21 +161,20 @@
 
 import gleam/bool
 import gleam/dict.{type Dict}
+import gleam/erlang/process.{type Pid}
+import gleam/int
 import gleam/list
 import gleam/option.{type Option}
+import gleam/pair
 import gleam/result
 import gleam/set.{type Set}
 import gleam/string
-import lily/internal/actor_cell.{type Cell, Continue, Halt, Reply}
-import lily/internal/id
-import lily/logging
-import lily/store
-import lily/transport.{type Serialiser}
+import lily/internal/actor.{type Cell, Continue, Halt, Reply}
+import lily/store.{type Store, type Synced}
+import lily/transport.{type Format, type Serialiser}
 
 @target(erlang)
-import gleam/erlang/process
-@target(erlang)
-import gleam/otp/actor
+import gleam/otp/actor as otp_actor
 @target(erlang)
 import gleam/otp/static_supervisor
 @target(erlang)
@@ -172,37 +184,43 @@ import gleam/otp/supervision
 // PUBLIC TYPES
 // =============================================================================
 
-/// Static asset requests to serve, from [`asset`](#asset).
-pub type Asset {
-  Asset(
-    path: String,
-    content_type: String,
-    /// Immutable for a content-hashed name, `no-store` for anything else
-    cache_control: String,
-    /// `None` when the file is sent as it sits on disk
-    content_encoding: Option(String),
-    /// `None` for an unhashed name
-    etag: Option(String),
+/// Description of the server before starting, construct from [`new`](#new).
+pub opaque type Builder(model, message) {
+  Builder(
+    store: Store(model, message, Synced),
+    origins: Origins,
+    observers: List(Observer(model, message)),
+    topic_inits: List(#(String, fn(String) -> model)),
   )
 }
 
-/// A registered name for a supervised server, from [`name`](#name).
-pub opaque type ServerName(model, message) {
-  ServerName(
-    cell: actor_cell.CellName(InternalEvent(model, message), ServerReply),
-  )
-}
-
-/// Why a connection was refused before it was ever registered.
+/// Why a connection was refused before it was registered.
 pub type ConnectError {
-  /// The `Origin` header did not match the configured allowlist.
+  /// The `Origin` header did not match the allowlist.
   OriginNotAllowed(origin: String)
-  /// The request carried no `Origin` header and the policy requires one.
+  /// Request had no `Origin` header and the policy wants one.
   OriginMissing
 }
 
-/// Which browser origins may open a connection to this server. Passed to
-/// [`start`](#start) and evaluated by [`connect`](#connect) and
+/// One client's registration with a server, from [`connect`](#connect).
+///
+/// Give it each inbound frame and close it when the transport closes.
+pub opaque type Connection(model, message) {
+  Connection(server: Server(model, message), client_id: String)
+}
+
+@target(erlang)
+/// A request whose origin [`open`](#open) has accepted, waiting for its socket
+/// to [`attach`](#attach).
+///
+/// Erlang only.
+pub opaque type Opened(model, message) {
+  Opened(server: Server(model, message), origin: Option(String))
+}
+
+/// Which browser origins may open a connection to this server.
+///
+/// Passed to [`new`](#new) and evaluated by [`connect`](#connect) and
 /// [`check_origin`](#check_origin).
 ///
 /// ```gleam
@@ -213,141 +231,91 @@ pub type Origins {
   AnyOrigin
 }
 
-/// Running Lily server. Use [`start`](#start) to start one rather than using
-/// this type.
+/// A running Lily server.
 ///
-/// Also carries `serialiser`, `initial_model` and the `origins` policy, which
-/// `topic.new` and the origin checks read without an actor round trip.
+/// Use [`start`](#start) to start one.
 pub opaque type Server(model, message) {
-  Server(
-    handle: ServerHandle(model, message),
-    supervisor: actor_cell.Supervisor,
-    serialiser: Serialiser(model, message),
-    initial_model: model,
-    wiring: store.Wiring(model, message),
-    origins: Origins,
-  )
+  Server(handle: ServerHandle(model, message), origins: Origins)
 }
 
-// =============================================================================
-// INTERNAL TYPES
-// =============================================================================
+/// Something that happened on the server, given to every observer.
+pub type ServerEvent(model, message) {
+  /// A client was registered
+  ClientConnected(client_id: String)
+  /// A client left, or its connection process died
+  ClientDisconnected(client_id: String)
+  /// A session message was applied (`model` is the client's model after it)
+  SessionMessageApplied(client_id: String, message: message, model: model)
+  /// A client sent a topic message, before the topic applies it
+  TopicMessageReceived(client_id: String, topic_id: String, message: message)
+  /// A topic admitted a client
+  Subscribed(client_id: String, topic_id: String)
+  /// A subscribe was refused with a `Rejected` frame
+  SubscriptionRejected(client_id: String, topic_id: String, reason: String)
+  /// A client left a topic it had joined
+  Unsubscribed(client_id: String, topic_id: String)
+  /// Lily dropped something (`Warning`) or gave up on something (`Failure`)
+  Diagnostic(level: transport.Level, message: String)
+}
 
-/// Callbacks a topic actor registers so that the server can route frames to
-/// it. Created in `topic.gleam`, stored in the server's topic registry.
-///
-/// `subscribe` is the client-initiated path and runs the topic's
-/// `can_subscribe` predicate, `subscribe_trusted` is the server-initiated one
-/// and skips it. Both receive the client's session model so that authorisation
-/// can read the connection context.
-///
-/// `rejoin` re-attaches a subscriber the server had already authorised, after
-/// the topic came back from a crash. It sends the snapshot but skips the join
-/// hooks, so a chat topic's `UserJoined` doesn't replay for everybody on every
-/// crash.
-///
-/// `respawn` builds a fresh entry on a new process, replaying whatever
-/// configuration the topic was given. `None` means this topic can't come back
-/// and the server should forget it.
-@internal
-pub type ServerTopicEntry(model, message) {
-  ServerTopicEntry(
-    handle_incoming: fn(String, message) -> Nil,
-    rejoin: fn(String, fn(BitArray) -> Nil) -> Nil,
-    respawn: fn() -> Option(ServerTopicEntry(model, message)),
-    subscribe: fn(String, model, fn(BitArray) -> Nil) -> Nil,
-    subscribe_trusted: fn(String, model, fn(BitArray) -> Nil) -> Nil,
-    unsubscribe: fn(String) -> Nil,
-    send_snapshot: fn(fn(BitArray) -> Nil) -> Nil,
-    stop: fn() -> Nil,
-    watched: actor_cell.Watched,
-  )
+/// Which process the server should watch for a connection, its death
+/// disconnecting the client.
+pub type Watch {
+  /// The process calling `connect_as` (what [`connect`](#connect) does)
+  WatchCaller
+  /// Some other process, such as the one owning the socket
+  Watch(Pid)
+  /// Nothing, for a transport whose requests are short-lived
+  Unwatched
 }
 
 // =============================================================================
 // PUBLIC FUNCTIONS
 // =============================================================================
 
-/// Decide what to serve for a static asset, or `Error(Nil)` for anything that
-/// shouldn't be served. `exists` probes the filesystem, which keeps
-/// this pure and usable from either target, and `accepting` is the request's
-/// raw `accept-encoding` value.
+@target(erlang)
+/// Registers a WebSocket with the server from inside its socket process, once
+/// [`open`](#open) has accepted the request. Erlang only.
 ///
-/// A precompressed `.br` or `.gz` sibling is preferred whenever the client
-/// accepts it and the file is on disk.
-///
-/// Names carrying a content hash (`name.<8 hex>.css`) are tagged and made
-/// immutable, anything else is `no-store`.
-///
-/// `Error(Nil)` means this was not a servable asset, so answer 404 rather than
-/// falling through to an app route.
-///
-/// A missing stylesheet answered with HTML and a 200 is ignored by the browser
-/// and shows up only as an unstyled page.
+/// Give it the `Opened` value. You get back the connection and a selector that
+/// yields `Ok(bytes)` for each frame to send, and `Error(Nil)` when the socket
+/// should close because the server restarted.
 ///
 /// ```gleam
-/// case server.asset(
-///   name: "lily-ui.a1b2c3d4.css",
-///   in: "../dist/assets",
-///   accepting: "gzip, deflate, br",
-///   exists: fn(path) { simplifile.is_file(path) |> result.unwrap(False) },
-/// ) {
-///   Ok(found) -> send_file(found)
-///   Error(Nil) -> not_found()
-/// }
+/// on_init: fn(_socket) {
+///   let #(connection, frames) = server.attach(opened)
+///   #(connection, option.Some(frames))
+/// },
 /// ```
-pub fn asset(
-  name name: String,
-  in directory: String,
-  accepting accepting: String,
-  exists exists: fn(String) -> Bool,
-) -> Result(Asset, Nil) {
-  use <- bool.guard(when: !asset_name_is_safe(name), return: Error(Nil))
-
-  let requested = directory <> "/" <> name
-  let #(path, encoding) = asset_encoding(requested, accepting, exists)
-  use <- bool.guard(when: !exists(path), return: Error(Nil))
-
-  let etag = case asset_hash(name) {
-    Error(Nil) -> option.None
-    // Folding the encoding in stops a shared cache handing the brotli body to
-    // a client that only reads gzip.
-    Ok(hash) -> option.Some("\"" <> hash <> option.unwrap(encoding, "") <> "\"")
-  }
-
-  Ok(Asset(
-    path:,
-    content_type: asset_content_type(name),
-    cache_control: asset_cache_control(name),
-    content_encoding: encoding,
-    etag:,
-  ))
+pub fn attach(
+  opened: Opened(model, message),
+) -> #(Connection(model, message), process.Selector(Result(BitArray, Nil))) {
+  let server = opened.server
+  // monitor before joining, a restart in between still closes the socket
+  // instead of leaving it registered on a dead process
+  let gone = monitor(server)
+  let outgoing = process.new_subject()
+  let connection =
+    register(
+      server,
+      send: process.send(outgoing, _),
+      client_id: generate_client_id(),
+      session: [],
+      watch: WatchCaller,
+    )
+  let selector =
+    process.new_selector()
+    |> process.select_map(outgoing, Ok)
+    |> process.select_specific_monitor(gone, fn(_) { Error(Nil) })
+  #(connection, selector)
 }
 
-/// This server incarnation's id, sent to every client as a
-/// [`Version`](./transport.html#Protocol) frame the moment it connects.
-///
-/// A restart mints a new one, so a client comparing it against the first it
-/// saw can tell a restarted server from a reconnected socket.
+/// Checks a request's `Origin` header against the server's
+/// [`Origins`](#Origins), for refusing a request before you connect it.
 ///
 /// ```gleam
-/// server.boot_id(app)
-/// ```
-pub fn boot_id(server: Server(model, message)) -> String {
-  case query(server, BootId, StringReply("")) {
-    StringReply(id) -> id
-    _ -> ""
-  }
-}
-
-/// Check an origin without connecting, so that a transport can refuse the
-/// upgrade with a 403 instead of accepting a socket and closing it.
-///
-/// Runs the same policy [`connect`](#connect) does.
-///
-/// ```gleam
-/// case server.check_origin(server, origin:) {
-///   Ok(Nil) -> accept_websocket(req)
+/// case server.check_origin(app, origin:) {
+///   Ok(Nil) -> upgrade(request)
 ///   Error(_) -> forbidden()
 /// }
 /// ```
@@ -358,62 +326,93 @@ pub fn check_origin(
   validate_origin(server.origins, origin)
 }
 
-/// Register a client connection. The `send` callback pushes frames back to
-/// this specific client.
+/// The id of a connection.
+pub fn client_id(connection: Connection(model, message)) -> String {
+  connection.client_id
+}
+
+/// Registers a client with the server, from the process that owns its socket.
 ///
-/// `origin` is the request's `Origin` header, if any, checked against the
-/// server's [`Origins`](#Origins) policy before anything is registered, so a
-/// refused connection leaves no trace.
-///
-/// `session` seeds this connection's session store, applied and streamed back
-/// as a `SessionUpdate` before any inbound frame can be processed. That's how
-/// a transport hands over what it learnt from the request, like the signed-in
-/// user. Pass `[]` for none.
+/// Give it the request's `Origin` header and a `send` function that delivers a
+/// frame to this client. The client is disconnected if the calling process
+/// dies. With mist or ewe, [`open`](#open) and [`attach`](#attach) are simpler.
 ///
 /// ```gleam
-/// server.connect(
-///   server,
-///   client_id: id,
-///   origin: option.Some("https://example.com"),
-///   send: process.send(outgoing_subject, _),
-///   session: [SignedInAs(user)],
-/// )
+/// let assert Ok(connection) =
+///   server.connect(app, origin:, send: process.send(outgoing, _))
 /// ```
 pub fn connect(
   server: Server(model, message),
-  client_id client_id: String,
   origin origin: Option(String),
   send send: fn(BitArray) -> Nil,
-  session session: List(message),
-) -> Result(Nil, ConnectError) {
-  // validated up front so a refused origin never reaches the actor at all
-  use _ <- result.try(validate_origin(server.origins, origin))
-  cast(server, ClientConnected(client_id:, send:, session:))
-  Ok(Nil)
+) -> Result(Connection(model, message), ConnectError) {
+  connect_as(
+    server,
+    origin:,
+    send:,
+    client_id: generate_client_id(),
+    session: [],
+    watch: WatchCaller,
+  )
 }
 
-/// Unregister a client connection from the server and all subscribed topics.
-pub fn disconnect(
-  server: Server(model, message),
-  client_id client_id: String,
-) -> Nil {
-  let _ = actor_cell.unwatch(server.handle, client_id)
-  cast(server, ClientDisconnected(client_id:))
-}
-
-/// Apply `message` to one connected client's session store and send a
-/// `SessionUpdate` frame back to it. Use for server-initiated per-client
-/// updates, e.g. a fresh slice after auth, per-user timers, async DB results.
+/// Registers a client like [`connect`](#connect), but lets you choose its id,
+/// seed its session and pick which process to watch.
 ///
-/// No-op if no client with `client_id` is connected.
-///
-/// Safe to call from any process, so spawn the slow work and call this when
-/// it's ready.
+/// `session` is a list of messages applied to the client's session before
+/// anything it sends, such as who signed in. Use `watch: Unwatched` for
+/// short-lived HTTP requests.
 ///
 /// ```gleam
-/// server.on_connect(server, fn(client_id) {
-///   server.dispatch_to(server, client_id:, message: WelcomeUser(client_id))
-/// })
+/// server.connect_as(
+///   app,
+///   origin:,
+///   send:,
+///   client_id: server.generate_client_id(),
+///   session: [SignedInAs(user)],
+///   watch: server.WatchCaller,
+/// )
+/// ```
+pub fn connect_as(
+  server: Server(model, message),
+  origin origin: Option(String),
+  send send: fn(BitArray) -> Nil,
+  client_id client_id: String,
+  session session: List(message),
+  watch watch: Watch,
+) -> Result(Connection(model, message), ConnectError) {
+  // validated so that a refused origin doesn't reach the actor
+  use _ <- result.map(validate_origin(server.origins, origin))
+  register(server, send:, client_id:, session:, watch:)
+}
+
+/// The connection for a client id you kept, for transports that store the id
+/// rather than the connection.
+///
+/// ```gleam
+/// server.connection(app, client_id)
+/// |> server.incoming(bytes:)
+/// ```
+pub fn connection(
+  server: Server(model, message),
+  client_id: String,
+) -> Connection(model, message) {
+  Connection(server:, client_id:)
+}
+
+/// Unregisters a client, usually when its socket closes.
+pub fn disconnect(connection: Connection(model, message)) -> Nil {
+  let _ = actor.unwatch(connection.server.handle, connection.client_id)
+  cast(connection.server, ClientLeft(client_id: connection.client_id))
+}
+
+/// Applies a message to one client's session and sends it the update, for
+/// changes the server makes on its own, like the result of async work.
+///
+/// Does nothing if the client isn't connected. Safe to call from any process.
+///
+/// ```gleam
+/// server.dispatch_to(app, client_id:, message: Welcome)
 /// ```
 pub fn dispatch_to(
   server: Server(model, message),
@@ -423,14 +422,11 @@ pub fn dispatch_to(
   cast(server, DispatchToClient(client_id:, message:))
 }
 
-/// Apply `message` to every connected client's session store and send each a
-/// `SessionUpdate` frame. Use for server-wide announcements that also mutate
-/// session state, like a forced feature-flag refresh.
-///
-/// For fire-and-forget broadcasts without session mutation, use a topic.
+/// Applies a message to every connected client's session and sends each the
+/// update.
 ///
 /// ```gleam
-/// server.dispatch_to_all(server, message: SystemBannerUpdated(banner))
+/// server.dispatch_to_all(app, message: BannerChanged(banner))
 /// ```
 pub fn dispatch_to_all(
   server: Server(model, message),
@@ -439,225 +435,144 @@ pub fn dispatch_to_all(
   cast(server, DispatchToAllClients(message:))
 }
 
-/// Generate a cryptographically random 32-character hex client id. Pair with
-/// [`connect`](#connect) so that every connection carries a stable,
-/// server-issued id.
+/// Applies a message to a topic and sends the update to its subscribers,
+/// starting the topic if it isn't running. Safe to call from any process.
 ///
 /// ```gleam
-/// let client_id = server.generate_client_id()
-/// server.connect(server, client_id:, send:)
+/// server.dispatch_topic(app, topic_id: "chat", message: Chat(Notice(text)))
 /// ```
-pub fn generate_client_id() -> String {
-  id.random_hex(client_id_bytes)
+pub fn dispatch_topic(
+  server: Server(model, message),
+  topic_id topic_id: String,
+  message message: message,
+) -> Nil {
+  cast(server, DispatchTopic(topic_id:, message:))
 }
 
-/// Process an incoming frame from a client, decoding and routing it.
+/// Generates a new random client id, for [`connect_as`](#connect_as).
+pub fn generate_client_id() -> String {
+  random_hex(client_id_bytes)
+}
+
+/// Passes a frame the client sent to the server. Call it for every binary frame
+/// the socket receives.
 ///
-/// `SessionMessage` goes to the session store, `TopicMessage`, `Subscribe` and
-/// `Unsubscribe` to the topic actor, and `Resync` to a per-target snapshot
-/// fan-out.
+/// ```gleam
+/// server.incoming(connection, bytes:)
+/// ```
 pub fn incoming(
-  server: Server(model, message),
-  client_id client_id: String,
+  connection: Connection(model, message),
   bytes bytes: BitArray,
 ) -> Nil {
-  cast(server, Incoming(client_id:, bytes:))
+  cast(connection.server, Incoming(client_id: connection.client_id, bytes:))
 }
 
-/// Set the maximum number of live topic actors at once, bounding client-driven
-/// topic creation through parametric kinds.
-///
-/// The default is generous, raise it if your app legitimately needs more
-/// concurrent topics.
+@target(erlang)
+/// Monitors the server process, letting a socket close when the server
+/// restarts. Erlang only. [`attach`](#attach) already does this for you.
 ///
 /// ```gleam
-/// server.max_topics(server, 500_000)
+/// process.new_selector()
+/// |> process.select_specific_monitor(server.monitor(app), fn(_) { Gone })
 /// ```
-pub fn max_topics(server: Server(model, message), maximum: Int) -> Nil {
-  cast(server, SetMaxTopics(maximum:))
+pub fn monitor(server: Server(model, message)) -> process.Monitor {
+  process.monitor(actor.watched_pid(actor.watched(server.handle)))
 }
 
-/// Register a hook that runs after a client connects, receiving the
-/// server-assigned client id.
-///
-/// Use for presence, audit logging, or seeding the session via
-/// [`dispatch_to`](#dispatch_to).
+/// Starts building a server from the synced store your client also uses, and
+/// the origins allowed to connect. Pipe it into [`start`](#start) or
+/// [`start_supervised`](#start_supervised).
 ///
 /// ```gleam
-/// server.on_connect(server, fn(client_id) {
-///   logging.log(logging.Info, "client connected: " <> client_id)
-/// })
+/// server.new(shared.store(), origins: server.AllowedOrigins([
+///   "https://example.com",
+/// ]))
+/// |> server.start_supervised
 /// ```
-pub fn on_connect(
-  server: Server(model, message),
-  hook: fn(String) -> Nil,
-) -> Nil {
-  cast(server, SetConnectHook(hook:))
+pub fn new(
+  store: Store(model, message, Synced),
+  origins origins: Origins,
+) -> Builder(model, message) {
+  Builder(store:, origins:, observers: [], topic_inits: [])
 }
 
-/// Register a hook that runs after a client disconnects, receiving the id that
-/// just left.
+/// Adds a function that's called with every [`ServerEvent`](#ServerEvent) and
+/// the server it happened on. Pipe it from [`new`](#new).
 ///
-/// Use for presence cleanup or audit logging.
-///
-/// ```gleam
-/// server.on_disconnect(server, fn(client_id) {
-///   logging.log(logging.Info, "client disconnected: " <> client_id)
-/// })
-/// ```
-pub fn on_disconnect(
-  server: Server(model, message),
-  hook: fn(String) -> Nil,
-) -> Nil {
-  cast(server, SetDisconnectHook(hook:))
-}
-
-/// Register a hook that runs after each session message is applied. Receives
-/// the decoded message, the full outer model after it's applied to this
-/// client's session store, and the originating client id.
-///
-/// Hooks run inside the one actor every connection shares, so start slow work
-/// rather than doing it here.
+/// Keep it quick, every other client waits while it runs. Spawn anything slow.
 ///
 /// ```gleam
-/// server.on_message(server, fn(message, _model, client_id) {
-///   case message {
-///     Session(SaveDocument(doc)) ->
-///       process.spawn(fn() {
-///         let saved = db.write(doc)
-///         server.dispatch_to(server, client_id:, message: Saved(saved))
-///       })
+/// server.observe(builder, fn(event, app) {
+///   case event {
+///     server.ClientConnected(client_id:) ->
+///       server.dispatch_to(app, client_id:, message: Welcome)
 ///     _ -> Nil
 ///   }
 /// })
 /// ```
-pub fn on_message(
-  server: Server(model, message),
-  hook: fn(message, model, String) -> Nil,
-) -> Nil {
-  cast(server, SetHook(hook:))
-}
-
-/// Register a hook that runs for each client-incoming topic message. Receives
-/// the decoded message, the topic id, and the originating client id.
-///
-/// Fires before the topic actor processes it, whether the topic is stateful,
-/// ephemeral, or unknown.
-///
-/// Does not fire for server-initiated `topic.dispatch` or `topic.broadcast`.
-///
-/// ```gleam
-/// server.on_topic_message(server, fn(message, topic_id, _client_id) {
-///   logging.auto_log(logging.Info, #(topic_id, message))
-/// })
-/// ```
-pub fn on_topic_message(
-  server: Server(model, message),
-  hook: fn(message, String, String) -> Nil,
-) -> Nil {
-  cast(server, SetTopicMessageHook(hook:))
-}
-
-/// Start a server. Provide the shared initial model (the zero-state for
-/// per-connection session stores and for topic snapshots), the serialiser, the
-/// shared wiring, and the [`Origins`](#Origins) policy every connection is
-/// checked against.
-///
-/// Add topics afterwards via `topic.new(server, ...)`.
-///
-/// ```gleam
-/// let assert Ok(server) =
-///   server.start(
-///     initial: shared.initial_model(),
-///     serialiser: shared.serialiser(),
-///     wiring: shared.wiring(),
-///     origins: server.AllowedOrigins(["https://example.com"]),
-///   )
-/// ```
-pub fn start(
-  initial initial: model,
-  serialiser serialiser: Serialiser(model, message),
-  wiring wiring: store.Wiring(model, message),
-  origins origins: Origins,
-) -> Result(Server(model, message), Nil) {
-  actor_cell.start_watching(
-    new_state(initial, serialiser, wiring),
-    reduce:,
-    on_down: on_watch_down,
-  )
-  |> result.map(fn(handle) {
-    Server(
-      handle:,
-      supervisor: actor_cell.no_supervisor(),
-      serialiser:,
-      initial_model: initial,
-      wiring:,
-      origins:,
-    )
-  })
+pub fn observe(
+  builder: Builder(model, message),
+  observer: fn(ServerEvent(model, message), Server(model, message)) -> Nil,
+) -> Builder(model, message) {
+  Builder(..builder, observers: list.append(builder.observers, [observer]))
 }
 
 @target(erlang)
-/// Start a server inside its own OTP supervision tree, returning the
-/// supervisor and the running server. Erlang only, JavaScript has no
-/// processes to supervise, so use [`start`](#start) there.
-///
-/// Register your topics inside `started`, not afterwards. It runs every time
-/// the server is (re)started, so anything registered outside it would be lost
-/// on the first crash.
-///
-/// `name` comes from [`name`](#name) and is what keeps the returned `Server`
-/// working across a restart, since it resolves the registered name rather than
-/// the pid it booted on.
-///
-/// The tree is `OneForAll`, and topic actors hang off a supervisor owned by
-/// the server, so they go down with it and come back with it.
-///
-/// A restart loses every client's `send` closure, since connections live in
-/// transport processes outside this tree. Pair with [`monitor`](#monitor) so
-/// that those sockets close and their clients reconnect and resync.
+/// Checks a WebSocket request's origin before upgrading it, giving a refused
+/// one a 403. Erlang only. Pass the result to [`attach`](#attach) once the
+/// socket is up.
 ///
 /// ```gleam
-/// let assert Ok(#(_supervisor, server)) =
-///   server.start_supervised(
-///     name: server.name("my_app_server"),
-///     initial: shared.initial_model(),
-///     serialiser: shared.serialiser(),
-///     wiring: shared.wiring(),
-///     origins: server.AnyOrigin,
-///     started: fn(server) {
-///       let assert Ok(_) = topic.new(server, id: "chat")
-///       Nil
-///     },
-///   )
+/// case server.open(app, origin:) {
+///   Ok(opened) -> upgrade(request, opened)
+///   Error(_) -> forbidden()
+/// }
+/// ```
+pub fn open(
+  server: Server(model, message),
+  origin origin: Option(String),
+) -> Result(Opened(model, message), ConnectError) {
+  validate_origin(server.origins, origin)
+  |> result.replace(Opened(server:, origin:))
+}
+
+/// Starts the server. Pipe it from [`new`](#new). On Erlang,
+/// [`start_supervised`](#start_supervised) is usually the better choice.
+///
+/// ```gleam
+/// let assert Ok(app) =
+///   server.new(shared.store(), origins: server.AnyOrigin)
+///   |> server.start
+/// ```
+pub fn start(
+  builder: Builder(model, message),
+) -> Result(Server(model, message), Nil) {
+  actor.start_seeded(new_state(builder, _), reduce:, on_down: on_watch_down)
+  |> result.map(Server(handle: _, origins: builder.origins))
+}
+
+@target(erlang)
+/// Starts the server under its own supervisor, letting a crash restart it
+/// instead of taking your app down. Erlang only. Call it once when your program
+/// starts.
+///
+/// ```gleam
+/// let assert Ok(#(_supervisor, app)) =
+///   server.new(shared.store(), origins: server.AnyOrigin)
+///   |> server.start_supervised
 /// ```
 pub fn start_supervised(
-  name name: ServerName(model, message),
-  initial initial: model,
-  serialiser serialiser: Serialiser(model, message),
-  wiring wiring: store.Wiring(model, message),
-  origins origins: Origins,
-  started started: fn(Server(model, message)) -> Nil,
+  builder: Builder(model, message),
 ) -> Result(#(static_supervisor.Supervisor, Server(model, message)), Nil) {
-  // The child's start runs inside the supervisor process, so the only way
-  // back to this caller is a channel it owns.
+  // start runs in the supervisor, meaning replies go via a caller-owned channel
   let ready = process.new_subject()
   let child =
-    supervised(
-      name:,
-      initial:,
-      serialiser:,
-      wiring:,
-      origins:,
-      started: fn(server) {
-        process.send(ready, server)
-        started(server)
-      },
-    )
+    supervised_as(builder, actor.new_name("lily_server"), fn(server) {
+      process.send(ready, server)
+    })
   let tree =
     static_supervisor.new(static_supervisor.OneForAll)
-    // The 2 in 5 default is tight for a process a hostile client can
-    // influence.
+    // the 2 in 5 default is tight for a client-influenced process
     |> static_supervisor.restart_tolerance(intensity: 3, period: 10)
     |> static_supervisor.add(child)
     |> static_supervisor.start
@@ -671,414 +586,211 @@ pub fn start_supervised(
   }
 }
 
-@target(erlang)
-/// Monitor the server process, so that a transport can close its sockets when
-/// the server goes. Erlang only, JavaScript has no processes to monitor.
-///
-/// Call it from the process that owns the connection and select on the `Down`.
-///
-/// A supervised restart replaces the process behind the handle. Without this a
-/// client holding a socket to the old one sits there reading Online forever,
-/// never reconnecting and never resyncing.
-///
-/// ```gleam
-/// let gone = server.monitor(app)
-/// process.new_selector()
-/// |> process.select(outgoing)
-/// |> process.select_specific_monitor(gone, fn(_) { ServerGone })
-/// ```
-pub fn monitor(server: Server(model, message)) -> process.Monitor {
-  process.monitor(actor_cell.watched_pid(actor_cell.watched(server.handle)))
-}
-
-@target(erlang)
-/// Mint a name for a supervised server. Pair with
-/// [`start_supervised`](#start_supervised) or [`supervised`](#supervised).
-///
-/// Call it once while your program starts and hold the result. Each call
-/// allocates an atom that is never collected, so calling it inside a loop, a
-/// hook, or anything a supervisor restarts will eventually fill the atom table
-/// and take the VM down with it.
-///
-/// A `Server` built against a name keeps working across restarts, so a
-/// transport can capture it once at boot.
-///
-/// ```gleam
-/// let name = server.name("my_app_server")
-/// let assert Ok(#(_tree, app)) =
-///   server.start_supervised(name:, initial:, serialiser:, wiring:, origins:,
-///     started:)
-/// ```
-pub fn name(prefix: String) -> ServerName(model, message) {
-  ServerName(cell: actor_cell.new_name(prefix))
-}
-
-/// Stop a running server. Every topic actor is asked to stop first, sending
-/// each subscriber a final `Acknowledge(Topic(id), seq)` so that slices reset.
-///
-/// The server actor then terminates (Erlang) or its `Reference` cell is
-/// cleared (JavaScript). Session clients receive no extra frame.
-///
-/// A supervised server is restarted by its supervisor, so stop the tree rather
-/// than the server when you mean to shut down for good.
+/// Stops the server and all of its topics.
 pub fn stop(server: Server(model, message)) -> Nil {
   cast(server, Stop)
 }
 
-@target(erlang)
-/// A [`ChildSpecification`](https://hexdocs.pm/gleam_otp/gleam/otp/supervision.html#ChildSpecification)
-/// for a Lily server, to add to an application's own supervision tree. Erlang
-/// only, JavaScript has no processes to supervise, so use [`start`](#start)
-/// there.
-///
-/// `started` runs inside the supervisor every time the server starts, so that
-/// is where topics get registered.
-///
-/// A restarted server is a new process, but the `name` keeps a
-/// `Server` taken before the restart pointing at whichever one is live.
+/// Stops one topic. Its subscribers keep their last state, and the next
+/// subscribe or dispatch starts it again from the beginning.
 ///
 /// ```gleam
-/// supervisor.new(supervisor.OneForOne)
-/// |> supervisor.add(
-///   server.supervised(
-///     name: server.name("my_app_server"),
-///     initial: shared.initial_model(),
-///     serialiser: shared.serialiser(),
-///     wiring: shared.wiring(),
-///     origins: server.AnyOrigin,
-///     started: fn(server) {
-///       let assert Ok(_) = topic.new(server, id: "chat")
-///       Nil
-///     },
-///   ),
-/// )
-/// |> supervisor.start
+/// server.stop_topic(app, topic_id: "room:1")
 /// ```
-pub fn supervised(
-  name name: ServerName(model, message),
-  initial initial: model,
-  serialiser serialiser: Serialiser(model, message),
-  wiring wiring: store.Wiring(model, message),
-  origins origins: Origins,
-  started started: fn(Server(model, message)) -> Nil,
-) -> supervision.ChildSpecification(Server(model, message)) {
-  supervision.worker(run: fn() {
-    let cell =
-      actor_cell.start_with_supervisor(
-        new_state(initial, serialiser, wiring),
-        reduce:,
-        on_down: on_watch_down,
-        name: name.cell,
-      )
-    case cell {
-      Error(_) -> Error(actor.InitFailed("lily: server failed to start"))
-      Ok(#(handle, supervisor)) -> {
-        let server =
-          Server(
-            handle:,
-            supervisor:,
-            serialiser:,
-            initial_model: initial,
-            wiring:,
-            origins:,
-          )
-        started(server)
-        let pid = actor_cell.watched_pid(actor_cell.watched(handle))
-        Ok(actor.Started(pid:, data: server))
-      }
-    }
-  })
+pub fn stop_topic(
+  server: Server(model, message),
+  topic_id topic_id: String,
+) -> Nil {
+  cast(server, StopTopic(topic_id:))
 }
 
-/// Tie a client's registration to the process that owns its connection. Call
-/// it from that process, immediately after [`connect`](#connect). No-op on
-/// JavaScript, which has no processes.
-///
-/// When the process dies the server runs the same cleanup
-/// [`disconnect`](#disconnect) does, so that a socket dying without a close
-/// callback leaves nothing behind.
-///
-/// It's opt-in rather than part of `connect` because an HTTP transport calls
-/// `connect` from a request process that dies straight away, which would
-/// disconnect the client the instant it connected. Call it from long-lived
-/// connection processes only, such as a WebSocket handler.
+@target(erlang)
+/// A child specification for adding the server to your own supervision tree.
+/// Erlang only. Call it once when your program starts.
 ///
 /// ```gleam
-/// let client_id = server.generate_client_id()
-/// let assert Ok(Nil) = server.connect(server, client_id:, ..)
-/// server.watch(server, client_id:)
+/// static_supervisor.new(static_supervisor.OneForOne)
+/// |> static_supervisor.add(
+///   server.new(shared.store(), origins: server.AnyOrigin)
+///   |> server.supervised,
+/// )
+/// |> static_supervisor.start
 /// ```
-pub fn watch(
-  server: Server(model, message),
-  client_id client_id: String,
-) -> Nil {
-  // captured here, at the call site, because the watch itself is asynchronous
-  // and the reducer runs in the server process, not the caller's
-  actor_cell.watch(server.handle, client_id, actor_cell.watched_here())
+pub fn supervised(
+  builder: Builder(model, message),
+) -> supervision.ChildSpecification(Server(model, message)) {
+  supervised_as(builder, actor.new_name("lily_server"), fn(_) { Nil })
+}
+
+/// Loads a topic's starting model when it starts, for state kept somewhere
+/// else like a database. Pipe it from [`new`](#new).
+///
+/// `init` gets the topic id and runs again if the topic restarts. If it
+/// crashes, the topic starts from the store's initial model instead.
+///
+/// ```gleam
+/// server.new(shared.store(), origins: server.AnyOrigin)
+/// |> server.topic_init(prefix: "room:", init: fn(topic_id) {
+///   Model(..shared.initial_model(), room: database.load_room(topic_id))
+/// })
+/// |> server.start
+/// ```
+pub fn topic_init(
+  builder: Builder(model, message),
+  prefix prefix: String,
+  init init: fn(String) -> model,
+) -> Builder(model, message) {
+  let others = list.filter(builder.topic_inits, fn(other) { other.0 != prefix })
+  Builder(..builder, topic_inits: [#(prefix, init), ..others])
+}
+
+// =============================================================================
+// INTERNAL TYPES
+// =============================================================================
+
+@internal
+pub type Inspection {
+  Inspection(
+    boot_id: String,
+    client_count: Int,
+    topics: Dict(String, TopicInspection),
+    supervisor: actor.Supervisor,
+    watched: actor.Watched,
+  )
+}
+
+/// `subscriber_count` raises on Erlang once the topic has died.
+@internal
+pub type TopicInspection {
+  TopicInspection(subscriber_count: fn() -> Int, watched: actor.Watched)
 }
 
 // =============================================================================
 // INTERNAL FUNCTIONS
 // =============================================================================
 
-/// Number of currently registered clients.
-///
-/// Test-only accessor currently, might be useful to make public later.
+/// Never call it from an observer, which runs inside the server and would
+/// wait on itself.
 @internal
-pub fn client_count(server: Server(model, message)) -> Int {
-  case query(server, ClientCount, CountReply(-1)) {
-    CountReply(count) -> count
-    _ -> -1
-  }
-}
-
-@internal
-pub fn do_subscribe(
-  server: Server(model, message),
-  client_id: String,
-  topic_id: String,
-) -> Nil {
-  cast(server, DoSubscribe(client_id:, topic_id:))
-}
-
-/// Config values `topic.gleam` needs to build a topic actor.
-@internal
-pub fn internals(
-  server: Server(model, message),
-) -> #(model, Serialiser(model, message), store.Wiring(model, message)) {
-  #(server.initial_model, server.serialiser, server.wiring)
-}
-
-/// The supervisor topic actors are started under.
-///
-/// Inert unless the server was started with
-/// [`start_supervised`](#start_supervised) or [`supervised`](#supervised).
-@internal
-pub fn supervisor(server: Server(model, message)) -> actor_cell.Supervisor {
-  server.supervisor
-}
-
-/// Register a topic entry under `id`.
-///
-/// `Error(Nil)` if `id` already exists or collides with a registered kind
-/// prefix.
-@internal
-pub fn register_topic(
-  server: Server(model, message),
-  id: String,
-  entry: ServerTopicEntry(model, message),
-) -> Result(Nil, Nil) {
-  let reply =
-    query(server, RegisterTopic(id:, entry:), RegisterReply(Error(Nil)))
-  case reply {
-    RegisterReply(Ok(Nil)) -> {
-      let _ = watch_topic(server, id, entry.watched)
-      Ok(Nil)
-    }
-    _ -> Error(Nil)
-  }
-}
-
-/// Register a parametric topic kind.
-///
-/// When a client subscribes to an id starting with `prefix` and no fixed topic
-/// with that id exists, `create` is called with the full id and returns a
-/// `ServerTopicEntry`, or `None` to reject.
-@internal
-pub fn register_topic_kind(
-  server: Server(model, message),
-  prefix: String,
-  create: fn(String) -> Option(ServerTopicEntry(model, message)),
-) -> Result(Nil, Nil) {
-  case
-    query(
-      server,
-      RegisterTopicKind(prefix:, create:),
-      RegisterReply(Error(Nil)),
-    )
-  {
-    RegisterReply(result) -> result
-    _ -> Error(Nil)
-  }
-}
-
-/// Run `operation`, or log and hand back `default` when it crashes. `label`
-/// names the callback in the log line.
-///
-/// Wraps every place the server and a topic call into user code, since one
-/// client's bad callback must not take down the actor every other client
-/// shares.
-@internal
-pub fn rescue_or(
-  label: String,
-  default: value,
-  operation: fn() -> value,
-) -> value {
-  case rescue(operation) {
-    Ok(value) -> value
-    Error(reason) -> {
-      logging.log(logging.Error, "lily: " <> label <> " crashed: " <> reason)
-      default
-    }
-  }
-}
-
-/// Push one frame to a client, reporting whether it got there.
-///
-/// `False` means the transport's own send closure raised, which is a dead
-/// connection rather than a bad frame, so the caller drops that client instead
-/// of trying again.
-@internal
-pub fn rescue_send(
-  label: String,
-  send: fn(BitArray) -> Nil,
-  frame: BitArray,
-) -> Bool {
-  case rescue(fn() { send(frame) }) {
-    Ok(Nil) -> True
-    Error(reason) -> {
-      logging.log(
-        logging.Error,
-        "lily: " <> label <> " send crashed: " <> reason,
-      )
-      False
-    }
-  }
-}
-
-/// Replace the respawn closure of the topic registered under `id`.
-///
-/// Each of `topic.gleam`'s configuration steps records itself, so that a topic
-/// coming back from a crash comes back configured.
-@internal
-pub fn set_topic_respawn(
-  server: Server(model, message),
-  id: String,
-  respawn: fn() -> Option(ServerTopicEntry(model, message)),
-) -> Nil {
-  cast(server, SetTopicRespawn(id:, respawn:))
-}
-
-/// The process running the topic registered under `id`, if any.
-///
-/// Test-only accessor.
-@internal
-pub fn topic_watched(
-  server: Server(model, message),
-  id: String,
-) -> Option(actor_cell.Watched) {
-  case query(server, TopicWatched(id:), WatchedReply(option.None)) {
-    WatchedReply(watched) -> watched
-    _ -> option.None
-  }
-}
-
-@internal
-pub fn unregister_topic(server: Server(model, message), id: String) -> Nil {
-  let _ = actor_cell.unwatch(server.handle, topic_watch_key(id))
-  cast(server, UnregisterTopic(id:))
-}
-
-/// The process running the server itself.
-///
-/// Test-only accessor.
-@internal
-pub fn watched(server: Server(model, message)) -> actor_cell.Watched {
-  actor_cell.watched(server.handle)
-}
-
-/// Watch the process running the topic registered under `id`, so that the
-/// server deregisters it if it dies.
-@internal
-pub fn watch_topic(
-  server: Server(model, message),
-  id: String,
-  watched: actor_cell.Watched,
-) -> Nil {
-  actor_cell.watch(server.handle, topic_watch_key(id), watched)
+pub fn inspect(server: Server(model, message)) -> Result(Inspection, Nil) {
+  // guarded like `cast`, calling a stopped cell raises on Erlang
+  actor.rescue_or("inspect", option.None, fn() {
+    actor.call(server.handle, Inspect, default: option.None)
+  })
+  |> option.to_result(Nil)
 }
 
 // =============================================================================
 // PRIVATE TYPES
 // =============================================================================
 
-type ConnectionState(model, message) {
-  ConnectionState(model: model, sequence: Int)
+type Client(model) {
+  Client(
+    send: fn(BitArray) -> Nil,
+    model: model,
+    sequence: Int,
+    topics: Dict(String, Subscription),
+    format: Option(Format),
+  )
 }
 
-type InternalEvent(model, message) {
-  BootId
-  ClientCount
-  ClientConnected(
+type InternalEvent(message) {
+  ClientJoined(
     client_id: String,
     send: fn(BitArray) -> Nil,
     session: List(message),
   )
-  ClientDisconnected(client_id: String)
-  DispatchToClient(client_id: String, message: message)
+  ClientLeft(client_id: String)
   DispatchToAllClients(message: message)
+  DispatchToClient(client_id: String, message: message)
+  DispatchTopic(topic_id: String, message: message)
   Incoming(client_id: String, bytes: BitArray)
-  SetConnectHook(hook: fn(String) -> Nil)
-  SetDisconnectHook(hook: fn(String) -> Nil)
-  SetHook(hook: fn(message, model, String) -> Nil)
-  SetMaxTopics(maximum: Int)
-  SetTopicMessageHook(hook: fn(message, String, String) -> Nil)
-  SetTopicRespawn(
-    id: String,
-    respawn: fn() -> Option(ServerTopicEntry(model, message)),
-  )
-  RegisterTopic(id: String, entry: ServerTopicEntry(model, message))
-  RegisterTopicKind(
-    prefix: String,
-    create: fn(String) -> Option(ServerTopicEntry(model, message)),
-  )
-  TopicDown(id: String)
-  TopicWatched(id: String)
-  UnregisterTopic(id: String)
-  DoSubscribe(client_id: String, topic_id: String)
+  Inspect
   Stop
+  StopTopic(topic_id: String)
+  TopicDown(id: String)
+  TopicReported(topic_id: String, report: TopicReport)
 }
+
+type Observer(model, message) =
+  fn(ServerEvent(model, message), Server(model, message)) -> Nil
 
 type ServerHandle(model, message) =
-  Cell(ServerState(model, message), InternalEvent(model, message), ServerReply)
-
-/// Every synchronous answer the server actor can give.
-type ServerReply {
-  CountReply(Int)
-  StringReply(String)
-  RegisterReply(Result(Nil, Nil))
-  WatchedReply(Option(actor_cell.Watched))
-}
+  Cell(ServerState(model, message), InternalEvent(message), Option(Inspection))
 
 type ServerState(model, message) {
   ServerState(
-    initial_model: model,
+    // the running server itself, handed to observers
+    server: Server(model, message),
+    supervisor: actor.Supervisor,
     serialiser: Serialiser(model, message),
-    session_apply: Option(fn(model, message) -> model),
-    clients: Dict(String, fn(BitArray) -> Nil),
-    client_topics: Dict(String, Set(String)),
-    sessions: Dict(String, ConnectionState(model, message)),
-    topics: Dict(String, ServerTopicEntry(model, message)),
-    topic_kinds: List(TopicKindEntry(model, message)),
-    on_connect_hook: fn(String) -> Nil,
-    on_disconnect_hook: fn(String) -> Nil,
-    on_message_hook: fn(message, model, String) -> Nil,
-    on_topic_message_hook: fn(message, String, String) -> Nil,
-    max_topics: Int,
-    restarts: Dict(String, Int),
+    // what a client is written in until it has spoken
+    format: Format,
+    store: Store(model, message, Synced),
+    observers: List(Observer(model, message)),
+    topic_inits: List(#(String, fn(String) -> model)),
+    clients: Dict(String, Client(model)),
+    topics: Dict(String, TopicEntry(model, message)),
     boot_id: String,
-    // Clients whose send closure raised during this reduction.
-    //
-    // Swept at the end of it rather than mid-handler, so one dead connection
-    // needn't be threaded back through every call site that writes to one.
+    // clients whose send raised this reduction, swept at the end so dead
+    // connections needn't be threaded through every writer
     failed_sends: Set(String),
   )
 }
 
-type TopicKindEntry(model, message) {
-  TopicKindEntry(
-    prefix: String,
-    create: fn(String) -> Option(ServerTopicEntry(model, message)),
+type Source {
+  /// A client, answered with an `Acknowledge`
+  FromClient
+  /// The server, answered with a `SessionUpdate` carrying the message
+  FromServer
+}
+
+type Subscriber {
+  Subscriber(send: fn(BitArray) -> Nil, format: Format)
+}
+
+type Subscription {
+  /// Asked for, not yet admitted by the topic
+  Pending
+  /// Admitted
+  Joined
+}
+
+type TopicActor(model, message) =
+  Cell(TopicState(model, message), TopicEvent(message), Int)
+
+// restart count lives here so a stopped topic restarts with a full budget
+type TopicEntry(model, message) {
+  TopicEntry(actor: TopicActor(model, message), restarts: Int)
+}
+
+type TopicEvent(message) {
+  TopicDispatch(from: Option(String), message: message)
+  TopicLoad
+  TopicSendSnapshot(client_id: String, subscriber: Subscriber)
+  TopicStop
+  TopicSubscribe(client_id: String, subscriber: Subscriber, report: Bool)
+  TopicSubscriberCount
+  TopicUnsubscribe(client_id: String)
+}
+
+type TopicReport {
+  /// The topic admitted this client
+  Admitted(client_id: String)
+  /// The topic's own loader crashed, leaving it on the initial model
+  LoadFailed(reason: String)
+}
+
+type TopicState(model, message) {
+  TopicState(
+    id: String,
+    serialiser: Serialiser(model, message),
+    update: fn(model, message) -> model,
+    load: Option(fn(String) -> model),
+    report: fn(TopicReport) -> Nil,
+    subscribers: Dict(String, Subscriber),
+    current: model,
+    sequence: Int,
   )
 }
 
@@ -1086,692 +798,551 @@ type TopicKindEntry(model, message) {
 // PRIVATE FUNCTIONS
 // =============================================================================
 
-// Random bytes behind a client ID, so 32 hex characters. Wide enough that two
-// connections never collide.
 const client_id_bytes = 16
 
-// Default cap on live topic actors, overridable with `server.max_topics`.
-const default_max_topics = 100_000
+// topic ids come from clients, caps unbounded topic creation
+const max_topics = 100_000
 
-// How many times one topic id may be respawned before the server gives up on
-// it. A topic that crashes inside its own `on_subscribe` would otherwise
-// restart in a tight loop, the whole subscriber list re-attaching each time.
-//
-// Per topic id and per registration, not a sliding window.
+// stops a topic that crashes on start restarting in a tight loop
 const max_topic_restarts = 5
 
-// Ceiling in milliseconds on waiting for a supervised server to report itself
-// back to `start_supervised`.
 @target(erlang)
 const start_timeout_milliseconds = 5000
 
-// Client ids and topic ids share one watch key namespace, so topic keys carry
-// a prefix.
-//
-// A client id is exactly 32 hex characters and ':' isn't a hex character, so
-// the two can never collide however a topic is named.
+// shares a namespace with client ids, ':' isn't hex so no collision
 const topic_watch_prefix = "topic:"
 
-/// Apply `message` to a connection's model under crash isolation, returning
-/// the new model or the crash reason.
-fn apply_session(
-  state: ServerState(model, message),
-  connection: ConnectionState(model, message),
-  message: message,
-) -> Result(model, String) {
-  case state.session_apply {
-    option.None -> Ok(connection.model)
-    option.Some(apply) -> rescue(fn() { apply(connection.model, message) })
-  }
-}
-
-/// `no-store` unless the name carries a content hash, which is what makes a
-/// URL unique to its bytes and so safe to keep forever.
-fn asset_cache_control(name: String) -> String {
-  case asset_hash(name) {
-    Ok(_) -> "public, max-age=31536000, immutable"
-    Error(Nil) -> "no-store"
-  }
-}
-
-/// The media type for a requested asset name.
-///
-/// Falls back to a generic binary type rather than refusing to serve something
-/// the table hasn't met yet.
-fn asset_content_type(name: String) -> String {
-  case asset_extension(name) {
-    "css" -> "text/css; charset=utf-8"
-    "js" | "mjs" -> "text/javascript; charset=utf-8"
-    "woff2" -> "font/woff2"
-    "json" -> "application/json; charset=utf-8"
-    "svg" -> "image/svg+xml"
-    _ -> "application/octet-stream"
-  }
-}
-
-/// The precompressed sibling to send, and the encoding to declare for it.
-///
-/// Brotli is tried first, being the smaller of the two.
-fn asset_encoding(
-  path: String,
-  accepting: String,
-  exists: fn(String) -> Bool,
-) -> #(String, Option(String)) {
-  let taken =
-    [#(".br", "br"), #(".gz", "gzip")]
-    |> list.filter(fn(candidate) { encoding_accepted(accepting, candidate.1) })
-    |> list.filter(fn(candidate) { exists(path <> candidate.0) })
-
-  case taken {
-    [#(suffix, encoding), ..] -> #(path <> suffix, option.Some(encoding))
-    [] -> #(path, option.None)
-  }
-}
-
-fn asset_extension(name: String) -> String {
-  case list.reverse(string.split(name, on: ".")) {
-    [last, _, ..] -> last
-    _ -> ""
-  }
-}
-
-/// The content hash out of a `name.<8 lowercase hex>.extension` filename.
-fn asset_hash(name: String) -> Result(String, Nil) {
-  case list.reverse(string.split(name, on: ".")) {
-    [_extension, hash, _stem, ..] ->
-      case
-        string.length(hash) == 8
-        && list.all(string.to_graphemes(hash), fn(character) {
-          string.contains(does: "0123456789abcdef", contain: character)
-        })
-      {
-        True -> Ok(hash)
-        False -> Error(Nil)
-      }
-    _ -> Error(Nil)
-  }
-}
-
-/// Assets are a flat directory of generated names, so anything carrying a path
-/// separator or a parent reference didn't come from a build.
-///
-/// Refused before it can reach the filesystem.
-fn asset_name_is_safe(name: String) -> Bool {
-  name != ""
-  && !string.contains(name, "..")
-  && !string.contains(name, "/")
-  && !string.contains(name, "\\")
-}
-
-/// Whether an `accept-encoding` value offers `token`.
-///
-/// A `q=0` parameter is a refusal, so an encoding listed only to reject it
-/// isn't offered.
-fn encoding_accepted(accepting: String, token: String) -> Bool {
-  string.split(accepting, on: ",")
-  |> list.map(string.trim)
-  |> list.any(fn(entry) {
-    case string.split_once(entry, on: ";") {
-      Ok(#(name, parameters)) ->
-        string.trim(name) == token && !string.contains(parameters, "q=0")
-      Error(Nil) -> entry == token
-    }
-  })
-}
-
-/// Cast an event at the server actor.
-///
-/// A supervised server's name is briefly unregistered while it restarts, and
-/// `process.send` to an unregistered name raises rather than dropping the
-/// message. This runs in the transport's own process, so an unguarded cast
-/// would take a caller's socket down with the server.
-fn cast(
-  server: Server(model, message),
-  event: InternalEvent(model, message),
-) -> Nil {
-  rescue_or("cast", Nil, fn() { actor_cell.send(server.handle, event) })
-}
-
-/// Bump a client's session sequence and store the new model against it.
-fn commit_session(
+fn admit(
   state: ServerState(model, message),
   client_id: String,
-  new_model: model,
-  new_sequence: Int,
-) -> ServerState(model, message) {
-  let sessions =
-    dict.insert(
-      state.sessions,
-      client_id,
-      ConnectionState(model: new_model, sequence: new_sequence),
-    )
-  ServerState(..state, sessions:)
+  session: model,
+  topic_id: String,
+) -> Result(#(ServerState(model, message), TopicActor(model, message)), String) {
+  use access <- result.try(
+    store.access_for(state.store, topic_id) |> result.replace_error("not found"),
+  )
+  use <- bool.guard(
+    when: !permitted(access, client_id, topic_id, session),
+    return: Error("denied"),
+  )
+  find_or_start_topic(state, topic_id) |> result.replace_error("not found")
 }
 
-fn find_or_create_topic(
+fn apply_to_session(
   state: ServerState(model, message),
-  topic_id: String,
-) -> #(ServerState(model, message), Option(ServerTopicEntry(model, message))) {
-  case dict.get(state.topics, topic_id) {
-    Ok(entry) -> #(state, option.Some(entry))
-    // Parametric ids come from the client, so refuse past the cap to stop one
-    // client spawning topics without bound.
-    Error(_) ->
-      case dict.size(state.topics) >= state.max_topics {
-        True -> #(state, option.None)
-        False -> {
-          let kind =
-            list.find(state.topic_kinds, fn(k) {
-              string.starts_with(topic_id, k.prefix)
-            })
-          case kind {
-            Error(_) -> #(state, option.None)
-            Ok(k) ->
-              // Any client reaches this by subscribing to an id under the
-              // prefix, so the user's `configure` runs on demand and a crash
-              // in it has to deny the subscribe rather than take down the
-              // actor every other client shares.
-              case
-                rescue_or("topic create", option.None, fn() {
-                  k.create(topic_id)
-                })
-              {
-                option.None -> #(state, option.None)
-                option.Some(entry) -> {
-                  let topics = dict.insert(state.topics, topic_id, entry)
-                  #(ServerState(..state, topics:), option.Some(entry))
-                }
-              }
+  client_id: String,
+  message: message,
+  source: Source,
+) -> ServerState(model, message) {
+  case dict.get(state.clients, client_id) {
+    Error(_) -> state
+    Ok(client) -> {
+      let update = store.update_function(state.store)
+      case actor.rescue(fn() { update(client.model, message) }) {
+        // crash means a hostile frame or bad dispatch, drop to keep the actor
+        Error(reason) -> {
+          let what = case source {
+            FromClient -> "dropped malformed session message from "
+            FromServer -> "dropped crashing dispatch to "
+          }
+          diagnose(
+            state,
+            transport.Warning,
+            what <> client_id <> ": " <> reason,
+          )
+          state
+        }
+        Ok(model) -> {
+          let sequence = client.sequence + 1
+          let state =
+            put_client(state, client_id, Client(..client, model:, sequence:))
+          case source {
+            FromClient -> {
+              let state =
+                push(
+                  state,
+                  client_id,
+                  client,
+                  transport.Acknowledge(target: transport.Session, sequence:),
+                )
+              notify(state, SessionMessageApplied(client_id:, message:, model:))
+              state
+            }
+            FromServer ->
+              push(
+                state,
+                client_id,
+                client,
+                transport.SessionUpdate(sequence:, payload: message),
+              )
           }
         }
       }
+    }
   }
 }
 
-/// Drop a topic the server has given up on, and every client's memory of it.
+// rescued, a restarting server's name is briefly unregistered
+fn cast(server: Server(model, message), event: InternalEvent(message)) -> Nil {
+  actor.rescue_or("cast", Nil, fn() { actor.send(server.handle, event) })
+}
+
+fn diagnose(
+  state: ServerState(model, message),
+  level: transport.Level,
+  description: String,
+) -> Nil {
+  actor.log(level, "lily: " <> description)
+  notify(state, Diagnostic(level:, message: description))
+}
+
+fn drop_failed_sends(
+  state: ServerState(model, message),
+) -> ServerState(model, message) {
+  use <- bool.guard(when: set.is_empty(state.failed_sends), return: state)
+  let failed = state.failed_sends
+  set.fold(
+    failed,
+    ServerState(..state, failed_sends: set.new()),
+    handle_disconnect,
+  )
+}
+
+fn drop_misrouted(
+  state: ServerState(model, message),
+  client_id: String,
+  what: String,
+) -> ServerState(model, message) {
+  diagnose(
+    state,
+    transport.Warning,
+    "dropped "
+      <> what
+      <> " from "
+      <> client_id
+      <> " that the store routes elsewhere",
+  )
+  state
+}
+
+fn drop_topic(
+  state: ServerState(model, message),
+  topic_id: String,
+) -> ServerState(model, message) {
+  let clients =
+    dict.map_values(state.clients, fn(_client_id, client) {
+      Client(..client, topics: dict.delete(client.topics, topic_id))
+    })
+  ServerState(..state, clients:, topics: dict.delete(state.topics, topic_id))
+}
+
+fn find_or_start_topic(
+  state: ServerState(model, message),
+  topic_id: String,
+) -> Result(#(ServerState(model, message), TopicActor(model, message)), Nil) {
+  case dict.get(state.topics, topic_id) {
+    Ok(entry) -> Ok(#(state, entry.actor))
+    Error(_) -> {
+      use <- bool.guard(
+        when: result.is_error(store.access_for(state.store, topic_id))
+          || dict.size(state.topics) >= max_topics,
+        return: Error(Nil),
+      )
+      case start_topic(state, topic_id) {
+        Error(Nil) -> {
+          diagnose(
+            state,
+            transport.Failure,
+            "could not start topic " <> topic_id,
+          )
+          Error(Nil)
+        }
+        Ok(topic) -> {
+          let entry = TopicEntry(actor: topic, restarts: 0)
+          let topics = dict.insert(state.topics, topic_id, entry)
+          Ok(#(ServerState(..state, topics:), topic))
+        }
+      }
+    }
+  }
+}
+
 fn forget_topic(
   state: ServerState(model, message),
   id: String,
+  why: String,
 ) -> ServerState(model, message) {
-  logging.log(logging.Error, "lily: topic actor died, deregistered: " <> id)
-  let topics = dict.delete(state.topics, id)
-  let client_topics =
-    dict.map_values(state.client_topics, fn(_client_id, subscribed) {
-      set.delete(subscribed, id)
-    })
-  ServerState(..state, topics:, client_topics:)
+  diagnose(state, transport.Failure, "gave up on topic " <> id <> ", " <> why)
+  drop_topic(state, id)
 }
 
-fn handle_connect_logic(
+// undoes a subscription cancelled before the topic admitted it
+fn handle_admitted(
+  state: ServerState(model, message),
+  client_id: String,
+  topic_id: String,
+) -> ServerState(model, message) {
+  let subscription =
+    dict.get(state.clients, client_id)
+    |> result.try(fn(client) { dict.get(client.topics, topic_id) })
+  case subscription {
+    Ok(Pending) -> {
+      let state = set_subscription(state, client_id, topic_id, Joined)
+      notify(state, Subscribed(client_id:, topic_id:))
+      state
+    }
+    Ok(Joined) -> state
+    Error(_) -> {
+      with_topic(state, topic_id, actor.send(_, TopicUnsubscribe(client_id:)))
+      state
+    }
+  }
+}
+
+fn handle_connect(
   state: ServerState(model, message),
   client_id: String,
   send: fn(BitArray) -> Nil,
   session: List(message),
 ) -> ServerState(model, message) {
-  let clients = dict.insert(state.clients, client_id, send)
-  let connection = ConnectionState(model: state.initial_model, sequence: 0)
-  let sessions = dict.insert(state.sessions, client_id, connection)
-  let state = ServerState(..state, clients:, sessions:)
+  // keep a re-registered client's topics so leaving still unsubscribes
+  let topics = case dict.get(state.clients, client_id) {
+    Ok(existing) -> existing.topics
+    Error(_) -> dict.new()
+  }
+  let model = store.get_model(state.store)
+  let client = Client(send:, model:, sequence: 0, topics:, format: option.None)
   let state =
-    push(state, client_id, send, transport.Version(hash: state.boot_id))
-  let state = push(state, client_id, send, transport.Connected(client_id:))
-  // Seeds are applied inside the actor, so they land before any inbound frame
-  // from this client can be processed.
+    put_client(state, client_id, client)
+    |> push(client_id, client, transport.Version(hash: state.boot_id))
+    |> push(client_id, client, transport.Connected(client_id:))
+  // seeds applied in the actor land before this client's first frame
   let state =
-    list.fold(session, state, fn(acc, message) {
-      handle_dispatch_to_logic(acc, client_id, message)
+    list.fold(session, state, fn(state, message) {
+      apply_to_session(state, client_id, message, FromServer)
     })
-  rescue_or("on_connect", Nil, fn() { state.on_connect_hook(client_id) })
+  notify(state, ClientConnected(client_id:))
   state
 }
 
-fn handle_disconnect_logic(
+fn handle_disconnect(
   state: ServerState(model, message),
   client_id: String,
 ) -> ServerState(model, message) {
-  // A close callback and a dead connection process can both land, so the hook
-  // must only fire for a client that is still registered.
-  use <- bool.guard(
-    when: !dict.has_key(state.clients, client_id),
-    return: state,
-  )
-  let subscribed =
-    dict.get(state.client_topics, client_id) |> result.unwrap(set.new())
-  set.each(subscribed, fn(topic_id) {
-    case dict.get(state.topics, topic_id) {
-      Ok(entry) -> entry.unsubscribe(client_id)
-      Error(_) -> Nil
+  // close callback and dead process can both land, report only once
+  case dict.get(state.clients, client_id) {
+    Error(_) -> state
+    Ok(client) -> {
+      dict.each(client.topics, fn(topic_id, subscription) {
+        with_topic(state, topic_id, actor.send(_, TopicUnsubscribe(client_id:)))
+        case subscription {
+          Joined -> notify(state, Unsubscribed(client_id:, topic_id:))
+          Pending -> Nil
+        }
+      })
+      let state =
+        ServerState(..state, clients: dict.delete(state.clients, client_id))
+      notify(state, ClientDisconnected(client_id:))
+      state
     }
-  })
-  let clients = dict.delete(state.clients, client_id)
-  let client_topics = dict.delete(state.client_topics, client_id)
-  let sessions = dict.delete(state.sessions, client_id)
-  rescue_or("on_disconnect", Nil, fn() { state.on_disconnect_hook(client_id) })
-  ServerState(..state, clients:, client_topics:, sessions:)
-}
-
-fn handle_dispatch_to_all_logic(
-  state: ServerState(model, message),
-  message: message,
-) -> ServerState(model, message) {
-  dict.fold(state.clients, state, fn(acc, client_id, _send) {
-    handle_dispatch_to_logic(acc, client_id, message)
-  })
-}
-
-fn handle_dispatch_to_logic(
-  state: ServerState(model, message),
-  client_id: String,
-  message: message,
-) -> ServerState(model, message) {
-  case dict.get(state.sessions, client_id), dict.get(state.clients, client_id) {
-    Ok(connection), Ok(send) ->
-      case apply_session(state, connection, message) {
-        // A crashing update must not take down the shared actor and every
-        // connection on it, so drop this dispatch without sending an update.
-        Error(reason) -> {
-          logging.log(
-            logging.Warning,
-            "lily: dropped crashing dispatch to " <> client_id <> ": " <> reason,
-          )
-          state
-        }
-        Ok(new_model) -> {
-          let new_sequence = connection.sequence + 1
-          let state =
-            push(
-              state,
-              client_id,
-              send,
-              transport.SessionUpdate(sequence: new_sequence, payload: message),
-            )
-          commit_session(state, client_id, new_model, new_sequence)
-        }
-      }
-    _, _ -> state
   }
 }
 
-fn handle_do_subscribe_logic(
+fn handle_dispatch_topic(
   state: ServerState(model, message),
-  client_id: String,
   topic_id: String,
+  message: message,
 ) -> ServerState(model, message) {
-  case
-    dict.get(state.clients, client_id),
-    dict.get(state.topics, topic_id),
-    dict.get(state.sessions, client_id)
-  {
-    // server-initiated, so it takes the trusted path and skips `can_subscribe`
-    Ok(send), Ok(entry), Ok(connection) -> {
-      entry.subscribe_trusted(client_id, connection.model, send)
-      track_subscription(state, client_id, topic_id)
+  case find_or_start_topic(state, topic_id) {
+    Ok(#(state, topic)) -> {
+      actor.send(topic, TopicDispatch(from: option.None, message:))
+      state
     }
-    _, _, _ -> state
+    Error(Nil) -> {
+      diagnose(
+        state,
+        transport.Warning,
+        "dropped a dispatch to " <> topic_id <> ", no topic is declared for it",
+      )
+      state
+    }
   }
 }
 
-fn handle_incoming_logic(
+fn handle_incoming(
   state: ServerState(model, message),
   client_id: String,
   bytes: BitArray,
 ) -> ServerState(model, message) {
-  // The user's decoder runs on bytes a hostile client chose, so a crash in it
-  // has to be worth as much as a frame that fails to decode.
+  // user decoder on hostile bytes, a crash counts as a decode failure
   let decoded =
-    rescue_or("decode", Error(Nil), fn() {
+    actor.rescue_or("decode", Error(Nil), fn() {
       transport.decode(bytes, serialiser: state.serialiser)
     })
+  let state = case decoded {
+    Ok(_) -> learn_format(state, client_id, bytes)
+    Error(_) -> state
+  }
   case decoded {
     Ok(transport.SessionMessage(payload:)) ->
-      handle_session_message_logic(state, client_id, payload)
+      case store.route(state.store, payload) {
+        store.Session -> apply_to_session(state, client_id, payload, FromClient)
+        store.Topic(_) | store.Local ->
+          drop_misrouted(state, client_id, "a session message")
+      }
 
     Ok(transport.TopicMessage(topic_id:, payload:)) ->
-      handle_topic_message_logic(state, client_id, topic_id, payload)
+      handle_topic_message(state, client_id, topic_id, payload)
 
     Ok(transport.Subscribe(topic_id:)) ->
-      handle_subscribe_logic(state, client_id, topic_id)
+      handle_subscribe(state, client_id, topic_id)
 
     Ok(transport.Unsubscribe(topic_id:)) ->
-      handle_unsubscribe_logic(state, client_id, topic_id)
+      handle_unsubscribe(state, client_id, topic_id)
 
     Ok(transport.Resync(cursors:)) ->
-      handle_resync_logic(state, client_id, cursors)
+      list.fold(cursors, state, fn(state, target) {
+        handle_resync(state, client_id, target)
+      })
 
     // server-to-client variants, never legitimately arrive here
     Ok(transport.Acknowledge(_, _))
     | Ok(transport.Connected(_))
-    | Ok(transport.Push(_, _))
     | Ok(transport.Rejected(_, _))
     | Ok(transport.SessionUpdate(_, _))
     | Ok(transport.Snapshot(_, _, _))
     | Ok(transport.TopicUpdate(_, _, _))
     | Ok(transport.Version(_)) -> state
 
-    Error(_) -> state
-  }
-}
-
-fn handle_register_kind_logic(
-  state: ServerState(model, message),
-  prefix: String,
-  create: fn(String) -> Option(ServerTopicEntry(model, message)),
-) -> #(ServerState(model, message), Result(Nil, Nil)) {
-  let topic_collision =
-    list.any(dict.keys(state.topics), string.starts_with(_, prefix))
-  let kind_collision = list.any(state.topic_kinds, fn(k) { k.prefix == prefix })
-  case topic_collision || kind_collision {
-    True -> #(state, Error(Nil))
-    False -> {
-      let kind = TopicKindEntry(prefix:, create:)
-      let topic_kinds = [kind, ..state.topic_kinds]
-      #(ServerState(..state, topic_kinds:), Ok(Nil))
+    Error(_) -> {
+      diagnose(
+        state,
+        transport.Warning,
+        "dropped a frame from " <> client_id <> " that failed to decode",
+      )
+      state
     }
   }
 }
 
-fn handle_register_topic_logic(
-  state: ServerState(model, message),
-  id: String,
-  entry: ServerTopicEntry(model, message),
-) -> #(ServerState(model, message), Result(Nil, Nil)) {
-  let already_exists = dict.has_key(state.topics, id)
-  // Both directions matter, `id="room:1"` collides with kind prefix
-  // `"room:"`, and a fixed `id="room"` would shadow that prefix.
-  let kind_collision =
-    list.any(state.topic_kinds, fn(kind) {
-      string.starts_with(id, kind.prefix) || string.starts_with(kind.prefix, id)
-    })
-  case already_exists || kind_collision {
-    True -> #(state, Error(Nil))
-    False -> {
-      let topics = dict.insert(state.topics, id, entry)
-      // A fresh registration is a fresh life, so the restart budget resets.
-      let restarts = dict.delete(state.restarts, id)
-      #(ServerState(..state, topics:, restarts:), Ok(Nil))
-    }
-  }
-}
-
-fn handle_resync_logic(
+// reconnect has a fresh id and `send`, meaning a rejoin, not a re-snapshot
+fn handle_resync(
   state: ServerState(model, message),
   client_id: String,
-  cursors: List(transport.Target),
+  target: transport.Target,
 ) -> ServerState(model, message) {
-  case dict.get(state.clients, client_id) {
-    Error(_) -> state
-    Ok(send) ->
-      list.fold(cursors, state, fn(state, target) {
-        case target {
-          transport.Session ->
-            case dict.get(state.sessions, client_id) {
-              Error(_) -> state
-              Ok(connection) ->
-                push(
-                  state,
-                  client_id,
-                  send,
-                  transport.Snapshot(
-                    target: transport.Session,
-                    sequence: connection.sequence,
-                    state: connection.model,
-                  ),
-                )
-            }
-
-          transport.Topic(id) ->
-            case dict.get(state.topics, id) {
-              Error(_) -> state
-              Ok(entry) ->
-                resubscribe_after_resync(state, client_id, id, entry, send)
-            }
-        }
-      })
-  }
-}
-
-fn handle_session_message_logic(
-  state: ServerState(model, message),
-  client_id: String,
-  message: message,
-) -> ServerState(model, message) {
-  case dict.get(state.sessions, client_id) {
-    Error(_) -> state
-    Ok(connection) ->
-      case apply_session(state, connection, message) {
-        // A crash means the frame decoded to a value update can't match, so
-        // drop it without acking to keep the actor alive.
-        Error(reason) -> {
-          logging.log(
-            logging.Warning,
-            "lily: dropped malformed session message from "
-              <> client_id
-              <> ": "
-              <> reason,
+  case dict.get(state.clients, client_id), target {
+    Error(_), _ -> state
+    Ok(client), transport.Session ->
+      push(
+        state,
+        client_id,
+        client,
+        transport.Snapshot(
+          target: transport.Session,
+          sequence: client.sequence,
+          state: client.model,
+        ),
+      )
+    Ok(client), transport.Topic(topic_id) ->
+      case dict.get(client.topics, topic_id), dict.get(state.topics, topic_id) {
+        Ok(Joined), Ok(entry) -> {
+          actor.send(
+            entry.actor,
+            TopicSendSnapshot(
+              client_id:,
+              subscriber: subscriber_of(state, client),
+            ),
           )
           state
         }
-        Ok(new_model) -> {
-          let new_sequence = connection.sequence + 1
-          let state = case dict.get(state.clients, client_id) {
-            Error(_) -> state
-            Ok(send) ->
-              push(
-                state,
-                client_id,
-                send,
-                transport.Acknowledge(
-                  target: transport.Session,
-                  sequence: new_sequence,
-                ),
-              )
-          }
-          rescue_or("on_message", Nil, fn() {
-            state.on_message_hook(message, new_model, client_id)
-          })
-          commit_session(state, client_id, new_model, new_sequence)
-        }
+        Ok(Joined), Error(_) | Ok(Pending), _ | Error(_), _ ->
+          handle_subscribe(state, client_id, topic_id)
       }
   }
 }
 
-fn handle_set_connect_hook_logic(
+fn handle_stop_topic(
   state: ServerState(model, message),
-  hook: fn(String) -> Nil,
+  topic_id: String,
 ) -> ServerState(model, message) {
-  ServerState(..state, on_connect_hook: hook)
-}
-
-fn handle_set_disconnect_hook_logic(
-  state: ServerState(model, message),
-  hook: fn(String) -> Nil,
-) -> ServerState(model, message) {
-  ServerState(..state, on_disconnect_hook: hook)
-}
-
-fn handle_set_hook_logic(
-  state: ServerState(model, message),
-  hook: fn(message, model, String) -> Nil,
-) -> ServerState(model, message) {
-  ServerState(..state, on_message_hook: hook)
-}
-
-fn handle_set_max_topics_logic(
-  state: ServerState(model, message),
-  maximum: Int,
-) -> ServerState(model, message) {
-  ServerState(..state, max_topics: maximum)
-}
-
-fn handle_set_topic_message_hook_logic(
-  state: ServerState(model, message),
-  hook: fn(message, String, String) -> Nil,
-) -> ServerState(model, message) {
-  ServerState(..state, on_topic_message_hook: hook)
-}
-
-fn handle_set_topic_respawn_logic(
-  state: ServerState(model, message),
-  id: String,
-  respawn: fn() -> Option(ServerTopicEntry(model, message)),
-) -> ServerState(model, message) {
-  case dict.get(state.topics, id) {
+  case dict.get(state.topics, topic_id) {
     Error(_) -> state
     Ok(entry) -> {
-      let topics =
-        dict.insert(state.topics, id, ServerTopicEntry(..entry, respawn:))
-      ServerState(..state, topics:)
+      actor.send(entry.actor, TopicStop)
+      drop_topic(state, topic_id)
     }
   }
 }
 
-/// Stop every topic actor before the server goes away, each sending a final
-/// `Acknowledge(Topic(id), seq)` to its subscribers.
-fn handle_stop_logic(state: ServerState(model, message)) -> Nil {
-  dict.each(state.topics, fn(_id, entry) { entry.stop() })
-}
-
-fn handle_subscribe_logic(
+fn handle_subscribe(
   state: ServerState(model, message),
   client_id: String,
   topic_id: String,
 ) -> ServerState(model, message) {
-  case dict.get(state.clients, client_id), dict.get(state.sessions, client_id) {
-    // No session means no connection context to authorise against, so skip
-    // rather than crash.
-    Error(_), _ | _, Error(_) -> state
-    Ok(send), Ok(connection) ->
-      case find_or_create_topic(state, topic_id) {
-        #(state, option.Some(entry)) -> {
-          entry.subscribe(client_id, connection.model, send)
-          track_subscription(state, client_id, topic_id)
+  case dict.get(state.clients, client_id) {
+    Error(_) -> state
+    Ok(client) ->
+      case admit(state, client_id, client.model, topic_id) {
+        Error(reason) -> {
+          let state =
+            push(
+              state,
+              client_id,
+              client,
+              transport.Rejected(topic_id:, reason:),
+            )
+          notify(state, SubscriptionRejected(client_id:, topic_id:, reason:))
+          state
         }
-        #(state, option.None) ->
-          push(
-            state,
-            client_id,
-            send,
-            transport.Rejected(topic_id:, reason: "not found"),
+        Ok(#(state, topic)) -> {
+          actor.send(
+            topic,
+            TopicSubscribe(
+              client_id:,
+              subscriber: subscriber_of(state, client),
+              report: True,
+            ),
           )
+          // already admitted, the topic won't report it twice
+          case dict.has_key(client.topics, topic_id) {
+            True -> state
+            False -> set_subscription(state, client_id, topic_id, Pending)
+          }
+        }
       }
   }
 }
 
-/// Handle a topic whose actor died, respawning it on a fresh process and
-/// re-attaching every client the server had already authorised.
-///
-/// Forgotten instead if it has crashed too often or can't be rebuilt.
-///
-/// A respawned topic starts at sequence 0 with the initial model, so
-/// subscribers get a replacing `Snapshot`.
-fn handle_topic_down_logic(
+// gives up after `max_topic_restarts`
+fn handle_topic_down(
   state: ServerState(model, message),
   id: String,
 ) -> ServerState(model, message) {
   case dict.get(state.topics, id) {
     Error(_) -> state
-    Ok(entry) -> {
-      let attempts = dict.get(state.restarts, id) |> result.unwrap(0)
-      // A respawn runs user configuration, so it can crash in turn, and it
-      // must not take the server with it.
-      let respawned = case attempts >= max_topic_restarts {
-        True -> option.None
-        False ->
-          case rescue(entry.respawn) {
-            Ok(fresh) -> fresh
-            Error(reason) -> {
-              logging.log(
-                logging.Error,
-                "lily: topic respawn crashed on " <> id <> ": " <> reason,
-              )
-              option.None
-            }
-          }
+    Ok(entry) if entry.restarts >= max_topic_restarts ->
+      forget_topic(
+        state,
+        id,
+        "it crashed " <> int.to_string(entry.restarts + 1) <> " times",
+      )
+    Ok(entry) ->
+      case start_topic(state, id) {
+        Error(Nil) -> forget_topic(state, id, "it would not restart")
+        Ok(topic) -> reinstate_topic(state, id, topic, entry.restarts + 1)
       }
-      case respawned {
-        option.None -> forget_topic(state, id)
-        option.Some(fresh) -> reinstate_topic(state, id, fresh, attempts + 1)
-      }
-    }
   }
 }
 
-fn handle_topic_message_logic(
+fn handle_topic_message(
   state: ServerState(model, message),
   client_id: String,
   topic_id: String,
   message: message,
 ) -> ServerState(model, message) {
-  rescue_or("on_topic_message", Nil, fn() {
-    state.on_topic_message_hook(message, topic_id, client_id)
-  })
-  case find_or_create_topic(state, topic_id) {
-    #(state, option.Some(entry)) -> {
-      entry.handle_incoming(client_id, message)
+  case store.route(state.store, message) == store.Topic(topic_id) {
+    False -> drop_misrouted(state, client_id, "a message for " <> topic_id)
+    True -> {
+      notify(state, TopicMessageReceived(client_id:, topic_id:, message:))
+      // unsubscribed, and the topic drops unadmitted senders anyway
+      with_topic(state, topic_id, actor.send(
+        _,
+        TopicDispatch(from: option.Some(client_id), message:),
+      ))
       state
     }
-    #(state, option.None) -> state
   }
 }
 
-fn handle_unregister_topic_logic(
+fn handle_topic_report(
   state: ServerState(model, message),
-  id: String,
+  topic_id: String,
+  report: TopicReport,
 ) -> ServerState(model, message) {
-  let topics = dict.delete(state.topics, id)
-  let restarts = dict.delete(state.restarts, id)
-  ServerState(..state, topics:, restarts:)
+  case report {
+    Admitted(client_id:) -> handle_admitted(state, client_id, topic_id)
+    LoadFailed(reason:) -> {
+      diagnose(
+        state,
+        transport.Failure,
+        "loading topic "
+          <> topic_id
+          <> " crashed, it started from the initial model: "
+          <> reason,
+      )
+      state
+    }
+  }
 }
 
-fn handle_unsubscribe_logic(
+fn handle_unsubscribe(
   state: ServerState(model, message),
   client_id: String,
   topic_id: String,
 ) -> ServerState(model, message) {
-  case dict.get(state.topics, topic_id) {
-    Ok(entry) -> entry.unsubscribe(client_id)
-    Error(_) -> Nil
+  with_topic(state, topic_id, actor.send(_, TopicUnsubscribe(client_id:)))
+  case dict.get(state.clients, client_id) {
+    Error(_) -> state
+    Ok(client) -> {
+      case dict.get(client.topics, topic_id) {
+        Ok(Joined) -> notify(state, Unsubscribed(client_id:, topic_id:))
+        Ok(Pending) | Error(_) -> Nil
+      }
+      put_client(
+        state,
+        client_id,
+        Client(..client, topics: dict.delete(client.topics, topic_id)),
+      )
+    }
   }
-  untrack_subscription(state, client_id, topic_id)
 }
 
-/// The state a fresh server actor starts from. Shared by the plain and the
-/// supervised start paths, which differ only in how the cell is started.
+fn learn_format(
+  state: ServerState(model, message),
+  client_id: String,
+  bytes: BitArray,
+) -> ServerState(model, message) {
+  case dict.get(state.clients, client_id) {
+    Ok(Client(format: option.None, ..) as client) ->
+      case transport.frame_format(bytes, serialiser: state.serialiser) {
+        Ok(format) ->
+          put_client(
+            state,
+            client_id,
+            Client(..client, format: option.Some(format)),
+          )
+        Error(Nil) -> state
+      }
+    Ok(Client(format: option.Some(_), ..)) | Error(_) -> state
+  }
+}
+
 fn new_state(
-  initial: model,
-  serialiser: Serialiser(model, message),
-  wiring: store.Wiring(model, message),
+  builder: Builder(model, message),
+  toolkit: actor.Toolkit(
+    ServerState(model, message),
+    InternalEvent(message),
+    Option(Inspection),
+  ),
 ) -> ServerState(model, message) {
   ServerState(
-    initial_model: initial,
-    serialiser:,
-    session_apply: store.session_apply(wiring),
+    server: Server(handle: toolkit.cell, origins: builder.origins),
+    supervisor: toolkit.supervisor,
+    serialiser: store.serialiser_of(builder.store),
+    format: transport.server_format(store.serialiser_of(builder.store)),
+    store: builder.store,
+    observers: builder.observers,
+    topic_inits: builder.topic_inits,
     clients: dict.new(),
-    client_topics: dict.new(),
-    sessions: dict.new(),
     topics: dict.new(),
-    topic_kinds: [],
-    on_connect_hook: fn(_) { Nil },
-    on_disconnect_hook: fn(_) { Nil },
-    on_message_hook: fn(_, _, _) { Nil },
-    on_topic_message_hook: fn(_, _, _) { Nil },
-    max_topics: default_max_topics,
-    restarts: dict.new(),
+    // fresh per incarnation, lets a client tell a restart from a reconnect
+    boot_id: random_hex(8),
     failed_sends: set.new(),
-    // Fresh per incarnation, so a restart is distinguishable from a
-    // reconnect by the client that reads it.
-    boot_id: id.random_hex(8),
   )
 }
 
-/// Put an origin into the form used for the allowlist comparison.
-///
-/// Scheme and host are case-insensitive so the whole value is lowercased, and
-/// one trailing '/' is dropped because some clients send
-/// `https://example.com/`.
-///
-/// Nothing else is rewritten, so the literal 'null' origin an opaque or
-/// sandboxed document sends only ever matches an allowlist naming it verbatim.
+// lowercased, one trailing '/' dropped, 'null' only matches if listed
 fn normalise_origin(origin: String) -> String {
   let lowered = string.lowercase(origin)
   case string.ends_with(lowered, "/") {
@@ -1780,51 +1351,53 @@ fn normalise_origin(origin: String) -> String {
   }
 }
 
-/// Turn a dead watched process into the event that cleans up after it.
-///
-/// Topic keys carry `topic_watch_prefix`, anything else is a client id.
-fn on_watch_down(key: String) -> Option(InternalEvent(model, message)) {
+fn notify(
+  state: ServerState(model, message),
+  event: ServerEvent(model, message),
+) -> Nil {
+  list.each(state.observers, fn(observer) {
+    actor.rescue_or("observer", Nil, fn() { observer(event, state.server) })
+  })
+}
+
+fn on_watch_down(key: String) -> Option(InternalEvent(message)) {
   case string.starts_with(key, topic_watch_prefix) {
     True -> {
       let prefix_length = string.length(topic_watch_prefix)
       option.Some(TopicDown(id: string.drop_start(key, prefix_length)))
     }
-    False -> option.Some(ClientDisconnected(client_id: key))
+    False -> option.Some(ClientLeft(client_id: key))
   }
 }
 
-/// Call the server actor, falling back to `default` through a restart window
-/// for the same reason `cast` is guarded.
-fn query(
-  server: Server(model, message),
-  event: InternalEvent(model, message),
-  default: ServerReply,
-) -> ServerReply {
-  rescue_or("call", default, fn() {
-    actor_cell.call(server.handle, event, default:)
-  })
+// fails closed, a crashing access rule refuses
+fn permitted(
+  access: store.Access(model),
+  client_id: String,
+  topic_id: String,
+  session: model,
+) -> Bool {
+  case access {
+    store.Open -> True
+    store.Allow(predicate) ->
+      actor.rescue_or("access", False, fn() {
+        predicate(client_id, topic_id, session)
+      })
+  }
 }
 
-/// Encode `frame` and push it to one client, recording that client for
-/// eviction when its send closure raises.
-///
-/// A crash in the user's serialiser drops the frame and leaves the surrounding
-/// transition alone, since the client can ask for a resync but a commit can't
-/// be taken back.
+// a serialiser crash drops the frame, keeps the connection
 fn push(
   state: ServerState(model, message),
   client_id: String,
-  send: fn(BitArray) -> Nil,
+  client: Client(model),
   frame: transport.Protocol(model, message),
 ) -> ServerState(model, message) {
-  let encoded =
-    rescue_or("encode", option.None, fn() {
-      option.Some(transport.encode(frame, serialiser: state.serialiser))
-    })
-  case encoded {
+  let format = option.unwrap(client.format, state.format)
+  case rescue_encode(frame, state.serialiser, format) {
     option.None -> state
     option.Some(bytes) ->
-      case rescue_send("client", send, bytes) {
+      case actor.rescue_send("client", client.send, bytes) {
         True -> state
         False ->
           ServerState(
@@ -1835,206 +1408,454 @@ fn push(
   }
 }
 
-fn reduce(
-  event: InternalEvent(model, message),
+fn put_client(
   state: ServerState(model, message),
-) -> actor_cell.Outcome(ServerState(model, message), ServerReply) {
-  case reduce_event(event, state) {
+  client_id: String,
+  client: Client(model),
+) -> ServerState(model, message) {
+  ServerState(..state, clients: dict.insert(state.clients, client_id, client))
+}
+
+fn reduce(
+  event: InternalEvent(message),
+  state: ServerState(model, message),
+) -> actor.Outcome(ServerState(model, message), Option(Inspection)) {
+  case event {
+    ClientJoined(client_id:, send:, session:) ->
+      Continue(handle_connect(state, client_id, send, session))
+
+    ClientLeft(client_id:) -> Continue(handle_disconnect(state, client_id))
+
+    DispatchToAllClients(message:) ->
+      dict.fold(state.clients, state, fn(state, client_id, _client) {
+        apply_to_session(state, client_id, message, FromServer)
+      })
+      |> Continue
+
+    DispatchToClient(client_id:, message:) ->
+      Continue(apply_to_session(state, client_id, message, FromServer))
+
+    DispatchTopic(topic_id:, message:) ->
+      Continue(handle_dispatch_topic(state, topic_id, message))
+
+    Incoming(client_id:, bytes:) ->
+      Continue(handle_incoming(state, client_id, bytes))
+
+    Inspect ->
+      Reply(
+        state,
+        option.Some(Inspection(
+          boot_id: state.boot_id,
+          client_count: dict.size(state.clients),
+          topics: dict.map_values(state.topics, fn(_id, entry) {
+            TopicInspection(
+              subscriber_count: fn() {
+                actor.call(entry.actor, TopicSubscriberCount, default: -1)
+              },
+              watched: actor.watched(entry.actor),
+            )
+          }),
+          supervisor: state.supervisor,
+          watched: actor.watched(state.server.handle),
+        )),
+      )
+
+    // topics stop first, each sends a final `Acknowledge(Topic(id), sequence)`
+    Stop -> {
+      dict.each(state.topics, fn(_id, entry) {
+        actor.send(entry.actor, TopicStop)
+      })
+      Halt(state)
+    }
+
+    StopTopic(topic_id:) -> Continue(handle_stop_topic(state, topic_id))
+
+    TopicDown(id:) -> Continue(handle_topic_down(state, id))
+
+    TopicReported(topic_id:, report:) ->
+      Continue(handle_topic_report(state, topic_id, report))
+  }
+  |> sweep_failed_sends
+}
+
+fn register(
+  server: Server(model, message),
+  send send: fn(BitArray) -> Nil,
+  client_id client_id: String,
+  session session: List(message),
+  watch watch: Watch,
+) -> Connection(model, message) {
+  cast(server, ClientJoined(client_id:, send:, session:))
+  // inert on JavaScript, hence the discard
+  let _ = case watch {
+    WatchCaller -> actor.watch(server.handle, client_id, actor.watched_here())
+    Watch(pid) -> actor.watch(server.handle, client_id, actor.watched_from(pid))
+    Unwatched -> Nil
+  }
+  Connection(server:, client_id:)
+}
+
+fn reinstate_topic(
+  state: ServerState(model, message),
+  id: String,
+  topic: TopicActor(model, message),
+  restarts: Int,
+) -> ServerState(model, message) {
+  actor.log(transport.Failure, "lily: topic actor died, restarted: " <> id)
+  dict.each(state.clients, fn(client_id, client) {
+    let subscriber = subscriber_of(state, client)
+    case dict.get(client.topics, id) {
+      Ok(Joined) ->
+        actor.send(
+          topic,
+          TopicSubscribe(client_id:, subscriber:, report: False),
+        )
+      Ok(Pending) ->
+        actor.send(topic, TopicSubscribe(client_id:, subscriber:, report: True))
+      Error(_) -> Nil
+    }
+  })
+  let entry = TopicEntry(actor: topic, restarts:)
+  ServerState(..state, topics: dict.insert(state.topics, id, entry))
+}
+
+fn rescue_encode(
+  frame: transport.Protocol(model, message),
+  serialiser: Serialiser(model, message),
+  format: Format,
+) -> Option(BitArray) {
+  actor.rescue_or("encode", option.None, fn() {
+    option.Some(transport.encode_as(frame, serialiser:, format:))
+  })
+}
+
+fn set_subscription(
+  state: ServerState(model, message),
+  client_id: String,
+  topic_id: String,
+  subscription: Subscription,
+) -> ServerState(model, message) {
+  case dict.get(state.clients, client_id) {
+    Error(_) -> state
+    Ok(client) -> {
+      let topics = dict.insert(client.topics, topic_id, subscription)
+      put_client(state, client_id, Client(..client, topics:))
+    }
+  }
+}
+
+fn start_topic(
+  state: ServerState(model, message),
+  id: String,
+) -> Result(TopicActor(model, message), Nil) {
+  let cell = state.server.handle
+  let load =
+    store.longest_prefix(state.topic_inits, id, pair.first)
+    |> result.map(pair.second)
+    |> option.from_result
+  let topic_state =
+    TopicState(
+      id:,
+      serialiser: state.serialiser,
+      update: store.update_function(state.store),
+      load:,
+      report: fn(report) {
+        actor.send(cell, TopicReported(topic_id: id, report:))
+      },
+      subscribers: dict.new(),
+      current: store.get_model(state.store),
+      sequence: 0,
+    )
+  actor.start_in_supervisor(
+    state.supervisor,
+    fn(toolkit) {
+      case load {
+        option.Some(_) -> actor.send(toolkit.cell, TopicLoad)
+        option.None -> Nil
+      }
+      topic_state
+    },
+    reduce: topic_reduce,
+  )
+  |> result.map(fn(topic) {
+    // inert on JavaScript, hence the discard
+    let _ = actor.watch(cell, topic_watch_prefix <> id, actor.watched(topic))
+    topic
+  })
+}
+
+fn subscriber_of(
+  state: ServerState(model, message),
+  client: Client(model),
+) -> Subscriber {
+  Subscriber(
+    send: client.send,
+    format: option.unwrap(client.format, state.format),
+  )
+}
+
+@target(erlang)
+fn supervised_as(
+  builder: Builder(model, message),
+  name: actor.CellName(InternalEvent(message), Option(Inspection)),
+  started: fn(Server(model, message)) -> Nil,
+) -> supervision.ChildSpecification(Server(model, message)) {
+  supervision.worker(run: fn() {
+    let cell =
+      actor.start_with_supervisor(
+        new_state(builder, _),
+        reduce:,
+        on_down: on_watch_down,
+        name:,
+      )
+    case cell {
+      Error(_) -> Error(otp_actor.InitFailed("lily: server failed to start"))
+      Ok(handle) -> {
+        let server = Server(handle:, origins: builder.origins)
+        started(server)
+        let pid = actor.watched_pid(actor.watched(handle))
+        Ok(otp_actor.Started(pid:, data: server))
+      }
+    }
+  })
+}
+
+// once per reduction, not mid-handler
+fn sweep_failed_sends(
+  outcome: actor.Outcome(ServerState(model, message), Option(Inspection)),
+) -> actor.Outcome(ServerState(model, message), Option(Inspection)) {
+  case outcome {
     Continue(state) -> Continue(drop_failed_sends(state))
     Reply(state, reply) -> Reply(drop_failed_sends(state), reply)
     Halt(state) -> Halt(state)
   }
 }
 
-/// Disconnect every client whose send closure raised during this reduction.
-///
-/// A closure that can't be called is a dead connection, not a bad frame, so
-/// the client goes rather than the frame.
-fn drop_failed_sends(
-  state: ServerState(model, message),
-) -> ServerState(model, message) {
-  use <- bool.guard(when: set.is_empty(state.failed_sends), return: state)
-  let failed = state.failed_sends
-  set.fold(failed, ServerState(..state, failed_sends: set.new()), fn(acc, id) {
-    handle_disconnect_logic(acc, id)
+fn topic_encode_each(
+  state: TopicState(model, message),
+  frame: transport.Protocol(model, message),
+  subscribers: Dict(String, Subscriber),
+) -> List(#(Format, Option(BitArray))) {
+  dict.fold(subscribers, [], fn(formats, _id, subscriber) {
+    case list.contains(formats, subscriber.format) {
+      True -> formats
+      False -> [subscriber.format, ..formats]
+    }
+  })
+  |> list.map(fn(format) {
+    #(format, rescue_encode(frame, state.serialiser, format))
   })
 }
 
-fn reduce_event(
-  event: InternalEvent(model, message),
-  state: ServerState(model, message),
-) -> actor_cell.Outcome(ServerState(model, message), ServerReply) {
-  case event {
-    BootId -> Reply(state, StringReply(state.boot_id))
-
-    ClientCount -> Reply(state, CountReply(dict.size(state.clients)))
-
-    ClientConnected(client_id:, send:, session:) ->
-      Continue(handle_connect_logic(state, client_id, send, session))
-
-    ClientDisconnected(client_id:) ->
-      Continue(handle_disconnect_logic(state, client_id))
-
-    DispatchToClient(client_id:, message:) ->
-      Continue(handle_dispatch_to_logic(state, client_id, message))
-
-    DispatchToAllClients(message:) ->
-      Continue(handle_dispatch_to_all_logic(state, message))
-
-    Incoming(client_id:, bytes:) ->
-      Continue(handle_incoming_logic(state, client_id, bytes))
-
-    SetConnectHook(hook:) ->
-      Continue(handle_set_connect_hook_logic(state, hook))
-
-    SetDisconnectHook(hook:) ->
-      Continue(handle_set_disconnect_hook_logic(state, hook))
-
-    SetHook(hook:) -> Continue(handle_set_hook_logic(state, hook))
-
-    SetMaxTopics(maximum:) ->
-      Continue(handle_set_max_topics_logic(state, maximum))
-
-    SetTopicMessageHook(hook:) ->
-      Continue(handle_set_topic_message_hook_logic(state, hook))
-
-    SetTopicRespawn(id:, respawn:) ->
-      Continue(handle_set_topic_respawn_logic(state, id, respawn))
-
-    RegisterTopic(id:, entry:) -> {
-      let #(new_state, result) = handle_register_topic_logic(state, id, entry)
-      Reply(new_state, RegisterReply(result))
-    }
-
-    RegisterTopicKind(prefix:, create:) -> {
-      let #(new_state, result) =
-        handle_register_kind_logic(state, prefix, create)
-      Reply(new_state, RegisterReply(result))
-    }
-
-    TopicDown(id:) -> Continue(handle_topic_down_logic(state, id))
-
-    TopicWatched(id:) ->
-      Reply(
-        state,
-        WatchedReply(
-          dict.get(state.topics, id)
-          |> result.map(fn(entry) { entry.watched })
-          |> option.from_result,
-        ),
-      )
-
-    UnregisterTopic(id:) -> Continue(handle_unregister_topic_logic(state, id))
-
-    DoSubscribe(client_id:, topic_id:) ->
-      Continue(handle_do_subscribe_logic(state, client_id, topic_id))
-
-    Stop -> {
-      handle_stop_logic(state)
-      Halt(state)
-    }
+fn topic_frame_in(
+  frames: List(#(Format, Option(BitArray))),
+  format: Format,
+) -> Option(BitArray) {
+  case list.key_find(frames, format) {
+    Ok(frame) -> frame
+    Error(Nil) -> option.None
   }
 }
 
-/// Put a respawned topic back in the registry and re-attach every client that
-/// was already subscribed to it.
-///
-/// `rejoin` skips the join hooks, so that a crash doesn't replay
-/// `on_subscribe` for every subscriber.
-fn reinstate_topic(
-  state: ServerState(model, message),
-  id: String,
-  entry: ServerTopicEntry(model, message),
-  attempts: Int,
-) -> ServerState(model, message) {
-  logging.log(logging.Error, "lily: topic actor died, respawned: " <> id)
-  let topics = dict.insert(state.topics, id, entry)
-  let restarts = dict.insert(state.restarts, id, attempts)
-  dict.each(state.client_topics, fn(client_id, subscribed) {
-    case set.contains(subscribed, id), dict.get(state.clients, client_id) {
-      True, Ok(send) -> entry.rejoin(client_id, send)
-      _, _ -> Nil
-    }
-  })
-  ServerState(..state, topics:, restarts:)
-}
-
-/// Re-attach a client to a topic on resync.
-///
-/// A reconnecting client carries a fresh id and a fresh `send`, so a bare
-/// snapshot would leave it holding a topic it never hears from again.
-///
-/// Already-subscribed clients only get the snapshot, so join hooks don't
-/// replay.
-fn resubscribe_after_resync(
-  state: ServerState(model, message),
-  client_id: String,
-  topic_id: String,
-  entry: ServerTopicEntry(model, message),
-  send: fn(BitArray) -> Nil,
-) -> ServerState(model, message) {
-  let subscribed =
-    dict.get(state.client_topics, client_id)
-    |> result.unwrap(set.new())
-    |> set.contains(topic_id)
-  case subscribed, dict.get(state.sessions, client_id) {
-    False, Ok(connection) -> {
-      entry.subscribe_trusted(client_id, connection.model, send)
-      track_subscription(state, client_id, topic_id)
-    }
-    _, _ -> {
-      entry.send_snapshot(send)
+// sender gets the ack, everyone else the update
+fn topic_handle_dispatch(
+  state: TopicState(model, message),
+  from: Option(String),
+  message: message,
+) -> TopicState(model, message) {
+  // clients write only to subscribed topics, server dispatches are trusted
+  let authorised = case from {
+    option.Some(client_id) -> dict.has_key(state.subscribers, client_id)
+    option.None -> True
+  }
+  use <- bool.guard(when: !authorised, return: state)
+  // an unmatched payload crashes, drop the frame not the actor
+  case actor.rescue(fn() { state.update(state.current, message) }) {
+    Error(reason) -> {
+      actor.log(
+        transport.Warning,
+        "lily: dropped malformed topic message on "
+          <> state.id
+          <> ": "
+          <> reason,
+      )
       state
     }
-  }
-}
-
-/// The watch key a topic is registered under.
-fn topic_watch_key(id: String) -> String {
-  topic_watch_prefix <> id
-}
-
-/// Record that `client_id` is subscribed to `topic_id`, so that disconnect
-/// unsubscribes only the topics the client actually joined.
-fn track_subscription(
-  state: ServerState(model, message),
-  client_id: String,
-  topic_id: String,
-) -> ServerState(model, message) {
-  let topics =
-    dict.get(state.client_topics, client_id)
-    |> result.unwrap(set.new())
-    |> set.insert(topic_id)
-  let client_topics = dict.insert(state.client_topics, client_id, topics)
-  ServerState(..state, client_topics:)
-}
-
-fn untrack_subscription(
-  state: ServerState(model, message),
-  client_id: String,
-  topic_id: String,
-) -> ServerState(model, message) {
-  case dict.get(state.client_topics, client_id) {
-    Error(_) -> state
-    Ok(topics) -> {
-      let client_topics =
-        dict.insert(
-          state.client_topics,
-          client_id,
-          set.delete(topics, topic_id),
+    Ok(current) -> {
+      let sequence = state.sequence + 1
+      let #(originator, others) = case from {
+        option.Some(id) -> #(
+          dict.take(state.subscribers, [id]),
+          dict.delete(state.subscribers, id),
         )
-      ServerState(..state, client_topics:)
+        option.None -> #(dict.new(), state.subscribers)
+      }
+      let update =
+        transport.TopicUpdate(topic_id: state.id, sequence:, payload: message)
+      let acknowledge =
+        transport.Acknowledge(target: transport.Topic(state.id), sequence:)
+      // encode only in the recipients' formats, at most two
+      let update_frames = topic_encode_each(state, update, others)
+      let acknowledge_frames = topic_encode_each(state, acknowledge, originator)
+      // sender gets the ack, everyone else the update
+      let subscribers =
+        topic_send_to_subscribers(state.subscribers, fn(id, format) {
+          case from == option.Some(id) {
+            True -> topic_frame_in(acknowledge_frames, format)
+            False -> topic_frame_in(update_frames, format)
+          }
+        })
+      TopicState(..state, current:, sequence:, subscribers:)
     }
   }
 }
 
-/// Run the configured origin policy over a request's `Origin` header.
-///
-/// `AnyOrigin` accepts everything, including a missing header.
-///
-/// An allowlist compares normalised values exactly and refuses a missing
-/// header outright, since a request with no origin can't be attributed to a
-/// page.
+fn topic_handle_load(
+  state: TopicState(model, message),
+) -> TopicState(model, message) {
+  case state.load {
+    option.None -> state
+    option.Some(load) ->
+      case actor.rescue(fn() { load(state.id) }) {
+        Ok(current) -> TopicState(..state, current:)
+        Error(reason) -> {
+          topic_report(state, LoadFailed(reason:))
+          state
+        }
+      }
+  }
+}
+
+fn topic_handle_send_snapshot(
+  state: TopicState(model, message),
+  client_id: String,
+  subscriber: Subscriber,
+) -> TopicState(model, message) {
+  case dict.has_key(state.subscribers, client_id) {
+    True -> topic_send_snapshot(state, subscriber)
+    False -> Nil
+  }
+  state
+}
+
+fn topic_handle_stop(state: TopicState(model, message)) -> Nil {
+  let acknowledge_frames =
+    topic_encode_each(
+      state,
+      transport.Acknowledge(
+        target: transport.Topic(state.id),
+        sequence: state.sequence,
+      ),
+      state.subscribers,
+    )
+  let _ =
+    topic_send_to_subscribers(state.subscribers, fn(_, format) {
+      topic_frame_in(acknowledge_frames, format)
+    })
+  Nil
+}
+
+// only the first admission is reported to the server
+fn topic_handle_subscribe(
+  state: TopicState(model, message),
+  client_id: String,
+  subscriber: Subscriber,
+  report_admission: Bool,
+) -> TopicState(model, message) {
+  // asked twice before the first admission settled, already reported
+  let already_in = dict.has_key(state.subscribers, client_id)
+  let state =
+    TopicState(
+      ..state,
+      subscribers: dict.insert(state.subscribers, client_id, subscriber),
+    )
+  topic_send_snapshot(state, subscriber)
+  case report_admission && !already_in {
+    True -> topic_report(state, Admitted(client_id:))
+    False -> Nil
+  }
+  state
+}
+
+fn topic_reduce(
+  event: TopicEvent(message),
+  state: TopicState(model, message),
+) -> actor.Outcome(TopicState(model, message), Int) {
+  case event {
+    TopicDispatch(from:, message:) ->
+      Continue(topic_handle_dispatch(state, from, message))
+
+    TopicLoad -> Continue(topic_handle_load(state))
+
+    TopicSendSnapshot(client_id:, subscriber:) ->
+      Continue(topic_handle_send_snapshot(state, client_id, subscriber))
+
+    TopicStop -> {
+      topic_handle_stop(state)
+      Halt(state)
+    }
+
+    TopicSubscribe(client_id:, subscriber:, report:) ->
+      Continue(topic_handle_subscribe(state, client_id, subscriber, report))
+
+    TopicSubscriberCount -> Reply(state, dict.size(state.subscribers))
+
+    TopicUnsubscribe(client_id:) ->
+      Continue(
+        TopicState(
+          ..state,
+          subscribers: dict.delete(state.subscribers, client_id),
+        ),
+      )
+  }
+}
+
+fn topic_report(state: TopicState(model, message), report: TopicReport) -> Nil {
+  actor.rescue_or("report", Nil, fn() { state.report(report) })
+}
+
+fn topic_send_snapshot(
+  state: TopicState(model, message),
+  subscriber: Subscriber,
+) -> Nil {
+  let frame =
+    rescue_encode(
+      transport.Snapshot(
+        target: transport.Topic(state.id),
+        sequence: state.sequence,
+        state: state.current,
+      ),
+      state.serialiser,
+      subscriber.format,
+    )
+  case frame {
+    option.None -> Nil
+    option.Some(bytes) -> {
+      let _ = actor.rescue_send("subscriber", subscriber.send, bytes)
+      Nil
+    }
+  }
+}
+
+fn topic_send_to_subscribers(
+  subscribers: Dict(String, Subscriber),
+  frame_for: fn(String, Format) -> Option(BitArray),
+) -> Dict(String, Subscriber) {
+  use <- bool.guard(when: dict.is_empty(subscribers), return: subscribers)
+  dict.fold(subscribers, subscribers, fn(kept, id, subscriber) {
+    case frame_for(id, subscriber.format) {
+      option.None -> kept
+      option.Some(bytes) ->
+        case actor.rescue_send("subscriber", subscriber.send, bytes) {
+          True -> kept
+          // a raising send is a dead connection, drop only that subscriber
+          False -> dict.delete(kept, id)
+        }
+    }
+  })
+}
+
+// missing header, `AnyOrigin` accepts, an allowlist refuses
 fn validate_origin(
   origins: Origins,
   origin: Option(String),
@@ -2052,15 +1873,21 @@ fn validate_origin(
   }
 }
 
+fn with_topic(
+  state: ServerState(model, message),
+  topic_id: String,
+  apply: fn(TopicActor(model, message)) -> Nil,
+) -> Nil {
+  case dict.get(state.topics, topic_id) {
+    Ok(entry) -> apply(entry.actor)
+    Error(_) -> Nil
+  }
+}
+
 // =============================================================================
 // PRIVATE FFI
 // =============================================================================
 
-/// Run `operation`, turning a runtime crash into `Error(description)`. Types
-/// are erased on Erlang, so a hostile frame can decode to a value update can't
-/// match. Catching it keeps one bad frame from dropping the shared actor and
-/// every connection on it.
-@external(erlang, "lily_server_ffi", "rescue")
-@external(javascript, "./server.ffi.mjs", "rescue")
-@internal
-pub fn rescue(operation: fn() -> value) -> Result(value, String)
+@external(erlang, "lily_server_ffi", "random_hex")
+@external(javascript, "./server.ffi.mjs", "randomHex")
+fn random_hex(byte_count: Int) -> String

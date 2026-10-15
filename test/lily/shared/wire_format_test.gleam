@@ -1,20 +1,22 @@
-// Wire-format snapshot tests for the MessagePack auto-serialiser. Encoded
-// byte sequences are pinned here so any change to the codec (Erlang FFI, JS
-// FFI, or a future pure-Gleam implementation) that produces non-identical
-// output is caught immediately.
-//
-// The tests run on both targets, so any cross-target divergence also fails.
+// pinned MessagePack bytes for the auto-serialiser, on both targets
+// every frame must also decode under the other format
+
+// =============================================================================
+// IMPORTS
+// =============================================================================
 
 import gleam/bit_array
 import gleam/dict
+import gleam/list
 import gleam/set
 import gleam/string
 import gleeunit/should
+import lily/store
 import lily/test_support.{
   type Message, type Model, Increment, SetName, WithDict, WithSet, WithTuple,
 }
 import lily/transport.{
-  type Protocol, Acknowledge, Connected, Push, Rejected, Resync, Session,
+  type Protocol, Acknowledge, Connected, Rejected, Resync, Session,
   SessionMessage, SessionUpdate, Snapshot, Subscribe, Topic, TopicMessage,
   TopicUpdate, Unsubscribe, Version,
 }
@@ -23,44 +25,106 @@ import lily/transport.{
 // HELPERS
 // =============================================================================
 
-fn ser() {
-  transport.automatic(format: transport.MessagePack, max_decode_depth: 128)
-}
-
-fn assert_encoded(p: Protocol(Model, Message), expected_hex: String) -> Nil {
-  let bytes = transport.encode(p, serialiser: ser())
-  let actual_hex = bit_array.base16_encode(bytes)
-  actual_hex
-  |> should.equal(expected_hex)
-}
-
-fn assert_roundtrip(p: Protocol(Model, Message)) -> Nil {
-  transport.encode(p, serialiser: ser())
-  |> transport.decode(serialiser: ser())
-  |> should.equal(Ok(p))
-}
-
-// Generic variants for tests that wrap non-Model types (tuple/dict/set).
-// transport.automatic is parametric, so the serialiser specialises to
-// whatever model/message types the caller uses.
-fn assert_encoded_generic(
-  p: Protocol(model, message),
+fn assert_encoded(
+  protocol: Protocol(Model, Message),
   expected_hex: String,
 ) -> Nil {
-  let s =
-    transport.automatic(format: transport.MessagePack, max_decode_depth: 128)
-  let bytes = transport.encode(p, serialiser: s)
+  let bytes =
+    transport.encode(
+      protocol,
+      serialiser: test_support.message_pack_serialiser(),
+    )
   let actual_hex = bit_array.base16_encode(bytes)
   actual_hex
   |> should.equal(expected_hex)
 }
 
-fn assert_roundtrip_generic(p: Protocol(model, message)) -> Nil {
-  let s =
-    transport.automatic(format: transport.MessagePack, max_decode_depth: 128)
-  transport.encode(p, serialiser: s)
-  |> transport.decode(serialiser: s)
-  |> should.equal(Ok(p))
+fn assert_roundtrip(protocol: Protocol(Model, Message)) -> Nil {
+  transport.encode(protocol, serialiser: test_support.message_pack_serialiser())
+  |> transport.decode(serialiser: test_support.message_pack_serialiser())
+  |> should.equal(Ok(protocol))
+}
+
+// generic variant for non-Model types (tuple/dict/set)
+fn assert_encoded_generic(
+  protocol: Protocol(model, message),
+  expected_hex: String,
+) -> Nil {
+  let serialiser =
+    transport.automatic(
+      format: transport.MessagePack,
+      max_decode_depth: 128,
+      modules: [],
+    )
+  let bytes = transport.encode(protocol, serialiser: serialiser)
+  let actual_hex = bit_array.base16_encode(bytes)
+  actual_hex
+  |> should.equal(expected_hex)
+}
+
+fn assert_roundtrip_generic(protocol: Protocol(model, message)) -> Nil {
+  let serialiser =
+    transport.automatic(
+      format: transport.MessagePack,
+      max_decode_depth: 128,
+      modules: [],
+    )
+  transport.encode(protocol, serialiser: serialiser)
+  |> transport.decode(serialiser: serialiser)
+  |> should.equal(Ok(protocol))
+}
+
+// every protocol variant
+fn every_frame() -> List(Protocol(Model, Message)) {
+  [
+    Acknowledge(target: Session, sequence: 42),
+    Acknowledge(target: Topic(id: "chat"), sequence: 1),
+    Connected(client_id: "abc123"),
+    Rejected(topic_id: "secret", reason: "denied"),
+    Resync(cursors: [Session, Topic(id: "chat")]),
+    SessionMessage(payload: SetName("Alice")),
+    SessionUpdate(sequence: 4, payload: Increment),
+    Snapshot(
+      target: Session,
+      sequence: 7,
+      state: test_support.Model(..test_support.initial_model(), name: "Bob"),
+    ),
+    Subscribe(topic_id: "chat"),
+    TopicMessage(topic_id: "chat", payload: Increment),
+    TopicUpdate(topic_id: "chat", sequence: 3, payload: Increment),
+    Unsubscribe(topic_id: "chat"),
+    Version(hash: "abc123"),
+  ]
+}
+
+fn assert_crosses(written: transport.Format, read: transport.Format) -> Nil {
+  test_support.register_fixtures()
+  let writer = test_support.automatic_serialiser(written)
+  let reader = test_support.automatic_serialiser(read)
+  list.each(every_frame(), fn(frame) {
+    transport.encode(frame, serialiser: writer)
+    |> transport.decode(serialiser: reader)
+    |> should.equal(Ok(frame))
+  })
+}
+
+const embed_prefix =
+  "<script type=\"application/octet-stream\" id=\"lily-snapshot\">"
+
+fn embed_payload(embed: String) -> BitArray {
+  let assert Ok(bytes) =
+    embed
+    |> string.drop_start(string.length(embed_prefix))
+    |> string.drop_end(string.length("</script>"))
+    |> bit_array.base64_decode
+  bytes
+}
+
+fn embed_store(
+  serialiser: transport.Serialiser(Model, Message),
+) -> store.Store(Model, Message, store.Synced) {
+  store.new(init: test_support.initial_model(), update: test_support.update)
+  |> store.sync_with(route: fn(_) { store.Session }, serialiser:)
 }
 
 // =============================================================================
@@ -88,13 +152,6 @@ pub fn snapshot_connected_test() {
   )
 }
 
-pub fn snapshot_push_test() {
-  assert_encoded(
-    Push(topic_id: "typing", payload: Increment),
-    "83A474797065A470757368A8746F7069635F6964A6747970696E67A77061796C6F6164C40D81A15FA9496E6372656D656E74",
-  )
-}
-
 pub fn snapshot_rejected_test() {
   assert_encoded(
     Rejected(topic_id: "secret", reason: "denied"),
@@ -109,11 +166,9 @@ pub fn snapshot_resync_session_test() {
   )
 }
 
-/// Regression: Gleam's empty list (`Empty` singleton on JS, `[]` on Erlang)
-/// must encode as MessagePack array length 0 (`90`) on both targets.
-/// Before this was caught, the JS auto-encoder fell through to the
-/// CustomType branch and produced `{"_":"Empty"}` instead, which diverged
-/// from Erlang's native list encoding.
+/// Gleam's empty list (`Empty` singleton on JS, `[]` on Erlang) encodes as
+/// MessagePack array length 0 (`90`) on both targets, never as the custom
+/// type `{"_":"Empty"}`.
 pub fn snapshot_resync_empty_cursors_test() {
   assert_encoded(
     Resync(cursors: []),
@@ -203,88 +258,163 @@ pub fn snapshot_version_test() {
 // =============================================================================
 // CROSS-TARGET ROUNDTRIPS
 // =============================================================================
-// These run on both targets. If both targets agree on the wire format AND
-// each can roundtrip its own output, the wire format is consistent.
+// pinned bytes plus own-output roundtrip on both targets means consistency
 
 pub fn roundtrip_acknowledge_session_test() {
+  test_support.register_fixtures()
   assert_roundtrip(Acknowledge(target: Session, sequence: 42))
 }
 
 pub fn roundtrip_acknowledge_topic_test() {
+  test_support.register_fixtures()
   assert_roundtrip(Acknowledge(target: Topic(id: "chat"), sequence: 1))
 }
 
 pub fn roundtrip_connected_test() {
+  test_support.register_fixtures()
   assert_roundtrip(Connected(client_id: "abc123"))
 }
 
 pub fn roundtrip_resync_session_topic_test() {
+  test_support.register_fixtures()
   assert_roundtrip(Resync(cursors: [Session, Topic(id: "chat")]))
 }
 
 pub fn roundtrip_session_message_set_name_test() {
+  test_support.register_fixtures()
   assert_roundtrip(SessionMessage(payload: SetName("Alice")))
 }
 
 pub fn roundtrip_session_update_test() {
+  test_support.register_fixtures()
   assert_roundtrip(SessionUpdate(sequence: 4, payload: Increment))
 }
 
 pub fn roundtrip_version_test() {
+  test_support.register_fixtures()
   assert_roundtrip(Version(hash: "abc123"))
+}
+
+// =============================================================================
+// CROSS-FORMAT DECODING
+// =============================================================================
+
+pub fn cross_json_frames_decode_under_message_pack_test() {
+  assert_crosses(transport.Json, transport.MessagePack)
+}
+
+pub fn cross_message_pack_frames_decode_under_json_test() {
+  assert_crosses(transport.MessagePack, transport.Json)
+}
+
+pub fn cross_by_host_frames_decode_under_either_format_test() {
+  assert_crosses(transport.ByHost, transport.Json)
+  assert_crosses(transport.ByHost, transport.MessagePack)
 }
 
 // =============================================================================
 // INITIAL SNAPSHOT EMBED
 // =============================================================================
 
-pub fn encode_initial_snapshot_wraps_in_script_tag_test() {
+pub fn initial_snapshot_wraps_in_script_tag_test() {
   let snapshot =
-    transport.encode_initial_snapshot(
-      serialiser: transport.automatic(
-        format: transport.Json,
-        max_decode_depth: 128,
+    store.initial_snapshot(
+      embed_store(
+        transport.automatic(
+          format: transport.Json,
+          max_decode_depth: 128,
+          modules: [],
+        ),
       ),
       model: test_support.initial_model(),
     )
-  let expected_prefix =
-    "<script type=\"application/json\" id=\"lily-snapshot\">"
+
   snapshot
-  |> string.starts_with(expected_prefix)
+  |> string.starts_with(embed_prefix)
   |> should.be_true
   snapshot
   |> string.ends_with("</script>")
   |> should.be_true
 }
 
-pub fn encode_initial_snapshot_round_trips_via_decode_test() {
+pub fn initial_snapshot_round_trips_via_decode_test() {
+  test_support.register_fixtures()
   let model = test_support.initial_model()
-  let embed =
-    transport.encode_initial_snapshot(
-      serialiser: transport.automatic(
-        format: transport.Json,
-        max_decode_depth: 128,
-      ),
-      model: model,
-    )
-  let prefix = "<script type=\"application/json\" id=\"lily-snapshot\">"
-  let suffix = "</script>"
-  let json_only =
-    embed
-    |> string.drop_start(string.length(prefix))
-    |> string.drop_end(string.length(suffix))
-
-  transport.decode(
-    bit_array.from_string(json_only),
-    serialiser: transport.automatic(
+  let serialiser =
+    transport.automatic(
       format: transport.Json,
       max_decode_depth: 128,
-    ),
+      modules: [],
+    )
+  let embed = store.initial_snapshot(embed_store(serialiser), model:)
+
+  transport.decode(embed_payload(embed), serialiser:)
+  |> should.equal(Ok(Snapshot(target: Session, sequence: 0, state: model)))
+}
+
+pub fn initial_snapshot_round_trips_message_pack_test() {
+  test_support.register_fixtures()
+  let model = test_support.initial_model()
+  let serialiser =
+    transport.automatic(
+      format: transport.MessagePack,
+      max_decode_depth: 128,
+      modules: [],
+    )
+  let embed = store.initial_snapshot(embed_store(serialiser), model:)
+
+  transport.decode(embed_payload(embed), serialiser:)
+  |> should.equal(Ok(Snapshot(target: Session, sequence: 0, state: model)))
+}
+
+pub fn initial_snapshot_by_host_is_written_in_message_pack_test() {
+  test_support.register_fixtures()
+  let model = test_support.initial_model()
+  let embed =
+    store.initial_snapshot(
+      embed_store(test_support.automatic_serialiser(transport.ByHost)),
+      model:,
+    )
+  let bytes = embed_payload(embed)
+
+  transport.frame_format(
+    bytes,
+    serialiser: test_support.automatic_serialiser(transport.Json),
+  )
+  |> should.equal(Ok(transport.MessagePack))
+  transport.decode(
+    bytes,
+    serialiser: test_support.automatic_serialiser(transport.Json),
   )
   |> should.equal(Ok(Snapshot(target: Session, sequence: 0, state: model)))
 }
 
+pub fn initial_snapshot_cannot_close_the_script_tag_test() {
+  test_support.register_fixtures()
+  let model =
+    test_support.Model(
+      ..test_support.initial_model(),
+      name: "</script><script>alert(1)</script>",
+    )
+  let serialiser =
+    transport.automatic(
+      format: transport.Json,
+      max_decode_depth: 128,
+      modules: [],
+    )
+
+  let embed = store.initial_snapshot(embed_store(serialiser), model:)
+
+  embed
+  |> string.split("</script>")
+  |> list.length
+  |> should.equal(2)
+  transport.decode(embed_payload(embed), serialiser:)
+  |> should.equal(Ok(Snapshot(target: Session, sequence: 0, state: model)))
+}
+
 pub fn roundtrip_snapshot_test() {
+  test_support.register_fixtures()
   assert_roundtrip(Snapshot(
     target: Session,
     sequence: 7,
@@ -298,10 +428,12 @@ pub fn roundtrip_snapshot_test() {
 }
 
 pub fn roundtrip_subscribe_test() {
+  test_support.register_fixtures()
   assert_roundtrip(Subscribe(topic_id: "chat"))
 }
 
 pub fn roundtrip_topic_update_test() {
+  test_support.register_fixtures()
   assert_roundtrip(TopicUpdate(
     topic_id: "chat",
     sequence: 3,
@@ -310,11 +442,12 @@ pub fn roundtrip_topic_update_test() {
 }
 
 pub fn roundtrip_unsubscribe_test() {
+  test_support.register_fixtures()
   assert_roundtrip(Unsubscribe(topic_id: "chat"))
 }
 
 // =============================================================================
-// COLLECTION TYPES (tuple, dict, set) cross-target wire format
+// COLLECTION TYPES
 // =============================================================================
 
 /// Tuple inside a CustomType wrapper. Tuple `#(1, "hi")` encodes as
@@ -329,6 +462,7 @@ pub fn snapshot_tuple_test() {
 }
 
 pub fn roundtrip_tuple_test() {
+  test_support.register_fixtures()
   assert_roundtrip_generic(Snapshot(
     target: Session,
     sequence: 1,
@@ -346,9 +480,8 @@ pub fn snapshot_empty_dict_test() {
 }
 
 pub fn roundtrip_dict_test() {
-  // Single-entry dict so iteration order doesn't matter for the
-  // roundtrip equality check. Multi-entry roundtrip would still work
-  // because dict equality is order-independent.
+  test_support.register_fixtures()
+  // single entry, keeping iteration order from affecting the bytes
   let entries = dict.from_list([#("only", 1)])
   assert_roundtrip_generic(Snapshot(
     target: Session,
@@ -366,6 +499,7 @@ pub fn snapshot_empty_set_test() {
 }
 
 pub fn roundtrip_set_test() {
+  test_support.register_fixtures()
   let members = set.from_list([7])
   assert_roundtrip_generic(Snapshot(
     target: Session,

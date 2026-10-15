@@ -1,27 +1,15 @@
 /**
- * SERVER FFI (JAVASCRIPT)
+ * SERVER (JAVASCRIPT)
  *
- * Mostly rescue stuff for JS backend
+ * Random hex for client and boot IDs.
  */
-
-// =============================================================================
-// IMPORTS
-// =============================================================================
-
-import { Ok, Error as GleamError } from "../gleam.mjs";
 
 // =============================================================================
 // EXPORT FUNCTIONS
 // =============================================================================
 
-export function rescue(operation) {
-  try {
-    return new Ok(operation());
-  } catch (exception) {
-    const reason =
-      exception instanceof globalThis.Error
-        ? exception.message
-        : String(exception);
-    return new GleamError(reason);
-  }
+export function randomHex(byteCount) {
+  const bytes = new Uint8Array(byteCount);
+  globalThis.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }

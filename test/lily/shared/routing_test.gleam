@@ -1,5 +1,9 @@
-// Tests for lily/store Wiring builder, route_message, apply_message,
-// merge_snapshot.
+// store routing and snapshot merging into session or topic slices
+// pure, target-agnostic
+
+// =============================================================================
+// IMPORTS
+// =============================================================================
 
 import gleam/dict
 import gleam/result
@@ -8,318 +12,314 @@ import lily/store
 import lily/transport
 
 // =============================================================================
-// TYPES
+// HELPERS
 // =============================================================================
 
 type OuterModel {
-  OuterModel(session: Int, chat: Int, news: Int, other: Int)
+  OuterModel(
+    session: Int,
+    chat: Int,
+    news: Int,
+    rooms: dict.Dict(String, Int),
+    other: Int,
+  )
 }
 
 type Message {
   SessionMessage(Int)
   ChatMessage(Int)
   NewsMessage(Int)
+  RoomMessage(room: String, delta: Int)
   Unmatched
 }
 
-// =============================================================================
-// HELPERS
-// =============================================================================
-
 fn initial_outer() -> OuterModel {
-  OuterModel(session: 0, chat: 0, news: 0, other: 99)
+  OuterModel(session: 0, chat: 0, news: 0, rooms: dict.new(), other: 99)
+}
+
+fn update(model: OuterModel, message: Message) -> OuterModel {
+  case message {
+    SessionMessage(amount) ->
+      OuterModel(..model, session: model.session + amount)
+    ChatMessage(amount) -> OuterModel(..model, chat: model.chat + amount)
+    NewsMessage(amount) -> OuterModel(..model, news: model.news + amount)
+    RoomMessage(room:, delta:) -> {
+      let current = dict.get(model.rooms, room) |> result.unwrap(0)
+      OuterModel(
+        ..model,
+        rooms: dict.insert(model.rooms, room, current + delta),
+      )
+    }
+    Unmatched -> model
+  }
+}
+
+fn route(message: Message) -> store.Route {
+  case message {
+    SessionMessage(_) -> store.Session
+    ChatMessage(_) -> store.Topic("chat")
+    NewsMessage(_) -> store.Topic("news")
+    RoomMessage(room:, ..) -> store.Topic("room:" <> room)
+    Unmatched -> store.Local
+  }
+}
+
+fn base() -> store.Store(OuterModel, Message, store.Synced) {
+  store.new(init: initial_outer(), update: update)
+  |> store.sync(route: route, modules: [])
 }
 
 fn with_session(
-  r: store.Wiring(OuterModel, Message),
-) -> store.Wiring(OuterModel, Message) {
+  app_store: store.Store(OuterModel, Message, store.Synced),
+) -> store.Store(OuterModel, Message, store.Synced) {
   store.session(
-    r,
-    extract: fn(message) {
-      case message {
-        SessionMessage(n) -> Ok(n)
-        ChatMessage(_) | NewsMessage(_) | Unmatched -> Error(Nil)
-      }
-    },
-    update: fn(current: Int, delta: Int) -> Int { current + delta },
-    field_get: fn(model: OuterModel) { model.session },
-    field_set: fn(model, session) { OuterModel(..model, session:) },
+    app_store,
+    get: fn(model: OuterModel) { model.session },
+    set: fn(model, session) { OuterModel(..model, session:) },
   )
 }
 
 fn with_chat(
-  r: store.Wiring(OuterModel, Message),
-) -> store.Wiring(OuterModel, Message) {
+  app_store: store.Store(OuterModel, Message, store.Synced),
+) -> store.Store(OuterModel, Message, store.Synced) {
   store.topic(
-    r,
-    id: "chat",
-    extract: fn(message) {
-      case message {
-        ChatMessage(n) -> Ok(n)
-        SessionMessage(_) | NewsMessage(_) | Unmatched -> Error(Nil)
-      }
-    },
-    update: fn(current: Int, delta: Int) -> Int { current + delta },
-    field_get: fn(model: OuterModel) { model.chat },
-    field_set: fn(model, chat) { OuterModel(..model, chat:) },
+    app_store,
+    prefix: "chat",
+    get: fn(model: OuterModel, _id) { model.chat },
+    set: fn(model, _id, chat) { OuterModel(..model, chat:) },
+    access: store.Open,
   )
 }
 
 fn with_news(
-  r: store.Wiring(OuterModel, Message),
-) -> store.Wiring(OuterModel, Message) {
+  app_store: store.Store(OuterModel, Message, store.Synced),
+) -> store.Store(OuterModel, Message, store.Synced) {
   store.topic(
-    r,
-    id: "news",
-    extract: fn(message) {
-      case message {
-        NewsMessage(n) -> Ok(n)
-        SessionMessage(_) | ChatMessage(_) | Unmatched -> Error(Nil)
-      }
+    app_store,
+    prefix: "news",
+    get: fn(model: OuterModel, _id) { model.news },
+    set: fn(model, _id, news) { OuterModel(..model, news:) },
+    access: store.Open,
+  )
+}
+
+fn with_rooms(
+  app_store: store.Store(OuterModel, Message, store.Synced),
+) -> store.Store(OuterModel, Message, store.Synced) {
+  store.topic(
+    app_store,
+    prefix: "room:",
+    get: fn(model: OuterModel, id) {
+      dict.get(model.rooms, id) |> result.unwrap(0)
     },
-    update: fn(current: Int, delta: Int) -> Int { current + delta },
-    field_get: fn(model: OuterModel) { model.news },
-    field_set: fn(model, news) { OuterModel(..model, news:) },
+    set: fn(model, id, value) {
+      OuterModel(..model, rooms: dict.insert(model.rooms, id, value))
+    },
+    access: store.Open,
   )
 }
 
 // =============================================================================
-// BUILDER
+// ROUTE
 // =============================================================================
 
-pub fn wiring_new_is_empty_test() {
-  // An empty routing falls back to Session for any message.
-  let r = store.wiring()
-  store.route_message(r, Unmatched)
-  |> should.equal(transport.Session)
+pub fn route_sends_a_session_message_to_the_session_test() {
+  base()
+  |> store.route(SessionMessage(1))
+  |> should.equal(store.Session)
 }
 
-pub fn wiring_session_registers_session_target_test() {
-  let r = store.wiring() |> with_session
-  store.route_message(r, SessionMessage(1))
-  |> should.equal(transport.Session)
+pub fn route_sends_a_topic_message_to_its_topic_test() {
+  base()
+  |> store.route(ChatMessage(1))
+  |> should.equal(store.Topic("chat"))
 }
 
-pub fn wiring_topic_registers_topic_target_test() {
-  let r = store.wiring() |> with_chat
-  store.route_message(r, ChatMessage(1))
-  |> should.equal(transport.Topic("chat"))
+pub fn route_can_name_a_topic_from_the_message_test() {
+  base()
+  |> store.route(RoomMessage("42", 1))
+  |> should.equal(store.Topic("room:42"))
 }
 
-pub fn wiring_multiple_topics_register_independently_test() {
-  let r = store.wiring() |> with_chat |> with_news
-  store.route_message(r, ChatMessage(1))
-  |> should.equal(transport.Topic("chat"))
-  store.route_message(r, NewsMessage(1))
-  |> should.equal(transport.Topic("news"))
+pub fn route_keeps_an_unmatched_message_local_test() {
+  base()
+  |> store.route(Unmatched)
+  |> should.equal(store.Local)
 }
 
-// =============================================================================
-// ROUTE MESSAGE
-// =============================================================================
-
-pub fn route_message_no_match_falls_back_to_session_test() {
-  // When no entry's extract accepts the message, route_message returns Session.
-  // This is the documented safe fallback for unrecognised messages.
-  let r = store.wiring() |> with_session |> with_chat
-  store.route_message(r, Unmatched)
-  |> should.equal(transport.Session)
-}
-
-pub fn route_message_session_wins_when_both_match_test() {
-  // Session has priority over topic when both extracts accept the same message.
-  // This pins the precedence so a future refactor cannot silently swap it.
-  let r =
-    store.wiring()
-    |> store.session(
-      extract: fn(_message) { Ok(0) },
-      update: fn(current: Int, _n: Int) -> Int { current },
-      field_get: fn(model: OuterModel) { model.session },
-      field_set: fn(model, session) { OuterModel(..model, session:) },
-    )
-    |> store.topic(
-      id: "chat",
-      extract: fn(_message) { Ok(0) },
-      update: fn(current: Int, _n: Int) -> Int { current },
-      field_get: fn(model: OuterModel) { model.chat },
-      field_set: fn(model, chat) { OuterModel(..model, chat:) },
-    )
-  store.route_message(r, SessionMessage(1))
-  |> should.equal(transport.Session)
-}
-
-pub fn route_message_two_topics_both_match_returns_a_topic_test() {
-  // When two topics both claim the message, the result is some Topic target,
-  // which exact topic wins is unspecified (dict iteration order).
-  // Invariant: extract functions across topics must be mutually exclusive.
-  let r =
-    store.wiring()
-    |> store.topic(
-      id: "chat",
-      extract: fn(_message) { Ok(0) },
-      update: fn(current: Int, _n: Int) -> Int { current },
-      field_get: fn(model: OuterModel) { model.chat },
-      field_set: fn(model, chat) { OuterModel(..model, chat:) },
-    )
-    |> store.topic(
-      id: "news",
-      extract: fn(_message) { Ok(0) },
-      update: fn(current: Int, _n: Int) -> Int { current },
-      field_get: fn(model: OuterModel) { model.news },
-      field_set: fn(model, news) { OuterModel(..model, news:) },
-    )
-  case store.route_message(r, Unmatched) {
-    transport.Topic(_) -> Nil
-    transport.Session -> should.fail()
-  }
+pub fn route_does_not_depend_on_what_is_declared_test() {
+  // route decides alone, a declared topic only adds access and slice
+  let declared = base() |> with_session |> with_chat
+  store.route(declared, NewsMessage(1))
+  |> should.equal(store.Topic("news"))
 }
 
 // =============================================================================
-// APPLY MESSAGE
+// MERGE SNAPSHOT, SESSION
 // =============================================================================
-
-pub fn apply_message_no_match_leaves_model_unchanged_test() {
-  let r = store.wiring() |> with_session |> with_chat
-  let model = initial_outer()
-  store.apply_message(r, model, Unmatched)
-  |> should.equal(model)
-}
-
-pub fn apply_message_session_updates_session_field_test() {
-  let r = store.wiring() |> with_session
-  let model = initial_outer()
-  let updated = store.apply_message(r, model, SessionMessage(5))
-  updated.session
-  |> should.equal(5)
-  updated.other
-  |> should.equal(99)
-}
-
-pub fn apply_message_topic_updates_topic_field_test() {
-  let r = store.wiring() |> with_chat
-  let model = initial_outer()
-  let updated = store.apply_message(r, model, ChatMessage(3))
-  updated.chat
-  |> should.equal(3)
-  updated.session
-  |> should.equal(0)
-}
-
-pub fn apply_message_only_updates_matching_topic_field_test() {
-  let r = store.wiring() |> with_chat |> with_news
-  let model = initial_outer()
-  let updated = store.apply_message(r, model, ChatMessage(7))
-  updated.chat
-  |> should.equal(7)
-  updated.news
-  |> should.equal(0)
-}
-
-// =============================================================================
-// MERGE SNAPSHOT
-// =============================================================================
-
-pub fn merge_snapshot_unknown_topic_returns_current_unchanged_test() {
-  let r = store.wiring() |> with_session |> with_chat
-  let current = initial_outer()
-  let snapshot = OuterModel(session: 99, chat: 99, news: 99, other: 42)
-  store.merge_snapshot(r, transport.Topic("missing"), current, snapshot)
-  |> should.equal(current)
-}
-
-pub fn merge_snapshot_replaces_only_target_topic_slice_test() {
-  let r = store.wiring() |> with_session |> with_chat
-  let current = OuterModel(session: 1, chat: 2, news: 3, other: 99)
-  let snapshot = OuterModel(session: 100, chat: 200, news: 300, other: 0)
-  let merged =
-    store.merge_snapshot(r, transport.Topic("chat"), current, snapshot)
-  // chat takes the snapshot value
-  merged.chat
-  |> should.equal(200)
-  // session stays at current, not touched by a chat snapshot
-  merged.session
-  |> should.equal(1)
-  // news stays at current
-  merged.news
-  |> should.equal(3)
-}
 
 pub fn merge_snapshot_session_replaces_session_slice_test() {
-  let r = store.wiring() |> with_session |> with_chat
-  let current = OuterModel(session: 1, chat: 2, news: 3, other: 99)
-  let snapshot = OuterModel(session: 100, chat: 200, news: 300, other: 0)
-  let merged = store.merge_snapshot(r, transport.Session, current, snapshot)
+  let app_store = base() |> with_session |> with_chat
+  let current = OuterModel(..initial_outer(), session: 1, chat: 2, news: 3)
+  let snapshot = OuterModel(..initial_outer(), session: 100, chat: 200)
+  let merged =
+    store.merge_snapshot(app_store, transport.Session, current, snapshot)
+
   merged.session
   |> should.equal(100)
   merged.chat
   |> should.equal(2)
+  merged.news
+  |> should.equal(3)
+}
+
+pub fn merge_snapshot_session_leaves_other_fields_alone_test() {
+  let app_store = base() |> with_session
+  let current = OuterModel(..initial_outer(), other: 7)
+  let snapshot = OuterModel(..initial_outer(), session: 5, other: 0)
+
+  store.merge_snapshot(app_store, transport.Session, current, snapshot).other
+  |> should.equal(7)
+}
+
+pub fn merge_snapshot_session_without_a_declared_slice_is_a_no_op_test() {
+  let app_store = base() |> with_chat
+  let current = initial_outer()
+  let snapshot = OuterModel(..initial_outer(), session: 5)
+
+  store.merge_snapshot(app_store, transport.Session, current, snapshot)
+  |> should.equal(current)
+}
+
+pub fn merge_snapshot_on_a_standalone_store_is_a_no_op_test() {
+  let app_store = store.new(init: initial_outer(), update: update)
+  let current = initial_outer()
+  let snapshot = OuterModel(..initial_outer(), session: 5)
+
+  store.merge_snapshot(app_store, transport.Session, current, snapshot)
+  |> should.equal(current)
+  store.merge_snapshot(app_store, transport.Topic("chat"), current, snapshot)
+  |> should.equal(current)
 }
 
 // =============================================================================
-// TOPIC KIND
+// MERGE SNAPSHOT, TOPIC
 // =============================================================================
 
-type KindModel {
-  KindModel(rooms: dict.Dict(String, Int))
+pub fn merge_snapshot_unknown_topic_returns_current_unchanged_test() {
+  let app_store = base() |> with_session |> with_chat
+  let current = initial_outer()
+  let snapshot = OuterModel(..initial_outer(), session: 99, chat: 99, news: 99)
+
+  store.merge_snapshot(app_store, transport.Topic("missing"), current, snapshot)
+  |> should.equal(current)
 }
 
-type KindMessage {
-  RoomDelta(id: String, delta: Int)
-  NotARoom
-}
-
-fn kind_wiring() -> store.Wiring(KindModel, KindMessage) {
-  store.wiring()
-  |> store.topic_kind(
-    prefix: "room:",
-    extract: fn(message) {
-      case message {
-        RoomDelta(id, delta) -> Ok(#(id, delta))
-        NotARoom -> Error(Nil)
-      }
-    },
-    update: fn(current: Int, delta: Int) -> Int { current + delta },
-    field_get: fn(model: KindModel, key) {
-      dict.get(model.rooms, key) |> result.unwrap(0)
-    },
-    field_set: fn(model: KindModel, key, value) {
-      KindModel(rooms: dict.insert(model.rooms, key, value))
-    },
-  )
-}
-
-pub fn topic_kind_routes_to_concrete_instance_id_test() {
-  // A message carrying instance key "42" routes to the concrete topic id
-  // "room:42", not the bare prefix.
-  let r = kind_wiring()
-  store.route_message(r, RoomDelta("42", 1))
-  |> should.equal(transport.Topic("room:42"))
-}
-
-pub fn topic_kind_unmatched_falls_back_to_session_test() {
-  let r = kind_wiring()
-  store.route_message(r, NotARoom)
-  |> should.equal(transport.Session)
-}
-
-pub fn topic_kind_apply_updates_keyed_slice_test() {
-  let r = kind_wiring()
-  let model = KindModel(rooms: dict.from_list([#("42", 10)]))
-  let updated = store.apply_message(r, model, RoomDelta("42", 5))
-  dict.get(updated.rooms, "42")
-  |> should.equal(Ok(15))
-}
-
-pub fn topic_kind_merge_snapshot_only_touches_its_key_test() {
-  // A snapshot for "room:42" merges only that key, leaving other joined
-  // rooms in the keyed slice untouched, so multiple instances coexist.
-  let r = kind_wiring()
-  let current = KindModel(rooms: dict.from_list([#("42", 1), #("7", 2)]))
-  let snapshot = KindModel(rooms: dict.from_list([#("42", 99)]))
+pub fn merge_snapshot_replaces_only_target_topic_slice_test() {
+  let app_store = base() |> with_session |> with_chat |> with_news
+  let current = OuterModel(..initial_outer(), session: 1, chat: 2, news: 3)
+  let snapshot =
+    OuterModel(..initial_outer(), session: 100, chat: 200, news: 300, other: 0)
   let merged =
-    store.merge_snapshot(r, transport.Topic("room:42"), current, snapshot)
+    store.merge_snapshot(app_store, transport.Topic("chat"), current, snapshot)
+
+  merged.chat
+  |> should.equal(200)
+  merged.session
+  |> should.equal(1)
+  merged.news
+  |> should.equal(3)
+  merged.other
+  |> should.equal(99)
+}
+
+pub fn merge_snapshot_family_hands_the_rest_of_the_id_to_the_slice_test() {
+  // `room:42` slice keyed by `42`, other held rooms untouched
+  let app_store = base() |> with_rooms
+  let current =
+    OuterModel(
+      ..initial_outer(),
+      rooms: dict.from_list([#("42", 1), #("7", 2)]),
+    )
+  let snapshot =
+    OuterModel(..initial_outer(), rooms: dict.from_list([#("42", 99)]))
+  let merged =
+    store.merge_snapshot(
+      app_store,
+      transport.Topic("room:42"),
+      current,
+      snapshot,
+    )
+
   dict.get(merged.rooms, "42")
   |> should.equal(Ok(99))
   dict.get(merged.rooms, "7")
   |> should.equal(Ok(2))
+}
+
+pub fn merge_snapshot_fixed_topic_gets_an_empty_rest_test() {
+  let app_store =
+    base()
+    |> store.topic(
+      prefix: "chat",
+      get: fn(model: OuterModel, rest) {
+        case rest {
+          "" -> model.chat
+          _ -> -1
+        }
+      },
+      set: fn(model, _rest, chat) { OuterModel(..model, chat:) },
+      access: store.Open,
+    )
+  let snapshot = OuterModel(..initial_outer(), chat: 8)
+
+  store.merge_snapshot(
+    app_store,
+    transport.Topic("chat"),
+    initial_outer(),
+    snapshot,
+  ).chat
+  |> should.equal(8)
+}
+
+pub fn merge_snapshot_longest_prefix_picks_the_slice_test() {
+  let app_store =
+    base()
+    |> with_rooms
+    |> store.topic(
+      prefix: "room:vip:",
+      get: fn(model: OuterModel, _id) { model.news },
+      set: fn(model, _id, news) { OuterModel(..model, news:) },
+      access: store.Open,
+    )
+  let snapshot = OuterModel(..initial_outer(), news: 5)
+  let merged =
+    store.merge_snapshot(
+      app_store,
+      transport.Topic("room:vip:1"),
+      initial_outer(),
+      snapshot,
+    )
+
+  merged.news
+  |> should.equal(5)
+  merged.rooms
+  |> should.equal(dict.new())
+}
+
+pub fn merge_snapshot_session_and_topic_do_not_cross_test() {
+  let app_store = base() |> with_session |> with_chat
+  let current = OuterModel(..initial_outer(), session: 1, chat: 2)
+  let snapshot = OuterModel(..initial_outer(), session: 10, chat: 20)
+  let after_topic =
+    store.merge_snapshot(app_store, transport.Topic("chat"), current, snapshot)
+  after_topic.session
+  |> should.equal(1)
+  let after_session =
+    store.merge_snapshot(app_store, transport.Session, after_topic, snapshot)
+
+  after_session.session
+  |> should.equal(10)
+  after_session.chat
+  |> should.equal(20)
 }

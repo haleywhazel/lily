@@ -2,11 +2,11 @@ import gleam/bytes_tree
 import gleam/erlang/process
 import gleam/http/request
 import gleam/http/response
-import gleam/option.{type Option, None, Some}
+import gleam/option.{None, Some}
+import gleam/string
 
-import lily/logging
 import lily/server
-import lily/topic
+import logging
 
 // Import shared types here
 import shared
@@ -20,43 +20,16 @@ pub fn main() {
   logging.set_level(logging.Info)
 
   // Supervised, so a crash restarts the server rather than taking the node
-  // down. The name is minted once here and never again, since each call
-  // allocates an atom, and it is what lets `server` keep working after a
-  // restart has replaced the process behind it.
+  // down. The rooms are declared in the shared store, so they come back with
+  // it and there is nothing to register again.
   let assert Ok(#(_supervisor, server)) =
-    server.start_supervised(
-      name: server.name("lily_example_server"),
-      initial: shared.initial_model(),
-      serialiser: shared.serialiser(),
-      wiring: shared.wiring(),
+    server.new(
+      shared.store(),
       // TODO: add your production origin here.
       origins: server.AllowedOrigins(["http://localhost:8080"]),
-      // Everything registered here runs again on every restart, so the hooks
-      // and the room kind come back with the server. Registered outside, they
-      // would be lost the first time it crashed.
-      started: fn(server) {
-        server.on_message(server, fn(message, _model, _client_id) {
-          logging.auto_log(logging.Info, message)
-        })
-        server.on_topic_message(server, fn(message, _topic_id, _client_id) {
-          logging.auto_log(logging.Info, message)
-        })
-
-        let assert Ok(_) =
-          topic.kind(
-            server,
-            prefix: "room:",
-            parse_id: fn(name) {
-              case name {
-                "" -> Error(Nil)
-                _ -> Ok(name)
-              }
-            },
-            configure: fn(_room_name, room) { topic.with_store(room) },
-          )
-        Nil
-      },
     )
+    |> server.observe(log_events)
+    |> server.start_supervised
 
   let secret_key_base = wisp.random_string(64)
 
@@ -71,6 +44,19 @@ pub fn main() {
   )
 
   process.sleep_forever()
+}
+
+fn log_events(
+  event: server.ServerEvent(shared.Model, shared.Message),
+  _server: server.Server(shared.Model, shared.Message),
+) -> Nil {
+  case event {
+    server.SessionMessageApplied(message:, ..) ->
+      logging.log(logging.Info, string.inspect(message))
+    server.TopicMessageReceived(message:, ..) ->
+      logging.log(logging.Info, string.inspect(message))
+    _ -> Nil
+  }
 }
 
 // =============================================================================
@@ -92,17 +78,8 @@ fn handle_request(
 // WEBSOCKET HANDLER
 // =============================================================================
 
-type OutgoingMessage {
-  OutgoingMessage(bytes: BitArray)
-  ServerGone
-}
-
-type WsState {
-  WsState(
-    client_id: String,
-    server: server.Server(shared.Model, shared.Message),
-  )
-}
+type Socket =
+  server.Connection(shared.Model, shared.Message)
 
 fn handle_websocket(
   request: request.Request(Connection),
@@ -112,14 +89,19 @@ fn handle_websocket(
   // WebSocket handshake is not subject to CORS and still carries
   // cookies, so this is what stops a cross-site socket.
   let origin = request.get_header(request, "origin") |> option.from_result
-  case server.check_origin(server, origin:) {
+  case server.open(server, origin:) {
     Error(_) -> forbidden()
-    Ok(Nil) ->
+    Ok(opened) ->
       mist.websocket(
         request:,
         handler: handle_ws_message,
-        on_init: fn(_connection) { ws_init(server, origin) },
-        on_close: fn(state) { ws_close(state) },
+        // Attaching from the socket process ties the registration to it, so
+        // one that dies without a close callback still leaves nothing behind.
+        on_init: fn(_connection) {
+          let #(connection, frames) = server.attach(opened)
+          #(connection, Some(frames))
+        },
+        on_close: server.disconnect,
       )
   }
 }
@@ -129,58 +111,28 @@ fn forbidden() -> response.Response(ResponseData) {
   |> response.set_body(mist.Bytes(bytes_tree.new()))
 }
 
-fn ws_init(
-  server: server.Server(shared.Model, shared.Message),
-  origin: Option(String),
-) -> #(WsState, Option(process.Selector(OutgoingMessage))) {
-  let client_id = server.generate_client_id()
-  let outgoing_subject = process.new_subject()
-  let send = fn(bytes: BitArray) {
-    process.send(outgoing_subject, OutgoingMessage(bytes:))
-  }
-
-  let assert Ok(Nil) =
-    server.connect(server, client_id:, origin:, send:, session: [])
-  // Ties the registration to this process, so a socket that dies without a
-  // close callback still leaves nothing behind.
-  server.watch(server, client_id:)
-
-  let selector =
-    process.new_selector()
-    |> process.select(outgoing_subject)
-    // A supervised restart replaces the server, so close the socket and let
-    // the client reconnect rather than leave it reading Online forever.
-    |> process.select_specific_monitor(server.monitor(server), fn(_) {
-      ServerGone
-    })
-
-  #(WsState(client_id:, server: server), Some(selector))
-}
-
 fn handle_ws_message(
-  state: WsState,
-  message: mist.WebsocketMessage(OutgoingMessage),
-  connection: mist.WebsocketConnection,
-) -> mist.Next(WsState, OutgoingMessage) {
+  connection: Socket,
+  message: mist.WebsocketMessage(Result(BitArray, Nil)),
+  socket: mist.WebsocketConnection,
+) -> mist.Next(Socket, Result(BitArray, Nil)) {
   case message {
     mist.Binary(bits) -> {
-      server.incoming(state.server, client_id: state.client_id, bytes: bits)
-      mist.continue(state)
+      server.incoming(connection, bytes: bits)
+      mist.continue(connection)
     }
 
-    mist.Custom(OutgoingMessage(bytes:)) -> {
-      let _ = mist.send_binary_frame(connection, bytes)
-      mist.continue(state)
+    mist.Custom(Ok(bytes)) -> {
+      let _ = mist.send_binary_frame(socket, bytes)
+      mist.continue(connection)
     }
-    mist.Custom(ServerGone) -> mist.stop()
+    // A supervised restart replaces the server, so close the socket and let
+    // the client reconnect rather than leave it reading Online forever.
+    mist.Custom(Error(Nil)) -> mist.stop()
 
-    mist.Text(_) -> mist.continue(state)
+    mist.Text(_) -> mist.continue(connection)
     mist.Closed | mist.Shutdown -> mist.stop()
   }
-}
-
-fn ws_close(state: WsState) -> Nil {
-  server.disconnect(state.server, client_id: state.client_id)
 }
 
 // =============================================================================

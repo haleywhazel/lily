@@ -3,13 +3,15 @@ import gleam/dynamic/decode
 import gleam/int
 import gleam/json
 import gleam/list
+import gleam/option
 import gleam/result
 import gleam/string
 
+import focus
+import lily/browser
 import lily/client
 import lily/component.{type Patch, SetAttribute, SetText}
 import lily/event
-import lily/store
 import lily/transport
 
 import shared
@@ -23,77 +25,52 @@ import lustre/element/html
 // =============================================================================
 
 pub fn main() {
-  let runtime =
-    store.new(shared.initial_model(), with: shared.update)
-    |> client.start(shared.wiring(), serialiser: shared.serialiser())
+  let runtime = client.start(shared.store())
 
   let dispatch = client.dispatch(runtime)
 
   runtime
-  |> client.attach_session(
-    fields: theme_fields(),
-    get: fn(model: shared.Model) { model.session.theme },
-    set: fn(model, theme) {
-      shared.Model(
-        ..model,
-        session: shared.SessionState(..model.session, theme:),
-      )
-    },
-  )
-  |> client.attach_session(
-    fields: username_fields(),
-    get: fn(model: shared.Model) { model.session.username },
-    set: fn(model, username) {
-      shared.Model(
-        ..model,
-        session: shared.SessionState(..model.session, username:),
-      )
-    },
-  )
+  |> browser.persist(fields: [theme_field(), username_field()])
   |> component.mount(
     selector: "#app",
     to_html: element.to_string,
     to_slot: fn() { element.element("lily-slot", [], []) },
     view: app,
   )
-  |> client.connection_status(set: fn(model: shared.Model, status) {
+  |> browser.connection_status(set: fn(model: shared.Model, status) {
     shared.Model(
       ..model,
       session: shared.SessionState(..model.session, connected: status),
     )
   })
-  |> client.on_message(fn(message, model) {
-    case message {
-      // A room message from someone else pops a notification; our own echoes
-      // back to the input so typing keeps flowing.
-      shared.RoomMessage(
-        room_id:,
-        message: shared.SendMessage(body:, sender_id:),
-      ) ->
-        case sender_id == model.session.username {
-          True -> event.focus("#room-input")
-          False ->
-            dispatch(
-              shared.Session(shared.AddPopup(
-                sender_id <> " in " <> room_id <> ": " <> body,
-              )),
-            )
+  |> client.observe(fn(event, model) {
+    case event {
+      client.MessageApplied(message:, ..) ->
+        case message {
+          // A room message from someone else pops a notification, our own
+          // echoes back to the input so typing keeps flowing.
+          shared.RoomMessage(
+            room_id:,
+            message: shared.SendMessage(body:, sender_id:),
+          ) ->
+            case sender_id == model.session.username {
+              True -> focus.focus("#room-input")
+              False ->
+                dispatch(
+                  shared.Session(shared.AddPopup(
+                    sender_id <> " in " <> room_id <> ": " <> body,
+                  )),
+                )
+            }
+          shared.Session(shared.JoinRoom(_)) -> focus.focus("#room-input")
+          _ -> handle_focus(runtime, message)
         }
-      shared.Session(shared.JoinRoom(room_id:)) -> {
-        let _ = client.subscribe(runtime, "room:" <> room_id)
-        event.focus("#room-input")
-      }
-      _ -> handle_focus(runtime, message)
+      _ -> Nil
     }
   })
-  |> client.client_id(set: fn(model, id) {
-    shared.Model(
-      ..model,
-      session: shared.SessionState(..model.session, session_id: id),
-    )
-  })
-  |> client.connect(with: transport.websocket(
-    url: transport.url_from_current_location(path: "/ws"),
+  |> remember_client_id
+  |> client.connect(with: transport.websocket_with(
+    url: "/ws",
     reconnect: transport.Backoff(
       base_milliseconds: 250,
       max_milliseconds: 5000,
@@ -109,33 +86,105 @@ pub fn main() {
 // SESSION PERSISTENCE
 // =============================================================================
 
-fn theme_fields() -> List(client.SessionField(shared.Theme)) {
-  [
-    client.session_field(
-      key: "theme",
-      get: fn(theme: shared.Theme) { theme },
-      set: fn(_theme, value) { value },
-      encode: shared.encode_theme,
-      decoder: shared.decode_theme(),
-    ),
-  ]
+fn theme_field() -> browser.PersistedField(shared.Model) {
+  browser.persisted_field(
+    key: "theme",
+    encode: shared.encode_theme,
+    decode: shared.decode_theme(),
+    get: fn(model: shared.Model) { model.session.theme },
+    set: fn(model, theme) {
+      shared.Model(
+        ..model,
+        session: shared.SessionState(..model.session, theme:),
+      )
+    },
+  )
 }
 
-fn username_fields() -> List(client.SessionField(String)) {
-  [
-    client.session_field(
-      key: "username",
-      get: fn(name: String) { name },
-      set: fn(_old, new) { new },
-      encode: json.string,
-      decoder: decode.string,
-    ),
-  ]
+fn username_field() -> browser.PersistedField(shared.Model) {
+  browser.persisted_field(
+    key: "username",
+    encode: json.string,
+    decode: decode.string,
+    get: fn(model: shared.Model) { model.session.username },
+    set: fn(model, username) {
+      shared.Model(
+        ..model,
+        session: shared.SessionState(..model.session, username:),
+      )
+    },
+  )
+}
+
+// =============================================================================
+// CLIENT ID
+// =============================================================================
+
+// The server hands out an id on every connect, kept in the model so views can
+// tell their own messages apart.
+fn remember_client_id(
+  runtime: client.Runtime(shared.Model, shared.Message, mode),
+) -> client.Runtime(shared.Model, shared.Message, mode) {
+  client.observe(runtime, fn(event, _model) {
+    case event {
+      client.ClientIdAssigned(client_id:) ->
+        client.update_model(runtime, with: fn(model: shared.Model) {
+          shared.Model(
+            ..model,
+            session: shared.SessionState(..model.session, session_id: client_id),
+          )
+        })
+      _ -> Nil
+    }
+  })
 }
 
 // =============================================================================
 // EVENT DECODING
 // =============================================================================
+
+// Options that bind a listener to elements matching `selector` anywhere on the
+// page, rather than to the component it is piped onto.
+fn at(selector: String) -> event.EventOptions {
+  event.EventOptions(..event.defaults, selector: option.Some(selector))
+}
+
+// Decode with `decoder`, then turn the value into a message with `parse`. A
+// value `parse` declines is skipped.
+fn parsed(
+  decoder: decode.Decoder(a),
+  parse: fn(a) -> Result(shared.Message, Nil),
+) -> decode.Decoder(shared.Message) {
+  decode.then(decoder, fn(value) {
+    case parse(value) {
+      Ok(message) -> decode.success(message)
+      Error(Nil) ->
+        decode.failure(shared.Session(shared.ToggleTheme), "a known message")
+    }
+  })
+}
+
+// Bind a form's submit to a parser over its fields.
+fn submitting(
+  component: component.Component(
+    shared.Model,
+    shared.Message,
+    Element(shared.Message),
+  ),
+  selector: String,
+  parse: fn(List(#(String, String))) -> Result(shared.Message, Nil),
+) -> component.Component(shared.Model, shared.Message, Element(shared.Message)) {
+  event.on(
+    component,
+    event: "submit",
+    decoder: event.form_fields() |> parsed(parse),
+    options: event.EventOptions(
+      ..at(selector),
+      prevent_default: True,
+      reset_form: True,
+    ),
+  )
+}
 
 fn parse_click(message_name: String) -> Result(shared.Message, Nil) {
   case message_name {
@@ -210,13 +259,13 @@ fn parse_username_submit(
 // =============================================================================
 
 fn handle_focus(
-  runtime: client.Runtime(shared.Model, shared.Message),
+  runtime: client.Runtime(shared.Model, shared.Message, mode),
   message: shared.Message,
 ) -> Nil {
   case message {
     shared.Session(shared.OpenClearDialog) -> {
-      event.focus("#clear-dialog-cancel")
-      event.focus_trap(
+      focus.focus("#clear-dialog-cancel")
+      focus.trap(
         runtime,
         within: "#clear-dialog",
         release_on: fn(key) { key == "Escape" },
@@ -224,15 +273,15 @@ fn handle_focus(
       )
     }
     shared.Session(shared.ClearNotifications) -> {
-      event.release_focus_trap()
-      event.focus("#clear-button")
+      focus.release_trap()
+      focus.focus("#clear-button")
     }
     shared.Session(shared.CloseClearDialog) -> {
-      event.release_focus_trap()
-      event.focus("#clear-button")
+      focus.release_trap()
+      focus.focus("#clear-button")
     }
-    shared.Session(shared.SelectRoom(_)) -> event.focus("#room-input")
-    shared.Session(shared.SetUsername(_)) -> event.focus("#room-name-input")
+    shared.Session(shared.SelectRoom(_)) -> focus.focus("#room-input")
+    shared.Session(shared.SetUsername(_)) -> focus.focus("#room-name-input")
     shared.Session(shared.JoinRoom(_)) -> Nil
     shared.Session(shared.DismissPopup(_id)) -> Nil
     shared.Session(shared.ToggleTheme) -> Nil
@@ -254,7 +303,7 @@ fn app(
     slice: fn(model: shared.Model) {
       shared.theme_to_string(model.session.theme)
     },
-    initial: fn(_, slot) {
+    render: fn(_, slot) {
       html.div(
         [
           attribute.class("app-root"),
@@ -300,11 +349,10 @@ fn app(
       [SetAttribute(".app-root", "data-theme", theme)]
     },
   )
-  |> event.on_global_decoded(
-    event: event.click,
-    selector: "#app",
-    decoder: parse_click,
-    options: event.defaults,
+  |> event.on(
+    event: "click",
+    decoder: event.data("message") |> parsed(parse_click),
+    options: at("#app [data-message]"),
   )
 }
 
@@ -388,7 +436,7 @@ fn connection_status() -> component.Component(
 ) {
   component.live(
     slice: fn(model: shared.Model) { model.session.connected },
-    initial: fn(_, _slot) {
+    render: fn(_, _slot) {
       html.span([attribute.class("status")], [
         html.span([attribute.class("dot")], []),
         html.span(
@@ -427,7 +475,7 @@ fn theme_toggle() -> component.Component(
 ) {
   component.live(
     slice: fn(model: shared.Model) { model.session.theme == shared.Light },
-    initial: fn(_, _slot) {
+    render: fn(_, _slot) {
       html.button(
         [
           attribute.class("theme-toggle"),
@@ -505,30 +553,26 @@ fn popups_list() -> component.Component(
   component.each(
     slice: fn(model: shared.Model) { model.session.popups },
     key: fn(popup: shared.Popup) { int.to_string(popup.id) },
-    render: render_popup,
+    render: fn(popup, _) { render_popup(popup) },
   )
 }
 
-fn render_popup(
-  popup: shared.Popup,
-) -> component.Component(shared.Model, shared.Message, Element(shared.Message)) {
-  component.static(fn(_slot) {
-    html.div([attribute.class("popup"), attribute.role("status")], [
-      html.p([attribute.class("popup-body")], [html.text(popup.body)]),
-      html.button(
-        [
-          attribute.class("popup-dismiss"),
-          attribute.attribute("type", "button"),
-          attribute.attribute(
-            "data-message",
-            "dismiss-popup:" <> int.to_string(popup.id),
-          ),
-          attribute.attribute("aria-label", "Dismiss notification"),
-        ],
-        [html.text("×")],
-      ),
-    ])
-  })
+fn render_popup(popup: shared.Popup) -> Element(shared.Message) {
+  html.div([attribute.class("popup"), attribute.role("status")], [
+    html.p([attribute.class("popup-body")], [html.text(popup.body)]),
+    html.button(
+      [
+        attribute.class("popup-dismiss"),
+        attribute.attribute("type", "button"),
+        attribute.attribute(
+          "data-message",
+          "dismiss-popup:" <> int.to_string(popup.id),
+        ),
+        attribute.attribute("aria-label", "Dismiss notification"),
+      ],
+      [html.text("×")],
+    ),
+  ])
 }
 
 // =============================================================================
@@ -653,30 +697,13 @@ fn room_composer() -> component.Component(
       }
     },
   )
-  |> event.on_global(
-    event: event.input,
-    selector: "#room-input",
+  |> event.on_input(
     handler: fn(text) { shared.Session(shared.UpdateDraft(text)) },
-    options: event.defaults,
+    options: at("#room-input"),
   )
-  |> event.on_global_decoded(
-    event: event.form_submit,
-    selector: "#username-form",
-    decoder: parse_username_submit,
-    options: event.defaults,
-  )
-  |> event.on_global_decoded(
-    event: event.form_submit,
-    selector: "#join-room-form",
-    decoder: parse_join_room,
-    options: event.defaults,
-  )
-  |> event.on_global_decoded(
-    event: event.form_submit,
-    selector: "#room-form",
-    decoder: parse_room_submit,
-    options: event.defaults,
-  )
+  |> submitting("#username-form", parse_username_submit)
+  |> submitting("#join-room-form", parse_join_room)
+  |> submitting("#room-form", parse_room_submit)
 }
 
 fn username_form() -> Element(shared.Message) {

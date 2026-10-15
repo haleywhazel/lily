@@ -1,11 +1,9 @@
-//// The [`Store`](#Store) holds your application state and update logic,
-//// shared across client and server. The mental model is very simple, each
-//// store holds a basic model type and an update function
-//// `fn(model, message) -> model`. The store is agnostic to how your frontend
-//// actually displays these components, with the view function or rendering
-//// detached (unlike Lustre and closer to Redux).
-////
-//// Here's a minimal example of a counter:
+//// In Lily, the [`Store`](#Store) holds your model (application state) and
+//// message update logic. The same store within your shared package should
+//// be used on both frontend and backend. Each message updates the model, with
+//// the standard case of the update function being
+//// `update(model: Model, message: Message) -> Model` that uses pattern
+//// matching over potential messages:
 ////
 //// ```gleam
 //// pub type Model {
@@ -23,392 +21,471 @@
 ////     Decrement -> Model(count: model.count - 1)
 ////   }
 //// }
-////
-//// // this should be in your client/frontend code
-//// let store = store.new(Model(count: 0), with: update)
 //// ```
 ////
-//// You wrap it with `store.new` on the client and pipe the result into
-//// [`client.start`](./client.html#start).
+//// // this should be in your client/frontend code
 ////
-//// The server is then set up separately via [`server.new`](./server.html#new),
-//// where [`Wiring`](#Wiring) comes into play. Syncing your model with the
-//// server splits your model into a per-connection `session` slice and then
-//// shared `topic` slices (see the [topic](./topic.html) module for more info).
-//// For each message, the wiring allows us to figure out which message belongs
-//// where (through `extract`), how the slice should update (`update`), and how
-//// to read and write the slice on the outer model (`field_get`/`field_set`).
-//// It also merges server snapshots back into the right slice.
+//// Within your client/frontend code, you can then add the following to
+//// initialise the store:
 ////
-//// Build one `Wiring` in your `shared` package and hand the same value to
-//// both the client (passed to [`client.start`](./client.html#start)) and the
-//// server (passed to [`server.new`](./server.html#new)):
+//// ```
+//// let store = store.new(init: Model(count: 0), update: update)
+//// ```
+////
+//// This can then be passed onto [`client.start`](./client.html#start) to
+//// begin a client-only app with a set store. To sync with a server, pipe it
+//// through [`sync`](#sync), changing its type so that you can connect it on
+//// the frontend with [`client.connect`](./client.html#connect) and
+//// [`server.new`](./server.html#new) on the backend.
+////
+//// The `route` function says where each message goes, to this connection's
+//// session, to a shared topic, or staying on the client that sent it
+//// ([`Local`](#Route)).
+////
+//// Build one store in your `shared` package and hand the same value to both
+//// the client and the server:
 ////
 //// ```gleam
 //// import lily/store
+//// import lily/transport
 ////
-//// pub fn wiring() -> store.Wiring(Model, Message) {
-////   store.wiring()
-////   |> store.session(
-////     extract: fn(message) {
+//// pub fn store() -> store.Store(Model, Message, store.Synced) {
+////   store.new(init: initial_model(), update: update)
+////   |> store.sync(
+////     route: fn(message) {
+////       // wrap your messages within another type and pattern match on constructors
 ////       case message {
-////         Session(inner) -> Ok(inner)
-////         _ -> Error(Nil)
+////         Chat(_) -> store.Topic("chat")
+////         Profile(_) -> store.Session
+////         Hover(_) -> store.Local
 ////       }
 ////     },
-////     update: session_update,
-////     field_get: fn(model: Model) { model.session },
-////     field_set: fn(model, session) { Model(..model, session:) },
+////     modules: [transport.module("shared")],
+////   )
+////   |> store.session(
+////     get: fn(model) { model.session },
+////     set: fn(model, session) { Model(..model, session:) },
 ////   )
 ////   |> store.topic(
-////     id: "chat",
-////     extract: fn(message) {
-////       case message {
-////         Chat(inner) -> Ok(inner)
-////         _ -> Error(Nil)
-////       }
-////     },
-////     update: chat_update,
-////     field_get: fn(model: Model) { model.chat },
-////     field_set: fn(model, chat) { Model(..model, chat:) },
+////     prefix: "chat",
+////     get: fn(model, _id) { model.chat },
+////     set: fn(model, _id, chat) { Model(..model, chat:) },
+////     access: store.Open,
 ////   )
-////   // you can chain more topics by determining a different topic id
 //// }
 //// ```
 ////
-//// Model fields that should not be synced to the server can be wrapped in
-//// [`Local`](#Local). The server holds `Local` fields at their initial values
-//// and the client runtime preserves them when the server sends a snapshot on
-//// reconnect. Pair with
-//// [`client.session_field`](./client.html#session_field) to persist them
-//// across page navigations.
+//// The server runs `update` against its own copy of the model, one per
+//// connection and one per topic, and sends back only the slice that the
+//// `get` and `set` pair describes. Every copy starts from the initial model.
+//// A topic whose state lives somewhere else, like a database, can start from
+//// its own model with [`server.topic_init`](./server.html#topic_init).
 ////
-//// The same store runs on the client via
-//// [`client.start`](./client.html#start) and the server via
-//// [`server.start`](./server.html#start), meaning your `update` function
-//// works identically on both sides.
+//// Topics are basically stores with shared prefixes with [`Access`](#Access)
+//// rules for subscriptions. Because the longest matching prefix is used for
+//// matching, end the prefix with a separator (e.g. a colon). The server
+//// will start a topic the first time someone subscribes to it or sends a
+//// message to it.
+////
+//// Which topics a client subscribes/listens to is a function of its model
+//// under [`subscriptions`](#subscriptions). Lily compares it after every
+//// update and subscribes and unsubscribes to match.
+////
+//// A server that renders the first page can embed the model the client starts
+//// from with [`initial_snapshot`](#initial_snapshot) using the same
+//// serialiser the store syncs with.
 
 // =============================================================================
 // IMPORTS
 // =============================================================================
 
+import gleam/bit_array
 import gleam/list
 import gleam/option.{type Option}
-import gleam/result
 import gleam/string
-import lily/transport.{type Target}
+import lily/internal/codec
+import lily/transport.{type Serialiser, type Target}
 
 // =============================================================================
 // PUBLIC TYPES
 // =============================================================================
 
-/// Wrap client-only model fields that shouldn't sync to the server. The server
-/// holds them at their initial values and the client preserves them when
-/// applying a snapshot on reconnect.
+/// Who can subscribe to a topic, passed to [`topic`](#topic).
 ///
-/// Pattern matching gets the value back out quite easily.
-///
-/// ```gleam
-/// pub type Model {
-///   Model(count: Int, theme: store.Local(String))
-/// }
-///
-/// let store.Local(theme) = model.theme
-/// ```
-pub type Local(a) {
-  Local(a)
+/// `Allow` gets the client id, the topic id and that client's session model,
+/// which holds whatever the server wrote into it. A client it refuses sees a
+/// [`SubscriptionRejected`](./client.html#ClientEvent).
+pub type Access(model) {
+  /// Anyone can subscribe
+  Open
+  /// Only clients the function returns `True` for
+  Allow(fn(String, String, model) -> Bool)
 }
 
-/// Your application state and update logic. Runs on both the client
+/// Where a message goes.
+pub type Route {
+  /// This client's own session on the server
+  Session
+  /// The shared topic with this id
+  Topic(id: String)
+  /// Stays on this client, never sent to the server
+  Local
+}
+
+/// A store that doesn't sync, for a client-only app.
+pub type Standalone
+
+/// Your model and update logic, shared by the client
 /// ([`client.start`](./client.html#start)) and the server
-/// ([`server.start`](./server.html#start)). Construct via [`new`](#new),
-/// fields are opaque so the layout can evolve.
-pub opaque type Store(model, message) {
-  Store(model: model, update: fn(model, message) -> model)
-}
-
-/// Wiring configuration for multi-store Lily apps. Tells the client how to
-/// dispatch messages to the session or a topic store, and how to merge incoming
-/// snapshots back into the outer model. Build with [`wiring`](#wiring), then
-/// pipe through [`session`](#session) and [`topic`](#topic).
-pub opaque type Wiring(model, message) {
-  Wiring(
-    session: Option(TargetConfig(model, message)),
-    topics: List(#(String, TargetConfig(model, message))),
-    kinds: List(KindConfig(model, message)),
+/// ([`server.new`](./server.html#new)).
+///
+/// Create one with [`new`](#new).
+pub opaque type Store(model, message, mode) {
+  Store(
+    model: model,
+    update: fn(model, message) -> model,
+    sync: Sync(model, message),
+    synced: Bool,
   )
 }
+
+/// A store that syncs with a server, from [`sync`](#sync).
+/// [`client.connect`](./client.html#connect) and
+/// [`server.new`](./server.html#new) need one.
+pub type Synced
 
 // =============================================================================
 // PUBLIC FUNCTIONS
 // =============================================================================
 
-/// Create a store, seeded with an `initial_model` (like Lustre's `init`) and
-/// an update function that transforms the model for a given `message`.
+/// Embeds `model` in a server-rendered page as a `<script>` tag, letting
+/// [`client.start`](./client.html#start) start from it.
+///
+/// It only carries the model, rendering the page's HTML is up to you.
 ///
 /// ```gleam
-/// let app_store =
-///   Model(count: 0, user: "Guest")
-///   |> store.new(with: update)
+/// let body = "<!DOCTYPE html><html><body>"
+///   <> "<div id=\"app\">" <> rendered_html <> "</div>"
+///   <> store.initial_snapshot(shared.store(), model: initial_model)
+///   <> "</body></html>"
 /// ```
-pub fn new(
-  initial_model model: model,
-  with update: fn(model, message) -> model,
-) -> Store(model, message) {
-  Store(model: model, update: update)
+pub fn initial_snapshot(
+  store: Store(model, message, Synced),
+  model model: model,
+) -> String {
+  let frame =
+    transport.Snapshot(target: transport.Session, sequence: 0, state: model)
+  let serialiser = store.sync.serialiser
+  let bytes =
+    transport.encode_as(
+      frame,
+      serialiser:,
+      format: transport.server_format(serialiser),
+    )
+  "<script type=\"application/octet-stream\" id=\"lily-snapshot\">"
+  <> bit_array.base64_encode(bytes, True)
+  <> "</script>"
 }
 
-/// Register the session store entry in the wiring. `extract` identifies session
-/// messages, `update` applies them to the session sub-model, `field_get`/
-/// `field_set` map between the outer model and the session sub-model.
+/// Creates a store, with an `init` model (like Lustre's `init`) and a function
+/// that updates the model for a given `message`.
 ///
 /// ```gleam
-/// store.wiring()
-/// |> store.session(
-///   extract: fn(message) {
-///     case message {
-///       Session(inner) -> Ok(inner)
-///       _ -> Error(Nil)
-///     }
-///   },
-///   update: session_update,
-///   field_get: fn(model: Model) { model.session },
-///   field_set: fn(model, session) { Model(..model, session:) },
+/// store.new(init: Model(count: 0, user: "Someone"), update: update)
+/// ```
+pub fn new(
+  init init: model,
+  update update: fn(model, message) -> model,
+) -> Store(model, message, Standalone) {
+  Store(
+    model: init,
+    update:,
+    // don't send anything for now until later pipe constructors
+    sync: Sync(
+      route: fn(_) { Local },
+      serialiser: transport.automatic(
+        format: transport.Json,
+        max_decode_depth: codec.default_max_depth,
+        modules: [],
+      ),
+      session: option.None,
+      topics: [],
+      subscriptions: fn(_) { [] },
+    ),
+    synced: False,
+  )
+}
+
+/// Says which part of the model is this client's session, through a `get` and
+/// `set` pair, making sure the server's copy of it lands in the right place.
+///
+/// Needed whenever `route` sends anything to `Session`. Without it the server
+/// still applies those messages but its copy never reaches the client, which
+/// warns once with a [`Diagnostic`](./client.html#ClientEvent).
+///
+/// ```gleam
+/// store.session(
+///   get: fn(model) { model.session },
+///   set: fn(model, session) { Model(..model, session:) },
 /// )
 /// ```
 pub fn session(
-  wiring: Wiring(model, message),
-  extract extract: fn(message) -> Result(session_message, Nil),
-  update update: fn(session_model, session_message) -> session_model,
-  field_get field_get: fn(model) -> session_model,
-  field_set field_set: fn(model, session_model) -> model,
-) -> Wiring(model, message) {
-  let config = make_target_config(extract, update, field_get, field_set)
-  Wiring(..wiring, session: option.Some(config))
+  store: Store(model, message, Synced),
+  get get: fn(model) -> slice,
+  set set: fn(model, slice) -> model,
+) -> Store(model, message, Synced) {
+  with_sync(store, fn(sync) {
+    Sync(
+      ..sync,
+      session: option.Some(fn(current, snapshot) { set(current, get(snapshot)) }),
+    )
+  })
 }
 
-/// Register a topic store entry in the wiring. `id` is the topic identifier
-/// used in `client.subscribe`, other parameters match [`session`](#session).
+/// The topic ids this client wants to subscribe to, as a function of its
+/// model.
+///
+/// Lily subscribes and unsubscribes after every update to match, sparing you
+/// from doing it by hand.
 ///
 /// ```gleam
-/// store.wiring()
-/// |> store.topic(
-///   id: "chat",
-///   extract: fn(message) {
-///     case message {
-///       Chat(inner) -> Ok(inner)
-///       _ -> Error(Nil)
-///     }
+/// store.subscriptions(fn(model) {
+///   case model.joined_room {
+///     option.Some(room) -> ["room:" <> room]
+///     option.None -> []
+///   }
+/// })
+/// ```
+pub fn subscriptions(
+  store: Store(model, message, Synced),
+  subscriptions: fn(model) -> List(String),
+) -> Store(model, message, Synced) {
+  with_sync(store, fn(sync) { Sync(..sync, subscriptions:) })
+}
+
+/// Adds client-server synchronisation to the store.
+///
+/// `route` decides where each message goes (see [`Route`](#Route)) and
+/// `modules` names the modules that define the types you send, letting Lily
+/// serialise them for you.
+///
+/// ```gleam
+/// store.new(init: initial_model(), update: update)
+/// |> store.sync(route: route, modules: [transport.module("shared")])
+/// ```
+///
+/// Messages travel as JSON on `localhost` and MessagePack everywhere else,
+/// letting you read them in DevTools while developing. Use
+/// [`sync_with`](#sync_with) to pick one.
+pub fn sync(
+  store: Store(model, message, Standalone),
+  route route: fn(message) -> Route,
+  modules modules: List(transport.Module),
+) -> Store(model, message, Synced) {
+  sync_with(
+    store,
+    route:,
+    serialiser: transport.automatic(
+      format: transport.ByHost,
+      max_decode_depth: codec.default_max_depth,
+      modules:,
+    ),
+  )
+}
+
+/// Syncs the store with a serialiser of your own, from
+/// [`transport.automatic`](./transport.html#automatic) or
+/// [`transport.serialiser`](./transport.html#serialiser).
+pub fn sync_with(
+  store: Store(model, message, Standalone),
+  route route: fn(message) -> Route,
+  serialiser serialiser: Serialiser(model, message),
+) -> Store(model, message, Synced) {
+  Store(..store, sync: Sync(..store.sync, route:, serialiser:), synced: True)
+}
+
+/// Declares a topic (or a collection of them) shared between clients.
+///
+/// Ids that start with `prefix` belong to it and the longest matching prefix
+/// wins, meaning every prefix should end on a separator such as a colon.
+///
+/// `get` and `set` read and write one topic's part of the model, given the
+/// rest of the id after the prefix (empty for a topic with a fixed name).
+/// `access` says who can subscribe, see [`Access`](#Access).
+///
+/// A collection of topics uses the rest of the id:
+///
+/// ```gleam
+/// store.topic(
+///   prefix: "room:",
+///   get: fn(model, id) {
+///     dict.get(model.rooms, id) |> result.unwrap(new_room())
 ///   },
-///   update: chat_update,
-///   field_get: fn(model: Model) { model.chat },
-///   field_set: fn(model, chat) { Model(..model, chat:) },
+///   set: fn(model, id, room) {
+///     Model(..model, rooms: dict.insert(model.rooms, id, room))
+///   },
+///   access: store.Open,
+/// )
+/// ```
+///
+/// A topic with a fixed name ignores it:
+///
+/// ```gleam
+/// store.topic(
+///   prefix: "chat",
+///   get: fn(model, _) { model.chat },
+///   set: fn(model, _, chat) { Model(..model, chat:) },
+///   access: store.Open,
 /// )
 /// ```
 pub fn topic(
-  wiring: Wiring(model, message),
-  id id: String,
-  extract extract: fn(message) -> Result(topic_message, Nil),
-  update update: fn(topic_model, topic_message) -> topic_model,
-  field_get field_get: fn(model) -> topic_model,
-  field_set field_set: fn(model, topic_model) -> model,
-) -> Wiring(model, message) {
-  let config = make_target_config(extract, update, field_get, field_set)
-  Wiring(..wiring, topics: list.key_set(wiring.topics, id, config))
-}
-
-/// Register a parametric topic family in the wiring. Where [`topic`](#topic)
-/// binds one id to one slice, `topic_kind` binds a family of dynamic ids
-/// sharing `prefix` (`"room:1"`, `"room:2"`, ...) to a keyed slice, so a client
-/// can subscribe to many instances at once.
-///
-/// `extract` returns the instance key plus the sub-message, and the wire id is
-/// `prefix <> key`. `field_get`/`field_set` read and write one instance's
-/// sub-model by key, so they're backed with a keyed collection like
-/// `Dict(String, _)`. This one entry routes outgoing messages, incoming
-/// updates, and snapshot merges to the right key.
-///
-/// ```gleam
-/// store.wiring()
-/// |> store.topic_kind(
-///   prefix: "room:",
-///   extract: fn(message) {
-///     case message {
-///       Room(id, inner) -> Ok(#(int.to_string(id), inner))
-///       _ -> Error(Nil)
-///     }
-///   },
-///   update: room_update,
-///   field_get: fn(model: Model, key) {
-///     dict.get(model.rooms, key) |> result.unwrap(new_room())
-///   },
-///   field_set: fn(model, key, room) {
-///     Model(..model, rooms: dict.insert(model.rooms, key, room))
-///   },
-/// )
-/// ```
-pub fn topic_kind(
-  wiring: Wiring(model, message),
+  store: Store(model, message, Synced),
   prefix prefix: String,
-  extract extract: fn(message) -> Result(#(String, kind_message), Nil),
-  update update: fn(kind_model, kind_message) -> kind_model,
-  field_get field_get: fn(model, String) -> kind_model,
-  field_set field_set: fn(model, String, kind_model) -> model,
-) -> Wiring(model, message) {
-  let config = make_kind_config(prefix, extract, update, field_get, field_set)
-  Wiring(..wiring, kinds: [config, ..wiring.kinds])
-}
-
-/// Create an empty wiring. Pipe through [`session`](#session),
-/// [`topic`](#topic), and [`topic_kind`](#topic_kind) to register stores, then
-/// pass to [`client.start`](./client.html#start) and
-/// [`server.new`](./server.html#new).
-///
-/// ```gleam
-/// store.wiring()
-/// |> store.session(extract:, update:, field_get:, field_set:)
-/// |> store.topic(id: "chat", extract:, update:, field_get:, field_set:)
-/// ```
-pub fn wiring() -> Wiring(model, message) {
-  Wiring(session: option.None, topics: [], kinds: [])
+  get get: fn(model, String) -> slice,
+  set set: fn(model, String, slice) -> model,
+  access access: Access(model),
+) -> Store(model, message, Synced) {
+  with_sync(store, fn(sync) {
+    let entry =
+      TopicEntry(prefix:, access:, merge: fn(current, key, snapshot) {
+        set(current, key, get(snapshot, key))
+      })
+    let others = list.filter(sync.topics, fn(other) { other.prefix != prefix })
+    Sync(..sync, topics: [entry, ..others])
+  })
 }
 
 // =============================================================================
 // INTERNAL FUNCTIONS
 // =============================================================================
 
-/// Apply a message to the store, returning the updated store. Used for batch
-/// rendering, several messages apply before one render frame so rapid bursts
-/// coalesce into a single DOM update.
 @internal
-pub fn apply(
-  store: Store(model, message),
-  message message: message,
-) -> Store(model, message) {
-  let new_model = store.update(store.model, message)
-  Store(..store, model: new_model)
+pub fn access_for(
+  store: Store(model, message, mode),
+  topic_id: String,
+) -> Result(Access(model), Nil) {
+  case entry_for(store, topic_id) {
+    Ok(entry) -> Ok(entry.access)
+    Error(Nil) -> Error(Nil)
+  }
 }
 
-/// Apply a message to the outer model using the appropriate wiring entry.
-/// A no-op if no matching target is found.
 @internal
-pub fn apply_message(
-  wiring: Wiring(model, message),
-  model: model,
-  message: message,
-) -> model {
-  on_session_else_topic(
-    wiring,
-    message,
-    fn(config) { config.apply(model, message) },
-    fn() { apply_to_topics(wiring, model, message) },
-  )
-}
-
-/// Read the current model out of a [`Store`](#Store). Used by sibling modules
-/// and tests that inspect the store's contents.
-@internal
-pub fn get_model(store: Store(model, message)) -> model {
+pub fn get_model(store: Store(model, message, mode)) -> model {
   store.model
 }
 
-/// Merge a snapshot into the current outer model by replacing only the slice
-/// belonging to `target` and leaving all other slices intact.
+@internal
+pub fn has_session(store: Store(model, message, mode)) -> Bool {
+  option.is_some(store.sync.session)
+}
+
+@internal
+pub fn longest_prefix(
+  entries: List(entry),
+  id: String,
+  prefix_of: fn(entry) -> String,
+) -> Result(entry, Nil) {
+  list.fold(entries, Error(Nil), fn(best, entry) {
+    let prefix = prefix_of(entry)
+    case string.starts_with(id, prefix), best {
+      False, _ -> best
+      True, Error(Nil) -> Ok(entry)
+      True, Ok(incumbent) ->
+        case string.length(prefix) > string.length(prefix_of(incumbent)) {
+          True -> Ok(entry)
+          False -> best
+        }
+    }
+  })
+}
+
+/// Replaces only the slice of `current` that belongs to `target`.
 @internal
 pub fn merge_snapshot(
-  wiring: Wiring(model, message),
+  store: Store(model, message, mode),
   target: Target,
   current: model,
-  snapshot_state: model,
+  snapshot: model,
 ) -> model {
   case target {
     transport.Session ->
-      case wiring.session {
-        option.Some(c) -> c.merge_snapshot(current, snapshot_state)
+      case store.sync.session {
+        option.Some(merge) -> merge(current, snapshot)
         option.None -> current
       }
     transport.Topic(id) ->
-      case list.key_find(wiring.topics, id) {
-        Ok(c) -> c.merge_snapshot(current, snapshot_state)
-        Error(_) ->
-          case matching_kind(wiring, id) {
-            option.Some(kind) -> {
-              let key = string.drop_start(id, string.length(kind.prefix))
-              kind.merge_snapshot(current, key, snapshot_state)
-            }
-            option.None -> current
-          }
+      case entry_for(store, id) {
+        Ok(entry) ->
+          entry.merge(
+            current,
+            string.drop_start(id, string.length(entry.prefix)),
+            snapshot,
+          )
+        Error(Nil) -> current
       }
   }
 }
 
-/// Determine which target a message routes to. Returns `Session` when no topic
-/// extract accepts it, the safe fallback for unrecognised messages. Session
-/// wins if both a session and a topic extract accept the same message, so
-/// topic `extract` functions must be mutually exclusive.
+/// `Local` for a store that isn't synced.
 @internal
-pub fn route_message(
-  wiring: Wiring(model, message),
-  message: message,
-) -> Target {
-  on_session_else_topic(
-    wiring,
-    message,
-    fn(_config) { transport.Session },
-    fn() { topic_target(wiring, message) },
-  )
+pub fn route(store: Store(model, message, mode), message: message) -> Route {
+  store.sync.route(message)
 }
 
-/// The apply-message function for the session store entry (if any). Used by
-/// `server.gleam` to build the session-message handler at start time.
 @internal
-pub fn session_apply(
-  wiring: Wiring(model, message),
-) -> Option(fn(model, message) -> model) {
-  option.map(wiring.session, fn(config) { config.apply })
-}
-
-/// The apply-message function for a named topic entry, if any. Used by
-/// `topic.gleam` to build the topic-store handler in `with_store`.
-@internal
-pub fn topic_apply(
-  wiring: Wiring(model, message),
-  id: String,
-) -> Option(fn(model, message) -> model) {
-  case list.key_find(wiring.topics, id) {
-    Ok(config) -> option.Some(config.apply)
-    Error(_) -> matching_kind(wiring, id) |> option.map(fn(kind) { kind.apply })
+pub fn serialiser(
+  store: Store(model, message, mode),
+) -> Result(Serialiser(model, message), Nil) {
+  case store.synced {
+    True -> Ok(store.sync.serialiser)
+    False -> Error(Nil)
   }
+}
+
+@internal
+pub fn serialiser_of(
+  store: Store(model, message, Synced),
+) -> Serialiser(model, message) {
+  store.sync.serialiser
+}
+
+@internal
+pub fn subscriptions_of(
+  store: Store(model, message, mode),
+  model: model,
+) -> List(String) {
+  store.sync.subscriptions(model)
+}
+
+@internal
+pub fn update_function(
+  store: Store(model, message, mode),
+) -> fn(model, message) -> model {
+  store.update
 }
 
 // =============================================================================
 // PRIVATE TYPES
 // =============================================================================
 
-/// Config for a parametric topic family (see [`topic_kind`](#topic_kind)).
-type KindConfig(model, message) {
-  KindConfig(
-    prefix: String,
-    is_for_target: fn(message) -> Bool,
-    topic_id_of: fn(message) -> Result(String, Nil),
-    apply: fn(model, message) -> model,
-    merge_snapshot: fn(model, String, model) -> model,
+type Sync(model, message) {
+  Sync(
+    route: fn(message) -> Route,
+    serialiser: Serialiser(model, message),
+    // merges a snapshot's session slice into the current model
+    session: Option(fn(model, model) -> model),
+    topics: List(TopicEntry(model)),
+    subscriptions: fn(model) -> List(String),
   )
 }
 
-/// Outcome of routing a non-session message, either a fixed topic entry, a
-/// parametric kind, or nothing.
-type RouteMatch(model, message) {
-  MatchedTopic(id: String, config: TargetConfig(model, message))
-  MatchedKind(config: KindConfig(model, message))
-  MatchedNone
-}
-
-type TargetConfig(model, message) {
-  TargetConfig(
-    is_for_target: fn(message) -> Bool,
-    apply: fn(model, message) -> model,
-    merge_snapshot: fn(model, model) -> model,
+type TopicEntry(model) {
+  TopicEntry(
+    prefix: String,
+    access: Access(model),
+    // merges the slice for the rest of the id after the prefix
+    merge: fn(model, String, model) -> model,
   )
 }
 
@@ -416,143 +493,16 @@ type TargetConfig(model, message) {
 // PRIVATE FUNCTIONS
 // =============================================================================
 
-fn apply_to_topics(
-  wiring: Wiring(model, message),
-  model: model,
-  message: message,
-) -> model {
-  case match_topic_route(wiring, message) {
-    MatchedTopic(_id, config) -> config.apply(model, message)
-    MatchedKind(kind) -> kind.apply(model, message)
-    MatchedNone -> model
-  }
+fn entry_for(
+  store: Store(model, message, mode),
+  topic_id: String,
+) -> Result(TopicEntry(model), Nil) {
+  longest_prefix(store.sync.topics, topic_id, fn(entry) { entry.prefix })
 }
 
-/// Find the exact topic entry whose extract accepts this message.
-///
-/// First match wins.
-fn find_topic_entry(
-  wiring: Wiring(model, message),
-  message: message,
-) -> Result(#(String, TargetConfig(model, message)), Nil) {
-  list.find(wiring.topics, fn(pair) { { pair.1 }.is_for_target(message) })
-}
-
-fn make_kind_config(
-  prefix: String,
-  extract: fn(message) -> Result(#(String, kind_message), Nil),
-  update: fn(kind_model, kind_message) -> kind_model,
-  field_get: fn(model, String) -> kind_model,
-  field_set: fn(model, String, kind_model) -> model,
-) -> KindConfig(model, message) {
-  KindConfig(
-    prefix: prefix,
-    is_for_target: fn(message) { result.is_ok(extract(message)) },
-    topic_id_of: fn(message) {
-      extract(message) |> result.map(fn(pair) { prefix <> pair.0 })
-    },
-    apply: fn(model, message) {
-      case extract(message) {
-        Ok(#(key, inner)) ->
-          field_set(model, key, update(field_get(model, key), inner))
-        Error(_) -> model
-      }
-    },
-    merge_snapshot: fn(current, key, snapshot) {
-      field_set(current, key, field_get(snapshot, key))
-    },
-  )
-}
-
-fn make_target_config(
-  extract: fn(message) -> Result(sub_message, Nil),
-  update: fn(sub_model, sub_message) -> sub_model,
-  field_get: fn(model) -> sub_model,
-  field_set: fn(model, sub_model) -> model,
-) -> TargetConfig(model, message) {
-  TargetConfig(
-    is_for_target: fn(message) { result.is_ok(extract(message)) },
-    apply: fn(model, message) {
-      case extract(message) {
-        Ok(inner) -> field_set(model, update(field_get(model), inner))
-        Error(_) -> model
-      }
-    },
-    merge_snapshot: fn(current, snapshot) {
-      field_set(current, field_get(snapshot))
-    },
-  )
-}
-
-/// Route a non-session message to its topic target using the shared rule, the
-/// exact topic entry first and then a parametric kind.
-///
-/// Both `apply_to_topics` and `topic_target` go through this.
-fn match_topic_route(
-  wiring: Wiring(model, message),
-  message: message,
-) -> RouteMatch(model, message) {
-  case find_topic_entry(wiring, message) {
-    Ok(#(id, config)) -> MatchedTopic(id:, config:)
-    Error(_) ->
-      case list.find(wiring.kinds, fn(kind) { kind.is_for_target(message) }) {
-        Ok(kind) -> MatchedKind(config: kind)
-        Error(_) -> MatchedNone
-      }
-  }
-}
-
-/// Find the kind whose prefix matches `id`, longest prefix wins when several
-/// match so the more specific family is chosen.
-fn matching_kind(
-  wiring: Wiring(model, message),
-  id: String,
-) -> Option(KindConfig(model, message)) {
-  wiring.kinds
-  |> list.fold(option.None, fn(best, kind) {
-    case string.starts_with(id, kind.prefix) {
-      False -> best
-      True -> {
-        let length = string.length(kind.prefix)
-        case best {
-          option.Some(#(_, best_length)) if best_length >= length -> best
-          _ -> option.Some(#(kind, length))
-        }
-      }
-    }
-  })
-  |> option.map(fn(pair) { pair.0 })
-}
-
-/// Run `on_session` with the session config when it exists and accepts the
-/// message, otherwise fall back to `on_topic`.
-fn on_session_else_topic(
-  wiring: Wiring(model, message),
-  message: message,
-  on_session: fn(TargetConfig(model, message)) -> a,
-  on_topic: fn() -> a,
-) -> a {
-  case wiring.session {
-    option.Some(config) ->
-      case config.is_for_target(message) {
-        True -> on_session(config)
-        False -> on_topic()
-      }
-    option.None -> on_topic()
-  }
-}
-
-/// Route a non-session message: exact topic entry first, else a parametric kind
-/// (concrete id `prefix <> key` from the message). Falls back to `Session` when
-/// nothing matches.
-fn topic_target(wiring: Wiring(model, message), message: message) -> Target {
-  case match_topic_route(wiring, message) {
-    MatchedTopic(id, _) -> transport.Topic(id)
-    MatchedKind(kind) ->
-      case kind.topic_id_of(message) {
-        Ok(id) -> transport.Topic(id)
-        Error(_) -> transport.Session
-      }
-    MatchedNone -> transport.Session
-  }
+fn with_sync(
+  store: Store(model, message, mode),
+  change: fn(Sync(model, message)) -> Sync(model, message),
+) -> Store(model, message, mode) {
+  Store(..store, sync: change(store.sync))
 }
