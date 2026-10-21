@@ -1,7 +1,7 @@
 /**
  * ACTOR (JAVASCRIPT)
  *
- * Mutable box, try/catch and try/finally wrappers, console logging.
+ * Mutable box, try/catch and try/finally wrappers, timers, console logging.
  */
 
 // =============================================================================
@@ -24,6 +24,10 @@ export function boxNew(value) {
 
 export function boxSet(box, value) {
   box.value = value;
+}
+
+export function later(milliseconds, run) {
+  setTimeout(run, milliseconds);
 }
 
 export function log(level, message) {

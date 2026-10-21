@@ -9,7 +9,9 @@ import gleam/bit_array
 import gleam/list
 import gleam/option
 import gleam/string
+
 import gleeunit/should
+
 import lily/server
 import lily/test_support.{Increment, SetName}
 import lily/transport
@@ -68,8 +70,9 @@ pub fn server_connect_sends_version_then_connected_test() {
   let #(_connection, frames) = wire_support.open_recording(app, "c1", [])
 
   case frames() {
-    [transport.Version(hash:), connected] -> {
+    [transport.Version(hash:, protocol:), connected] -> {
       { hash != "" } |> should.be_true
+      protocol |> should.equal(transport.protocol_version)
       connected |> should.equal(transport.Connected(client_id: "c1"))
     }
     _ -> should.fail()
@@ -115,7 +118,7 @@ pub fn server_disconnect_removes_the_client_test() {
   let app = test_support.new_server()
   let _ = wire_support.open(app, "c1")
 
-  server.disconnect(server.connection(app, "c1"))
+  server.disconnect(server.connection(app, client_id: "c1"))
 
   test_support.client_count(app)
   |> should.equal(0)
@@ -124,7 +127,7 @@ pub fn server_disconnect_removes_the_client_test() {
 pub fn server_disconnect_nonexistent_test() {
   let app = test_support.new_server()
 
-  server.disconnect(server.connection(app, "ghost"))
+  server.disconnect(server.connection(app, client_id: "ghost"))
 
   test_support.client_count(app)
   |> should.equal(0)
@@ -169,7 +172,7 @@ pub fn server_disconnect_twice_is_reported_once_test() {
 pub fn server_connection_reports_the_client_id_it_was_made_for_test() {
   let app = test_support.new_server()
 
-  server.connection(app, "c1")
+  server.connection(app, client_id: "c1")
   |> server.client_id
   |> should.equal("c1")
 }
@@ -187,7 +190,7 @@ pub fn server_a_connection_handle_made_from_an_id_reaches_the_same_client_test()
   let app = test_support.new_server()
   let #(opened, frames) = wire_support.open(app, "c1")
 
-  let rebuilt = server.connection(app, server.client_id(opened))
+  let rebuilt = server.connection(app, client_id: server.client_id(opened))
   wire_support.session_message(rebuilt, Increment)
 
   frames()
@@ -298,7 +301,7 @@ pub fn server_connect_streams_the_seed_back_to_the_client_test() {
 }
 
 pub fn server_connect_seeds_session_model_test() {
-  // `connect(session:)` seeds apply first, meaning resync reports the seeded
+  // `connect_as(seed:)` messages apply first, meaning resync reports the seeded
   // model
   let app = test_support.new_server()
   let #(c1, frames) =
@@ -461,7 +464,7 @@ pub fn server_session_message_routed_elsewhere_is_dropped_test() {
   wire_support.session_message(c1, Increment)
 
   frames()
-  |> should.equal([])
+  |> should.equal([transport.Dropped(target: transport.Session)])
   wire_support.resync_session(c1)
   case frames() {
     [transport.Snapshot(state:, sequence: 0, ..)] ->
@@ -490,7 +493,10 @@ pub fn server_incoming_from_unknown_client_test() {
   // c1 not connected, ack goes nowhere and the server carries on
   let app = test_support.new_server()
 
-  wire_support.session_message(server.connection(app, "c1"), Increment)
+  wire_support.session_message(
+    server.connection(app, client_id: "c1"),
+    Increment,
+  )
 
   test_support.client_count(app)
   |> should.equal(0)
@@ -514,6 +520,34 @@ pub fn server_incoming_unknown_protocol_type_test() {
 
   frames()
   |> should.equal([])
+}
+
+pub fn server_incoming_payload_its_route_cannot_match_is_dropped_test() {
+  // any constructor decodes, the store's route is a case it can crash
+  test_support.register_fixtures()
+  let app =
+    test_support.start_server(server.new(
+      test_support.automatic_topic_store(),
+      origins: server.AnyOrigin,
+    ))
+  let #(c1, frames) = wire_support.open_raw(app, "c1", [])
+  let _ = frames()
+  let send = fn(text) {
+    server.incoming(c1, bytes: bit_array.from_string(text))
+  }
+
+  send("{\"type\":\"session_message\",\"payload\":{\"_\":\"Ok\",\"0\":1}}")
+  send("{\"type\":\"session_message\",\"payload\":{\"_\":\"Noop\"}}")
+
+  // the server is still there and answers the next message
+  let assert Ok(last) = list.last(frames())
+  transport.decode(
+    last,
+    serialiser: test_support.automatic_serialiser(transport.Json),
+  )
+  |> should.equal(
+    Ok(transport.Acknowledge(target: transport.Session, sequence: 1)),
+  )
 }
 
 // =============================================================================

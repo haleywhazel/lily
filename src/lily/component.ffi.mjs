@@ -29,6 +29,7 @@ import {
   createEvents,
   dropListeners,
   installMessageClicks,
+  reobserveOwner,
   registerListener,
   setDispatch,
 } from "./event.ffi.mjs";
@@ -50,7 +51,7 @@ export function renderTree(
   component,
   model,
   toHtml,
-  toSlot,
+  toPlaceholder,
   dispatch,
   decodeMessage,
 ) {
@@ -58,8 +59,8 @@ export function renderTree(
   if (!root) {
     log(
       "error",
-      `lily: nothing matches the mount selector "${rootSelector}", so ` +
-        "nothing was rendered",
+      `lily: nothing was rendered, no element matches the mount selector ` +
+        `"${rootSelector}"`,
     );
     return null;
   }
@@ -69,13 +70,14 @@ export function renderTree(
 
   const start = context.counter;
   const [html, owned] = collectOwners(context, () =>
-    renderComponent(context, component, model, toHtml, toSlot),
+    renderComponent(context, component, model, toHtml, toPlaceholder),
   );
   const end = context.counter;
 
   // new ids are all newer, keeping the sweep to the earlier mount
   unregisterSubtree(context, root);
   root.innerHTML = html;
+  resolveMarks(context, root);
   setOwners(context, root, owned);
 
   // seeded components skip, leaving this to mostly populate keyed lists
@@ -89,10 +91,48 @@ export function renderTree(
 // FUNCTIONS
 // =============================================================================
 
-function applyPatches(rootElement, patches) {
+function addClasses(element, classes) {
+  for (const name of classes.split(/\s+/)) {
+    if (name !== "") element.classList.add(name);
+  }
+}
+
+function addOwnerId(element, id) {
+  element.setAttribute(
+    "data-lily-component",
+    [...ownerIds(element), id].join(" "),
+  );
+}
+
+function afterRows(context, node) {
+  let next = node.nextSibling;
+  if (node.tagName !== "TEMPLATE") return next;
+  const id = node.getAttribute("data-lily-component");
+  while (next && context.rows.get(next)?.list === id) next = next.nextSibling;
+  return next;
+}
+
+// a pair the parser split, an implied tbody or a <p> closed by a block
+function alignStart(start, end) {
+  while (!start.parentNode.contains(end)) {
+    const parent = start.parentNode;
+    if (!parent.parentNode) return;
+    parent.parentNode.insertBefore(start, parent.nextSibling);
+  }
+  while (start.parentNode !== end.parentNode) {
+    let container = end.parentNode;
+    while (container.parentNode !== start.parentNode) {
+      container = container.parentNode;
+    }
+    container.insertBefore(start, container.firstChild);
+  }
+}
+
+// rows patch their own root
+function applyPatches(rootElement, patches, matchRoot = false) {
   for (const patch of patches) {
     const element =
-      patch.target === ""
+      patch.target === "" || (matchRoot && rootElement.matches(patch.target))
         ? rootElement
         : rootElement.querySelector(patch.target);
 
@@ -112,21 +152,50 @@ function applyPatches(rootElement, patches) {
     } else if (patch instanceof SetStyle) {
       element.style.setProperty(patch.property, patch.value);
     } else if (patch instanceof RemoveAttribute) {
-      removeAttribute(element, patch.name);
+      if (isRuntimeAttribute(patch.name)) {
+        log("warn", `lily: refused to remove "${patch.name}" in a live patch`);
+      } else {
+        removeAttribute(element, patch.name);
+      }
     }
   }
 }
 
-/** Strips the exit class now, the abort path does it a microtask late. */
-function cancelExitAndStripClass(context, node) {
+function cancelExit(context, node) {
   const controller = context.exits.get(node);
   if (controller) {
     controller.abort();
     context.exits.delete(node);
   }
-  const transitionElement = findTransitionElement(node);
-  const exitClass = transitionElement?.dataset.lilyTransitionExit;
-  if (exitClass) transitionElement.classList.remove(exitClass);
+  setExiting(node, false);
+  reverseExit(context, node);
+}
+
+// ids before `id` belong to a dropped child
+function carryOwnerAttributes(from, to, id) {
+  const ids = ownerIds(from);
+  const kept = ids.slice(Math.max(0, ids.indexOf(id)));
+  to.setAttribute("data-lily-component", [...ownerIds(to), ...kept].join(" "));
+  for (const name of ["data-lily-exiting", "data-lily-key"]) {
+    const value = from.getAttribute(name);
+    if (value !== null) to.setAttribute(name, value);
+  }
+  for (const name of exitingAttributes(from)) {
+    to.setAttribute(name, from.getAttribute(name) ?? "");
+  }
+  // a transition belongs to the innermost id
+  if (kept.length < ids.length) return;
+  const { lilyTransitionEnter: enter, lilyTransitionExit: exit } = from.dataset;
+  if (exit === undefined) return;
+  to.setAttribute("data-lily-transition-enter", enter ?? "");
+  to.setAttribute("data-lily-transition-exit", exit);
+  const duration = from.style.getPropertyValue("--lily-transition-duration");
+  if (duration !== "") {
+    to.style.setProperty("--lily-transition-duration", duration);
+  }
+  for (const name of `${enter ?? ""} ${exit}`.split(/\s+/)) {
+    if (name !== "" && from.classList.contains(name)) to.classList.add(name);
+  }
 }
 
 /** Listener-only owners have no element of their own. */
@@ -144,6 +213,7 @@ function collectOwners(context, render) {
 function contextFor(runtime) {
   let context = contexts.get(runtime);
   if (context) return context;
+  const wrappers = new WeakSet();
   context = {
     prefix: `r${runtimeCount++}`,
     // component ids, source of every render range
@@ -157,9 +227,17 @@ function contextFor(runtime) {
     collected: null,
     // pending exits by element, a returning key cancels its exit
     exits: new Map(),
-    // off during each row renders, row listeners ignored by design
-    collecting: true,
-    events: createEvents(),
+    // replacement element to the shared child it pushed out
+    departed: new WeakMap(),
+    // cancelled exits easing back
+    reversals: new Map(),
+    // mark id to its pending spec
+    marks: new Map(),
+    // row element to its row record
+    rows: new WeakMap(),
+    // divs the renderer made, not the app's markup
+    wrappers,
+    events: createEvents(wrappers),
   };
   contexts.set(runtime, context);
   const registry = context.registry;
@@ -169,25 +247,8 @@ function contextFor(runtime) {
   return context;
 }
 
-function cssDurationMilliseconds(value) {
-  let max = 0;
-  for (const part of String(value).split(",")) {
-    const text = part.trim();
-    let milliseconds = 0;
-    if (text.endsWith("ms")) milliseconds = parseFloat(text);
-    else if (text.endsWith("s")) milliseconds = parseFloat(text) * 1000;
-    if (Number.isFinite(milliseconds) && milliseconds > max) {
-      max = milliseconds;
-    }
-  }
-  return max;
-}
-
-/**
- * Elementless components get a `display: contents` wrapper for scoped
- * listeners, or a bare owner id when all have selectors.
- */
-function decorate(context, decorations, html, id) {
+// all-selector listeners get a bare owner id, no element
+function decorate(context, decorations, id) {
   // prepended, leaving newest first
   const listeners = [];
   const transitions = [];
@@ -196,54 +257,71 @@ function decorate(context, decorations, html, id) {
     else transitions.unshift(node.head);
   }
 
-  if (listeners.length > 0) {
-    let owner = id;
-    if (owner === null) {
-      if (listeners.some((listener) => !(listener.selector instanceof Some))) {
-        owner = nextId(context);
-        html =
-          `<div data-lily-component="${owner}" style="display: contents">` +
-          `${html}</div>`;
-      } else {
-        owner = `${context.prefix}l${context.listenerCounter++}`;
-        if (context.collecting) context.collected?.push(owner);
-      }
+  let owner = id;
+  let listenerOwner = id;
+  if (listeners.length > 0 && owner === null) {
+    if (listeners.some((listener) => !(listener.selector instanceof Some))) {
+      owner = listenerOwner = nextId(context);
+    } else {
+      listenerOwner = `${context.prefix}l${context.listenerCounter++}`;
+      context.collected?.push(listenerOwner);
     }
-    if (context.collecting) {
-      for (const listener of listeners) {
-        registerListener(context.events, owner, listener);
-      }
-    }
+  }
+  for (const listener of listeners) {
+    registerListener(context.events, listenerOwner, listener);
   }
 
-  for (const { enter, exit, duration_milliseconds: duration } of transitions) {
-    const wrapperId = nextId(context);
-    scheduleEnterClassRemoval(
-      `[data-lily-component="${wrapperId}"]`,
+  return {
+    owner,
+    transitions: transitions.map(({ enter, exit, duration_milliseconds }) => ({
+      id: nextId(context),
       enter,
-      duration,
-    );
-    html =
-      `<div data-lily-component="${wrapperId}" ` +
-      `data-lily-transition-exit="${escapeAttribute(exit)}" ` +
-      `data-lily-transition-duration="${duration}" ` +
-      `class="${escapeAttribute(enter)}">${html}</div>`;
-  }
-  return html;
+      exit,
+      duration:
+        duration_milliseconds instanceof Some ? duration_milliseconds[0] : null,
+    })),
+  };
 }
 
-function eachHandler(context, element, component, toHtml, toSlot) {
+function delay(milliseconds, signal) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, milliseconds);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+// the shared child exits, `next` takes the outer ids
+function departChild(context, child, next, id) {
+  const ids = ownerIds(child);
+  child.setAttribute(
+    "data-lily-component",
+    ids.slice(0, ids.indexOf(id)).join(" "),
+  );
+  child.before(next);
+  moveTracking(context, child, next);
+  for (const owner of ownerIds(next)) reobserveOwner(context.events, owner);
+  context.departed.set(next, child);
+  removeMorphChild(context, child.parentNode, child);
+}
+
+function eachHandler(context, marker, id, component, toHtml, toPlaceholder) {
   const { slice, key: getKey, render } = component;
   const patch = component.patch instanceof Some ? component.patch[0] : null;
   // key to { element, item }
   const rows = new Map();
   let previousList = null;
+  // unchanged order skips the walk
+  let placed = [];
 
   return function (model) {
     // same list reference, unchanged
     const list = slice(model);
     if (list === previousList) return;
-    const container = element();
+    const start = marker();
+    const container = start?.parentNode;
     if (!container) return;
     previousList = list;
 
@@ -262,89 +340,85 @@ function eachHandler(context, element, component, toHtml, toSlot) {
       });
     }
 
-    // cursor walk, indexing live `container.children` is quadratic
-    let cursor = container.firstElementChild;
-
-    // changed rows share one template, one parse
-    const pending = [];
-
+    const renders = [];
+    const ordered = [];
+    let moved = false;
     for (let index = 0; index < items.length; index++) {
       const item = items[index];
       const keyString = keys[index];
 
       let row = rows.get(keyString);
-      const isNew = !row;
-      if (isNew) {
-        const rowElement = document.createElement("div");
-        rowElement.setAttribute("data-lily-key", keyString);
-        row = { element: rowElement, item: undefined };
+      if (!row) {
+        row = { element: null, item: undefined, list: id };
         rows.set(keyString, row);
       } else if (context.exits.has(row.element)) {
-        // re-added mid-exit, cancel removal and strip the exit class now
-        cancelExitAndStripClass(context, row.element);
+        // re-added mid-exit, cancel the removal
+        cancelExit(context, row.element);
       }
+      ordered.push(row);
+      if (placed[index] !== row) moved = true;
 
-      // exiting rows keep their place
-      while (cursor && cursor !== row.element && context.exits.has(cursor)) {
-        cursor = cursor.nextElementSibling;
-      }
-      // placed before child handlers run so their queries find it
-      if (cursor !== row.element) container.insertBefore(row.element, cursor);
-      cursor = row.element.nextElementSibling;
-
-      if (!isNew && fastEqual(row.item, item)) continue;
+      if (row.element && fastEqual(row.item, item)) continue;
       row.item = item;
 
-      if (!isNew && patch) {
-        applyPatches(row.element, patch(item).toArray());
+      if (row.element && patch) {
+        const wrapped = context.wrappers.has(row.element);
+        applyPatches(row.element, patch(item).toArray(), !wrapped);
         continue;
       }
 
-      // row bindings ignored by design, bind on the list or an ancestor
-      const collecting = context.collecting;
-      context.collecting = false;
-      const start = context.counter;
-      const html = renderWithSlots(context, model, toHtml, toSlot, (slot) =>
-        render(item, slot),
+      const first = context.counter;
+      const [html, owned] = collectOwners(context, () =>
+        renderNested(context, model, toHtml, toPlaceholder, (nest) =>
+          render(item, nest),
+        ),
       );
-      const end = context.counter;
-      context.collecting = collecting;
-
-      if (isNew) {
-        row.element.innerHTML = html;
-        runRange(context, start, end, model);
-      } else {
-        pending.push({ row, html, start, end });
-      }
+      const last = context.counter;
+      renders.push({ row, keyString, html, owned, first, last });
     }
 
-    if (pending.length > 0) {
-      const template = document.createElement("template");
-      template.innerHTML = pending
-        .map((entry) => `<div>${entry.html}</div>`)
-        .join("");
-      const hosts = Array.from(template.content.children);
-      pending.forEach((entry, index) => {
-        morphFrom(
-          context,
-          entry.row.element,
-          hosts[index],
-          entry.start,
-          entry.end,
-          model,
-        );
-      });
+    // one parse for all rows
+    const roots = parseRows(
+      context,
+      renders.map((entry) => entry.html),
+    );
+    renders.forEach((entry, index) => {
+      const root = roots[index];
+      root.setAttribute("data-lily-key", entry.keyString);
+      const element = entry.row.element
+        ? updateRow(context, entry.row.element, root)
+        : root;
+      if (element !== entry.row.element) moved = true;
+      entry.row.element = element;
+      context.rows.set(element, entry.row);
+      setOwners(context, element, entry.owned);
+    });
+
+    // cursor walk, indexing live children is quadratic
+    if (moved || ordered.length !== placed.length) {
+      let cursor = start.nextElementSibling;
+      for (const { element } of ordered) {
+        // exiting rows keep their place
+        while (cursor && cursor !== element && context.exits.has(cursor)) {
+          cursor = cursor.nextElementSibling;
+        }
+        if (cursor !== element) container.insertBefore(element, cursor);
+        cursor = element.nextElementSibling;
+      }
+    }
+    placed = ordered;
+
+    // after placement so handlers find their elements
+    for (const entry of renders) {
+      sweepRange(context, entry.row.element, entry.first, entry.last, model);
     }
   };
 }
 
-/** Transition classes can come from the model. */
-function escapeAttribute(value) {
-  return String(value)
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+// added by setExiting, a root's own stay
+function exitingAttributes(element) {
+  const added = element.getAttribute("data-lily-exiting") ?? "";
+  return added.split(" ").filter((name) => name !== "");
 }
 
 /** isEqual with a shared-reference shortcut. */
@@ -372,15 +446,25 @@ function fastEqual(left, right) {
   return isEqual(left, right);
 }
 
-/** A row's key wrapper can sit just above the Transition wrapper. */
-function findTransitionElement(element) {
+// a renderer wrapper can sit just above it
+function findTransitionElement(context, element) {
   if (element.dataset?.lilyTransitionExit) return element;
+  if (!context.wrappers.has(element)) return null;
   const child = element.firstElementChild;
-  if (child?.dataset?.lilyTransitionExit) return child;
-  return null;
+  return child?.dataset?.lilyTransitionExit ? child : null;
 }
 
-function isComponentWrapper(node) {
+// infinite ones, a spinner say, would never let it go
+function finiteAnimations(element) {
+  const animations = element.getAnimations?.({ subtree: true }) ?? [];
+  return animations.filter(
+    (animation) =>
+      animation.playState !== "finished" &&
+      Number.isFinite(animation.effect?.getComputedTiming().endTime),
+  );
+}
+
+function isOwned(node) {
   return (
     node.nodeType === 1 &&
     (node.hasAttribute("data-lily-component") ||
@@ -388,13 +472,20 @@ function isComponentWrapper(node) {
   );
 }
 
+// owner marks and data-lily-message, a patch could hijack either
+function isRuntimeAttribute(name) {
+  return name.toLowerCase().startsWith("data-lily-");
+}
+
 /**
  * Patch values may be other clients' input. Strips control chars and
  * whitespace before the scheme check, as browsers do.
  */
 function isUnsafeAttribute(name, value) {
-  if (name.toLowerCase().startsWith("on")) return true;
-  if (URL_ATTRIBUTES.has(name.toLowerCase())) {
+  const lower = name.toLowerCase();
+  if (lower.startsWith("on") || lower === "srcdoc") return true;
+  if (isRuntimeAttribute(lower)) return true;
+  if (URL_ATTRIBUTES.has(lower)) {
     const scheme = String(value)
       .replace(/[\u0000- ]+/g, "")
       .toLowerCase();
@@ -403,7 +494,7 @@ function isUnsafeAttribute(name, value) {
   return false;
 }
 
-/** Consumes `next`. Runtime-owned wrappers match by position. */
+/** Consumes `next`. Runtime-owned elements match by position. */
 function morph(context, live, next) {
   let liveNode = live.firstChild;
   let nextNode = next.firstChild;
@@ -417,22 +508,20 @@ function morph(context, live, next) {
       continue;
     }
 
-    const liveOwned = isComponentWrapper(liveNode);
-    const nextOwned = isComponentWrapper(nextNode);
+    const liveOwned = isOwned(liveNode);
+    const nextOwned = isOwned(nextNode);
 
     if (liveOwned && nextOwned) {
       // both runtime-owned, keep the live one, cancel any pending exit
-      if (context.exits.has(liveNode)) {
-        cancelExitAndStripClass(context, liveNode);
-      }
-      liveNode = liveNode.nextSibling;
+      if (context.exits.has(liveNode)) cancelExit(context, liveNode);
+      liveNode = afterRows(context, liveNode);
       nextNode = nextAfter;
     } else if (nextOwned) {
       live.insertBefore(nextNode, liveNode);
       nextNode = nextAfter;
     } else if (liveOwned) {
       const gone = liveNode;
-      liveNode = liveNode.nextSibling;
+      liveNode = afterRows(context, liveNode);
       removeMorphChild(context, live, gone);
     } else if (
       liveNode.nodeType === 1 &&
@@ -458,7 +547,7 @@ function morph(context, live, next) {
 
   while (liveNode) {
     const gone = liveNode;
-    liveNode = liveNode.nextSibling;
+    liveNode = afterRows(context, liveNode);
     removeMorphChild(context, live, gone);
   }
 }
@@ -486,16 +575,17 @@ function morphElement(context, live, next) {
   if (textChanged) live.value = live.defaultValue;
 }
 
-/** Sweeps duplicate registrations for wrappers already in the host. */
-function morphFrom(context, host, source, start, end, model) {
-  morph(context, host, source);
-  for (let number = start; number < end; number++) {
-    const id = context.prefix + "c" + number;
-    if (host.querySelector(`[data-lily-component="${id}"]`)) {
-      context.registry.get(id)?.(model);
-    } else {
-      unregister(context, id);
-    }
+function moveTracking(context, old, next) {
+  const row = context.rows.get(old);
+  if (row) {
+    context.rows.delete(old);
+    context.rows.set(next, row);
+    row.element = next;
+  }
+  const owned = context.owners.get(old);
+  if (owned) {
+    context.owners.delete(old);
+    context.owners.set(next, owned);
   }
 }
 
@@ -503,15 +593,78 @@ function nextId(context) {
   return context.prefix + "c" + context.counter++;
 }
 
-function registerWrapped(context, makeHandler) {
+function ownableRoot(nodes) {
+  const root = singleRoot(nodes);
+  return root?.tagName === "TEMPLATE" ? null : root;
+}
+
+// innermost first, a nest-only component shares its child's element
+function ownerIds(element) {
+  const ids = element.getAttribute("data-lily-component") ?? "";
+  return ids.split(" ").filter((id) => id !== "");
+}
+
+function parseRows(context, htmls) {
+  if (htmls.length === 0) return [];
+  const template = document.createElement("template");
+  template.innerHTML = htmls.join(`<!--${ROW_SEPARATOR}-->`);
+  resolveMarks(context, template.content);
+  const roots = [];
+  let nodes = [];
+  for (const node of Array.from(template.content.childNodes)) {
+    if (node.nodeType === 8 && node.data === ROW_SEPARATOR) {
+      roots.push(rowRoot(context, nodes));
+      nodes = [];
+    } else {
+      nodes.push(node);
+    }
+  }
+  roots.push(rowRoot(context, nodes));
+  return roots;
+}
+
+function placeTransition(element, transition) {
+  const { enter, exit, duration } = transition;
+  element.setAttribute("data-lily-transition-enter", enter);
+  element.setAttribute("data-lily-transition-exit", exit);
+  if (duration !== null) {
+    element.style.setProperty("--lily-transition-duration", `${duration}ms`);
+  }
+  addClasses(element, enter);
+  scheduleEnterClassRemoval(element, enter);
+}
+
+// nest-only again mid-exit, the child comes back
+function reclaimChild(context, host, child, id) {
+  context.departed.delete(host);
+  cancelExit(context, child);
+  const ids = ownerIds(host);
+  const kept = ids.slice(Math.max(0, ids.indexOf(id)));
+  child.setAttribute(
+    "data-lily-component",
+    [...ownerIds(child), ...kept].join(" "),
+  );
+  const key = host.getAttribute("data-lily-key");
+  if (key !== null) child.setAttribute("data-lily-key", key);
+  moveTracking(context, host, child);
+  unregisterDescendants(context, host);
+  host.remove();
+  for (const owner of kept) reobserveOwner(context.events, owner);
+  return child;
+}
+
+function registerComponent(context, makeHandler) {
   const id = nextId(context);
-  const selector = `[data-lily-component="${id}"]`;
+  const selector = `[data-lily-component~="${id}"]`;
   let cached = null;
+  // a departing child stays connected without its id
   const element = () =>
-    (cached = cached?.isConnected ? cached : document.querySelector(selector));
+    (cached =
+      cached?.isConnected && cached.matches(selector)
+        ? cached
+        : document.querySelector(selector));
   context.registry.set(id, makeHandler(element, id));
-  const wrap = (inner) => `<div data-lily-component="${id}">${inner}</div>`;
-  return { id, wrap };
+  return id;
 }
 
 function removeAttribute(element, name) {
@@ -519,10 +672,29 @@ function removeAttribute(element, name) {
   syncProperty(element, name, null);
 }
 
+function removeClasses(element, classes) {
+  for (const name of classes.split(/\s+/)) {
+    if (name !== "") element.classList.remove(name);
+  }
+}
+
+function removeListRows(context, parent, marker) {
+  if (marker.tagName !== "TEMPLATE") return;
+  const id = marker.getAttribute("data-lily-component");
+  let node = marker.nextSibling;
+  while (node && context.rows.get(node)?.list === id) {
+    const row = node;
+    node = node.nextSibling;
+    unregisterSubtree(context, row);
+    if (row.parentNode === parent) parent.removeChild(row);
+  }
+}
+
 function removeMorphChild(context, parent, node) {
-  if (isComponentWrapper(node)) {
+  if (isOwned(node)) {
     if (context.exits.has(node)) return;
-    if (findTransitionElement(node)) {
+    removeListRows(context, parent, node);
+    if (findTransitionElement(context, node)) {
       removeWithTransition(context, parent, node, () =>
         unregisterSubtree(context, node),
       );
@@ -535,7 +707,7 @@ function removeMorphChild(context, parent, node) {
 
 /** The pending exit is keyed by the outer row `element`. */
 async function removeWithTransition(context, parent, element, onComplete) {
-  const transitionElement = findTransitionElement(element);
+  const transitionElement = findTransitionElement(context, element);
 
   if (!transitionElement) {
     if (element.parentNode === parent) parent.removeChild(element);
@@ -544,118 +716,93 @@ async function removeWithTransition(context, parent, element, onComplete) {
   }
 
   const exitClass = transitionElement.dataset.lilyTransitionExit;
-  const duration =
-    parseInt(transitionElement.dataset.lilyTransitionDuration ?? "0", 10) || 0;
   const controller = new AbortController();
   context.exits.set(element, controller);
 
-  transitionElement.classList.add(exitClass);
-  await whenAnimationDone(transitionElement, duration, controller.signal);
-
-  if (controller.signal.aborted) {
-    // cancelled by a re-add, strip the exit class
-    transitionElement.classList.remove(exitClass);
-    return;
-  }
+  resumeExit(context, element);
+  setExiting(element, true);
+  const { lilyTransitionEnter: enterClass } = transitionElement.dataset;
+  if (enterClass) removeClasses(transitionElement, enterClass);
+  addClasses(transitionElement, exitClass);
+  await whenAnimationDone(transitionElement, controller.signal);
+  // cancelled by a re-add, reverseExit drops the class
+  if (controller.signal.aborted) return;
 
   context.exits.delete(element);
   if (element.parentNode === parent) parent.removeChild(element);
   onComplete();
 }
 
-function renderComponent(context, component, model, toHtml, toSlot) {
+function renderComponent(context, component, model, toHtml, toPlaceholder) {
   const type = component.component_type;
   let html;
   let id = null;
 
   if (type instanceof Simple) {
-    ({ html, id } = renderSimple(context, type, model, toHtml, toSlot));
+    ({ html, id } = renderSimple(context, type, model, toHtml, toPlaceholder));
   } else if (type instanceof Each) {
-    const wrapped = registerWrapped(context, (element) =>
-      eachHandler(context, element, type, toHtml, toSlot),
+    const listId = registerComponent(context, (marker, listId) =>
+      eachHandler(context, marker, listId, type, toHtml, toPlaceholder),
     );
-    ({ id } = wrapped);
-    // empty, the handler populates it
-    html = wrapped.wrap("");
+    // rows follow as siblings, valid in lists and tables
+    html = `<template data-lily-component="${listId}"></template>`;
   } else if (type instanceof Live) {
-    ({ html, id } = renderLive(context, type, model, toHtml, toSlot));
+    ({ html, id } = renderLive(context, type, model, toHtml, toPlaceholder));
   } else if (type instanceof Static) {
-    html = renderWithSlots(context, model, toHtml, toSlot, type.render);
+    html = renderNested(context, model, toHtml, toPlaceholder, type.render);
   } else if (type instanceof Fragment) {
     html = "";
     for (const child of type.children) {
-      html += renderComponent(context, child, model, toHtml, toSlot);
+      html += renderComponent(context, child, model, toHtml, toPlaceholder);
     }
   } else {
     log("error", `lily: unknown component type ${type?.constructor?.name}`);
     return "";
   }
 
-  if (!(component.decorations instanceof NonEmpty)) return html;
-  return decorate(context, component.decorations, html, id);
+  const spec =
+    component.decorations instanceof NonEmpty
+      ? decorate(context, component.decorations, id)
+      : { owner: id, transitions: [] };
+  if (spec.owner === null && spec.transitions.length === 0) return html;
+  // comments parse anywhere, a wrapper div would break a table
+  const markId = spec.owner ?? spec.transitions[0].id;
+  context.marks.set(markId, spec);
+  return `<!--${MARK} ${markId}-->${html}<!--/${MARK} ${markId}-->`;
 }
 
-function renderLive(context, component, model, toHtml, toSlot) {
+function renderLive(context, component, model, toHtml, toPlaceholder) {
   const { slice, render, patch } = component;
   const seed = slice(model);
-  const { id, wrap } = registerWrapped(context, (element) =>
+  const id = registerComponent(context, (element) =>
     selective(seed, slice, (data) => {
       const host = element();
-      if (host) applyPatches(host, patch(data).toArray());
+      if (!host) return;
+      applyPatches(host, patch(data).toArray(), !context.wrappers.has(host));
     }),
   );
   // children live as long as the component, patches never touch them
   const [html, owned] = collectOwners(context, () =>
-    renderWithSlots(context, model, toHtml, toSlot, (slot) =>
-      render(seed, slot),
+    renderNested(context, model, toHtml, toPlaceholder, (nest) =>
+      render(seed, nest),
     ),
   );
   setOwners(context, id, owned);
-  return { html: wrap(html), id };
-}
-
-function renderSimple(context, component, model, toHtml, toSlot) {
-  const { slice, render } = component;
-  const seed = slice(model);
-  const { id, wrap } = registerWrapped(context, (element, id) =>
-    selective(seed, slice, (data, model) => {
-      const host = element();
-      if (!host) return;
-      // re-render with slot children, then morph onto the live subtree
-      const start = context.counter;
-      const [html, owned] = collectOwners(context, () =>
-        renderWithSlots(context, model, toHtml, toSlot, (slot) =>
-          render(data, slot),
-        ),
-      );
-      setOwners(context, id, owned);
-      const template = document.createElement("template");
-      template.innerHTML = html;
-      morphFrom(context, host, template.content, start, context.counter, model);
-    }),
-  );
-  // run at mount by renderTree, kept across updates by the morph
-  const [html, owned] = collectOwners(context, () =>
-    renderWithSlots(context, model, toHtml, toSlot, (slot) =>
-      render(seed, slot),
-    ),
-  );
-  setOwners(context, id, owned);
-  return { html: wrap(html), id };
+  return { html, id };
 }
 
 /** Fills placeholders in DOM order. Orphaned children are unregistered. */
-function renderWithSlots(context, model, toHtml, toSlot, produce) {
+function renderNested(context, model, toHtml, toPlaceholder, produce) {
   const children = [];
   const html = toHtml(
     produce((child) => {
       children.push(child);
-      return toSlot();
+      return toPlaceholder();
     }),
   );
   if (children.length === 0) return html;
 
-  const segments = html.split(SLOT_PATTERN);
+  const segments = html.split(NEST_PATTERN);
   let output = segments[0];
   for (let index = 0; index < children.length; index++) {
     const start = context.counter;
@@ -665,7 +812,7 @@ function renderWithSlots(context, model, toHtml, toSlot, produce) {
       children[index],
       model,
       toHtml,
-      toSlot,
+      toPlaceholder,
     );
     if (index + 1 < segments.length) {
       output += childHtml + segments[index + 1];
@@ -673,8 +820,8 @@ function renderWithSlots(context, model, toHtml, toSlot, produce) {
     }
     log(
       "error",
-      "lily: <lily-slot> placeholder missing from rendered HTML, child " +
-        "component dropped. Make sure slot() return values are placed in the " +
+      "lily: <lily-nest> placeholder missing from rendered HTML, child " +
+        "component dropped. Make sure nest() return values are placed in the " +
         "template.",
     );
     for (let number = start; number < context.counter; number++) {
@@ -692,25 +839,172 @@ function renderWithSlots(context, model, toHtml, toSlot, produce) {
   return output;
 }
 
+function renderSimple(context, component, model, toHtml, toPlaceholder) {
+  const { slice, render } = component;
+  const seed = slice(model);
+  const id = registerComponent(context, (element, id) =>
+    selective(seed, slice, (data, model) => {
+      const host = element();
+      if (!host) return;
+      // re-render with nested children, then morph onto the live subtree
+      const start = context.counter;
+      const [html, owned] = collectOwners(context, () =>
+        renderNested(context, model, toHtml, toPlaceholder, (nest) =>
+          render(data, nest),
+        ),
+      );
+      setOwners(context, id, owned);
+      const template = document.createElement("template");
+      template.innerHTML = html;
+      resolveMarks(context, template.content);
+      const next = updateHost(context, host, template.content, id);
+      sweepRange(context, next, start, context.counter, model);
+    }),
+  );
+  // run at mount by renderTree, kept across updates by the morph
+  const [html, owned] = collectOwners(context, () =>
+    renderNested(context, model, toHtml, toPlaceholder, (nest) =>
+      render(seed, nest),
+    ),
+  );
+  setOwners(context, id, owned);
+  return { html, id };
+}
+
+function replaceHost(context, old, next) {
+  old.replaceWith(next);
+  unregisterDescendants(context, old);
+  const kept = ownerIds(next);
+  for (const id of ownerIds(old)) {
+    if (kept.includes(id)) reobserveOwner(context.events, id);
+    else unregister(context, id);
+  }
+  moveTracking(context, old, next);
+  const enter = next.dataset.lilyTransitionEnter;
+  if (enter) scheduleEnterClassRemoval(next, enter);
+}
+
+function resolveMark(context, start, end, spec) {
+  alignStart(start, end);
+  const nodes = [];
+  for (let node = start.nextSibling; node !== end; node = node.nextSibling) {
+    nodes.push(node);
+  }
+
+  let element = null;
+  if (spec.owner !== null) {
+    element = ownableRoot(nodes) ?? wrapNodes(context, nodes, end, true);
+    addOwnerId(element, spec.owner);
+  }
+  spec.transitions.forEach((transition, index) => {
+    const own = element ?? ownableRoot(nodes);
+    // a transition belongs to its element's innermost id
+    const free =
+      index === 0 &&
+      own !== null &&
+      ownerIds(own).length === (element === null ? 0 : 1);
+    if (!free) {
+      const inner = element === null ? nodes : [element];
+      element = wrapNodes(context, inner, end, false);
+      addOwnerId(element, transition.id);
+    } else if (element === null) {
+      element = own;
+      addOwnerId(element, transition.id);
+    } else if (context.wrappers.has(element)) {
+      // a contents box can't animate
+      element.removeAttribute("style");
+    }
+    placeTransition(element, transition);
+  });
+
+  start.remove();
+  end.remove();
+}
+
+// inner pairs first, a parent sees its child's root
+function resolveMarks(context, root) {
+  if (context.marks.size === 0) return;
+  const starts = new Map();
+  const ends = [];
+  // NodeFilter.SHOW_COMMENT
+  const walker = root.ownerDocument.createTreeWalker(root, 128);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (node.data.startsWith(`${MARK} `)) {
+      starts.set(node.data.slice(MARK.length + 1), node);
+    } else if (node.data.startsWith(`/${MARK} `)) {
+      ends.push(node);
+    }
+  }
+  for (const end of ends) {
+    const id = end.data.slice(MARK.length + 2);
+    const spec = context.marks.get(id);
+    const start = starts.get(id);
+    if (!spec || !start) continue;
+    context.marks.delete(id);
+    resolveMark(context, start, end, spec);
+  }
+}
+
+function resumeExit(context, element) {
+  const reversal = context.reversals.get(element);
+  if (!reversal) return;
+  context.reversals.delete(element);
+  for (const animation of reversal) {
+    if (animation.playbackRate < 0) animation.reverse();
+  }
+}
+
+// transitions reverse on their own once the class goes
+async function reverseExit(context, element) {
+  const transitionElement = findTransitionElement(context, element);
+  const exitClass = transitionElement?.dataset.lilyTransitionExit;
+  if (!exitClass) return;
+  const reversal = finiteAnimations(transitionElement).filter(
+    (animation) =>
+      !(
+        typeof CSSTransition === "function" &&
+        animation instanceof CSSTransition
+      ),
+  );
+  if (reversal.length === 0) {
+    removeClasses(transitionElement, exitClass);
+    return;
+  }
+
+  context.reversals.set(element, reversal);
+  for (const animation of reversal) animation.reverse();
+  const remaining = Math.max(
+    ...reversal.map((animation) => animation.currentTime ?? 0),
+  );
+  // a paused or missed animation
+  await Promise.race([
+    Promise.allSettled(reversal.map((animation) => animation.finished)),
+    delay(remaining + 100),
+  ]);
+  // a re-exit took it over
+  if (context.reversals.get(element) !== reversal) return;
+  context.reversals.delete(element);
+  removeClasses(transitionElement, exitClass);
+}
+
+function rowRoot(context, nodes) {
+  const root = singleRoot(nodes);
+  if (root && root.tagName !== "TEMPLATE") return root;
+  return wrapNodes(context, nodes, null, true);
+}
+
 function runRange(context, start, end, model) {
   for (let number = start; number < end; number++) {
     context.registry.get(context.prefix + "c" + number)?.(model);
   }
 }
 
-/** The enter class stays until the animation ends. */
-function scheduleEnterClassRemoval(selector, enterClass, duration) {
+function scheduleEnterClassRemoval(element, enterClass) {
+  if (enterClass.trim() === "") return;
   const arm = () => {
-    const element = document.querySelector(selector);
-    if (!element) {
-      setTimeout(() => {
-        document.querySelector(selector)?.classList.remove(enterClass);
-      }, duration);
-      return;
-    }
-    whenAnimationDone(element, duration).then(() =>
-      element.classList.remove(enterClass),
-    );
+    // never placed, or gone already
+    if (!element.isConnected) return;
+    whenAnimationDone(element).then(() => removeClasses(element, enterClass));
   };
   if (typeof requestAnimationFrame === "function") requestAnimationFrame(arm);
   else setTimeout(arm, 0);
@@ -732,6 +1026,28 @@ function setAttribute(element, name, value) {
   syncProperty(element, name, value);
 }
 
+// inert and hidden while it animates out
+function setExiting(element, exiting) {
+  if (exiting === element.hasAttribute("data-lily-exiting")) return;
+  if (exiting) {
+    const added = [];
+    for (const [name, value] of [
+      ["aria-hidden", "true"],
+      ["inert", ""],
+    ]) {
+      if (element.hasAttribute(name)) continue;
+      element.setAttribute(name, value);
+      added.push(name);
+    }
+    element.setAttribute("data-lily-exiting", added.join(" "));
+  } else {
+    for (const name of exitingAttributes(element)) {
+      element.removeAttribute(name);
+    }
+    element.removeAttribute("data-lily-exiting");
+  }
+}
+
 function setOwners(context, key, owned) {
   const previous = context.owners.get(key);
   if (previous) {
@@ -739,6 +1055,30 @@ function setOwners(context, key, owned) {
   }
   if (owned.length > 0) context.owners.set(key, owned);
   else context.owners.delete(key);
+}
+
+function singleRoot(nodes) {
+  let root = null;
+  for (const node of nodes) {
+    if (node.nodeType === 1) {
+      if (root) return null;
+      root = node;
+    } else if (node.nodeType === 3 && node.nodeValue.trim() !== "") {
+      return null;
+    }
+  }
+  return root;
+}
+
+function sweepRange(context, element, start, end, model) {
+  for (let number = start; number < end; number++) {
+    const id = context.prefix + "c" + number;
+    const present =
+      ownerIds(element).includes(id) ||
+      element.querySelector(`[data-lily-component~="${id}"]`);
+    if (present) context.registry.get(id)?.(model);
+    else unregister(context, id);
+  }
 }
 
 /**
@@ -756,19 +1096,9 @@ function syncProperty(element, name, value) {
   }
 }
 
-/** Falls back to the declared duration. */
-function transitionHoldMilliseconds(element, fallback) {
-  if (typeof getComputedStyle === "function") {
-    const computed = cssDurationMilliseconds(
-      getComputedStyle(element).animationDuration ?? "0s",
-    );
-    if (computed > 0) return computed + 60;
-  }
-  return fallback;
-}
-
 function unregister(context, id) {
   context.registry.delete(id);
+  context.marks.delete(id);
   dropListeners(context.events, id);
   const owned = context.owners.get(id);
   if (owned) {
@@ -777,32 +1107,105 @@ function unregister(context, id) {
   }
 }
 
-function unregisterSubtree(context, element) {
-  if (element.nodeType !== 1) return;
-  const own = element.getAttribute("data-lily-component");
-  if (own) unregister(context, own);
-  for (const wrapper of element.querySelectorAll("[data-lily-component]")) {
-    unregister(context, wrapper.getAttribute("data-lily-component"));
+function unregisterDescendants(context, element) {
+  for (const owned of element.querySelectorAll("[data-lily-component]")) {
+    for (const id of ownerIds(owned)) unregister(context, id);
+  }
+  for (const row of element.querySelectorAll("[data-lily-key]")) {
+    setOwners(context, row, []);
   }
 }
 
-/** Ignores a child's bubbling `animationend`. */
-function whenAnimationDone(element, fallback, signal) {
-  return new Promise((resolve) => {
-    const finish = (event) => {
-      if (event?.type === "animationend" && event.target !== element) return;
-      element.removeEventListener("animationend", finish);
-      signal?.removeEventListener("abort", finish);
-      clearTimeout(timer);
-      resolve();
-    };
-    const timer = setTimeout(
-      finish,
-      transitionHoldMilliseconds(element, fallback),
+function unregisterSubtree(context, element) {
+  if (element.nodeType !== 1) return;
+  for (const id of ownerIds(element)) unregister(context, id);
+  if (element.hasAttribute("data-lily-key")) setOwners(context, element, []);
+  unregisterDescendants(context, element);
+}
+
+// mirrors updateRow, an exiting host is kept
+function updateHost(context, host, content, id) {
+  const nodes = Array.from(content.childNodes);
+  const root = ownableRoot(nodes);
+  const nested = root?.hasAttribute("data-lily-component") ?? false;
+  const shared = ownerIds(host).indexOf(id) > 0;
+  const wrapped = context.wrappers.has(host);
+  // still nest-only, the child updates itself
+  if (shared && nested) return host;
+  if (nested && context.exits.has(context.departed.get(host))) {
+    return reclaimChild(context, host, context.departed.get(host), id);
+  }
+  if (!shared && wrapped && !root) {
+    morph(context, host, content);
+    return host;
+  }
+  if (!shared && !wrapped && !nested && root?.tagName === host.tagName) {
+    carryOwnerAttributes(host, root, id);
+    morphElement(context, host, root);
+    return host;
+  }
+  if (context.exits.has(host)) return host;
+  const contents = shared || !host.hasAttribute("data-lily-transition-exit");
+  const next = root ?? wrapNodes(context, nodes, null, contents);
+  carryOwnerAttributes(host, next, id);
+  if (shared) departChild(context, host, next, id);
+  else replaceHost(context, host, next);
+  return next;
+}
+
+function updateRow(context, old, root) {
+  const oldOwned = old.hasAttribute("data-lily-component");
+  const rootOwned = root.hasAttribute("data-lily-component");
+  // a nested component root updates itself
+  if (oldOwned && rootOwned) return old;
+  if (!oldOwned && !rootOwned && old.tagName === root.tagName) {
+    morphElement(context, old, root);
+    return old;
+  }
+  old.replaceWith(root);
+  unregisterSubtree(context, old);
+  return root;
+}
+
+/**
+ * Animations and transitions, on the element or inside it. Checks again after
+ * they settle, CSS that changed mid-exit may have started others.
+ */
+async function whenAnimationDone(element, signal) {
+  if (typeof element.getAnimations !== "function") {
+    // jsdom has no animations, only the declared override
+    const declared = /--lily-transition-duration:\s*(\d+)ms/.exec(
+      element.getAttribute("style") ?? "",
     );
-    element.addEventListener("animationend", finish);
-    signal?.addEventListener("abort", finish);
-  });
+    if (declared) await delay(Number(declared[1]) + 60, signal);
+    return;
+  }
+  for (let round = 0; round < 10 && !signal?.aborted; round++) {
+    const running = finiteAnimations(element);
+    if (running.length === 0) return;
+    const remaining = Math.max(
+      ...running.map(
+        (animation) =>
+          animation.effect.getComputedTiming().endTime -
+          (animation.currentTime ?? 0),
+      ),
+    );
+    // a paused or missed animation
+    const backstop = delay(remaining + 100, signal);
+    await Promise.race([
+      Promise.allSettled(running.map((animation) => animation.finished)),
+      backstop,
+    ]);
+  }
+}
+
+function wrapNodes(context, nodes, before, contents) {
+  const wrapper = document.createElement("div");
+  if (contents) wrapper.setAttribute("style", "display: contents");
+  before?.parentNode.insertBefore(wrapper, before);
+  for (const node of nodes) wrapper.appendChild(node);
+  context.wrappers.add(wrapper);
+  return wrapper;
 }
 
 // =============================================================================
@@ -814,16 +1217,22 @@ const contexts = new WeakMap();
 
 let runtimeCount = 0;
 
+// comment marks around a component that needs an element
+const MARK = "lily-root";
+
 // split is global regardless of the `g` flag
-const SLOT_PATTERN = /<lily-slot[^>]*>\s*<\/lily-slot>/;
+const NEST_PATTERN = /<lily-nest[^>]*>\s*<\/lily-nest>/;
+
+const ROW_SEPARATOR = "lily-row";
 
 const UNSAFE_URL_SCHEME = /^(?:javascript|vbscript):/;
 
 // data URLs allowed for inline images
 const URL_ATTRIBUTES = new Set([
+  "action",
+  "data",
+  "formaction",
   "href",
   "src",
   "xlink:href",
-  "formaction",
-  "action",
 ]);

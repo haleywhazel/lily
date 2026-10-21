@@ -6,7 +6,9 @@
 // =============================================================================
 
 import gleam/int
+
 import gleeunit/should
+
 import lily/component
 import lily/test_support.{type Message, type Model}
 
@@ -102,11 +104,11 @@ pub fn render_live_uses_initial_test() {
 // NESTING
 // =============================================================================
 
-pub fn render_simple_nested_via_slot_test() {
-  // slotter renders inner inline, from_string rewraps it as html (String)
+pub fn render_simple_nested_via_nest_test() {
+  // nest renders inner inline, from_string rewraps it as html (String)
   render(fn(_) {
-    component.simple(slice: fn(_) { Nil }, render: fn(_, slot) {
-      "<outer>" <> slot(component.static(fn(_) { "<inner/>" })) <> "</outer>"
+    component.simple(slice: fn(_) { Nil }, render: fn(_, nest) {
+      "<outer>" <> nest(component.static(fn(_) { "<inner/>" })) <> "</outer>"
     })
   })
   |> should.equal("<outer><inner/></outer>")
@@ -119,11 +121,8 @@ pub fn render_simple_nested_via_slot_test() {
 pub fn render_transition_passes_through_test() {
   render(fn(_) {
     component.static(fn(_) { "<inner/>" })
-    |> component.transition(
-      enter: "fade-in",
-      exit: "fade-out",
-      duration_milliseconds: 200,
-    )
+    |> component.transition(enter: "fade-in", exit: "fade-out")
+    |> component.duration(milliseconds: 200)
   })
   |> should.equal("<inner/>")
 }

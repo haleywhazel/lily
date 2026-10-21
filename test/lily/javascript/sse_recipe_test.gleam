@@ -17,8 +17,10 @@ import gleam/option.{None}
 import gleam/result
 @target(javascript)
 import gleam/string
+
 @target(javascript)
 import gleeunit/should
+
 @target(javascript)
 import lily/client
 @target(javascript)
@@ -40,7 +42,7 @@ pub fn sse(
   events_url events_url: String,
   post_url post_url: String,
 ) -> transport.Connector {
-  transport.connector(fn(handler: transport.Handler) {
+  transport.connector(fn(handler: transport.ConnectorHandler) {
     let source =
       open_source(
         events_url,
@@ -91,7 +93,7 @@ fn open_stream(
         )
       },
       client_id:,
-      session: [],
+      seed: [],
       watch: server.Unwatched,
     )
   connection
@@ -106,7 +108,7 @@ fn receive_post(
 ) -> Result(Nil, Nil) {
   use #(_, client_id) <- result.try(string.split_once(url, "?client="))
   use bytes <- result.map(bit_array.base64_decode(body))
-  server.connection(app, client_id)
+  server.connection(app, client_id:)
   |> server.incoming(bytes:)
 }
 
@@ -367,7 +369,7 @@ pub fn sse_recipe_close_shuts_the_event_source_test() {
   let channel =
     sse(events_url: "/events", post_url: "/messages")
     |> transport.run_connector(
-      transport.Handler(
+      transport.ConnectorHandler(
         received: fn(_) { Nil },
         opened: fn() { Nil },
         closed: fn() { Nil },

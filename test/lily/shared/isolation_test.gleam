@@ -5,7 +5,9 @@
 // =============================================================================
 
 import gleam/dynamic/decode
+
 import gleeunit/should
+
 import lily/server
 import lily/store
 import lily/test_support.{type Message, type Model, Increment, SetName}
@@ -200,7 +202,9 @@ pub fn crashing_allow_predicate_denies_and_leaves_the_topic_unstarted_test() {
 
   // fails closed and reports it, nobody else affected
   frames()
-  |> should.equal([transport.Rejected(topic_id: "chat", reason: "denied")])
+  |> should.equal([
+    transport.Rejected(topic_id: "chat", reason: transport.AccessDenied),
+  ])
   test_support.subscriber_count(app, "chat")
   |> should.equal(-1)
   test_support.client_count(app)
@@ -257,7 +261,7 @@ pub fn crashing_topic_update_drops_the_message_test() {
       route: test_support.topic_route,
       serialiser: test_support.custom_serialiser(),
     )
-    |> store.topic(
+    |> store.topics(
       prefix: "room:",
       get: fn(model, _) { model },
       set: fn(_, _, model) { model },
@@ -265,14 +269,15 @@ pub fn crashing_topic_update_drops_the_message_test() {
     )
   let app =
     test_support.start_server(server.new(crashing, origins: server.AnyOrigin))
-  let #(connection, _frames) = wire_support.open(app, "a")
+  let #(connection, frames) = wire_support.open(app, "a")
   wire_support.subscribe(connection, "room:1")
-  wire_support.settle(app)
+  let _ = frames()
 
   wire_support.topic_message(connection, "room:1", SetName("room:1"))
-  wire_support.settle(app)
 
-  // topic and subscriber both survive
+  // the sender hears of it, topic and subscriber both survive
+  frames()
+  |> should.equal([transport.Dropped(target: transport.Topic("room:1"))])
   test_support.subscriber_count(app, "room:1")
   |> should.equal(1)
 }
@@ -295,9 +300,9 @@ pub fn crashing_encode_on_a_topic_update_drops_only_that_frame_test() {
     store.new(init: test_support.initial_model(), update: test_support.update)
     |> store.sync_with(route: test_support.topic_route, serialiser:)
     |> store.topic(
-      prefix: "chat",
-      get: fn(model, _) { model },
-      set: fn(_, _, model) { model },
+      id: "chat",
+      get: fn(model) { model },
+      set: fn(_, model) { model },
       access: store.Open,
     )
   let app =
@@ -333,10 +338,12 @@ pub fn crashing_session_update_drops_the_message_test() {
     )
   let app =
     test_support.start_server(server.new(crashing, origins: server.AnyOrigin))
-  let #(connection, _frames) = wire_support.open(app, "a")
+  let #(connection, frames) = wire_support.open(app, "a")
 
   wire_support.session_message(connection, Increment)
 
+  frames()
+  |> should.equal([transport.Dropped(target: transport.Session)])
   test_support.client_count(app)
   |> should.equal(1)
 }

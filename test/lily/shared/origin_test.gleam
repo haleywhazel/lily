@@ -6,7 +6,9 @@
 
 import gleam/option
 import gleam/result
+
 import gleeunit/should
+
 import lily/server
 import lily/test_support.{type Message, type Model}
 
@@ -31,7 +33,7 @@ fn try_connect(
     client_id: client_id,
     origin: origin,
     send: fn(_bytes) { Nil },
-    session: [],
+    seed: [],
     watch: server.Unwatched,
   )
   |> result.replace(Nil)
@@ -191,11 +193,11 @@ pub fn origin_refused_client_is_not_registered_test() {
       send: fn(bytes) {
         test_support.set(sent, [bytes, ..test_support.get(sent)])
       },
-      session: [],
+      seed: [],
       watch: server.Unwatched,
     )
   // both routes are no-ops for an unregistered client
-  server.incoming(server.connection(app, "ghost"), bytes: <<>>)
+  server.incoming(server.connection(app, client_id: "ghost"), bytes: <<>>)
   server.dispatch_to(app, client_id: "ghost", message: test_support.Increment)
 
   test_support.client_count(app)

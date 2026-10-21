@@ -7,8 +7,10 @@
 
 @target(erlang)
 import gleam/list
+
 @target(erlang)
 import gleeunit/should
+
 @target(erlang)
 import lily/server
 @target(erlang)

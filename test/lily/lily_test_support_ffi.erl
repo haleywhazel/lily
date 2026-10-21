@@ -1,6 +1,7 @@
 -module(lily_test_support_ffi).
 
--export([new_ref/1, get_ref/1, set_ref/2, register_fixtures/0,
+-export([new_ref/1, get_ref/1, set_ref/2, new_shared/1, get_shared/1,
+         set_shared/2, register_fixtures/0,
          mark_stopped/1, is_stopped/1, capture_log_levels/1, log/2]).
 
 %% no constructor registry on Erlang
@@ -18,6 +19,19 @@ get_ref(Key) ->
 
 set_ref(Key, Value) ->
     erlang:put(Key, Value),
+    nil.
+
+%% readable from any process, for state a server or topic reads
+new_shared(Initial) ->
+    Key = {lily_test_shared, make_ref()},
+    persistent_term:put(Key, Initial),
+    Key.
+
+get_shared(Key) ->
+    persistent_term:get(Key).
+
+set_shared(Key, Value) ->
+    persistent_term:put(Key, Value),
     nil.
 
 %% settling a stopped server skips the call that would log a crash

@@ -14,8 +14,10 @@ import gleam/list
 import gleam/option.{None, Some}
 @target(javascript)
 import gleam/string
+
 @target(javascript)
 import gleeunit/should
+
 @target(javascript)
 import lily/client
 @target(javascript)
@@ -43,7 +45,7 @@ fn mount(
     runtime,
     selector: "#app",
     to_html: test_support.to_html,
-    to_slot: test_support.to_slot,
+    to_placeholder: test_support.to_placeholder,
     view: view,
   )
 }
@@ -165,7 +167,7 @@ pub fn component_each_live_patches_a_changed_row_instead_of_rendering_test() {
 }
 
 @target(javascript)
-pub fn component_each_row_slot_updates_on_its_own_test() {
+pub fn component_each_row_nest_updates_on_its_own_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   set_rows(runtime, "a,b")
@@ -174,10 +176,10 @@ pub fn component_each_row_slot_updates_on_its_own_test() {
       component.each(
         slice: text_rows,
         key: fn(row: #(Int, String)) { row.0 },
-        render: fn(row, slot) {
+        render: fn(row, nest) {
           "<p>"
           <> row.1
-          <> slot(
+          <> nest(
             component.simple(
               slice: fn(model: Model) { model.count },
               render: fn(count, _) {
@@ -193,8 +195,9 @@ pub fn component_each_row_slot_updates_on_its_own_test() {
   // the row list is the same, only the model's count moved
   client.dispatch(runtime)(Increment)
 
+  // each simple's lone root carries its id
   test_support.inner_html("#app")
-  |> string.split("<b class=\"n\">1</b>")
+  |> string.split("\">1</b>")
   |> list.length
   |> should.equal(3)
 }
@@ -220,9 +223,9 @@ fn row_view(_model: Model) -> component.Component(Model, message, String) {
   component.each(
     slice: row_ids,
     key: fn(id: Int) { int.to_string(id) },
-    render: fn(id, slot) {
-      slot(
-        component.simple(slice: fn(_) { id }, render: fn(id, _slot) {
+    render: fn(id, nest) {
+      nest(
+        component.simple(slice: fn(_) { id }, render: fn(id, _nest) {
           "<span>" <> int.to_string(id) <> "</span>"
         }),
       )
@@ -243,6 +246,37 @@ pub fn component_static_renders_content_test() {
 
   test_support.inner_html("#app")
   |> string.contains("Hello")
+  |> should.be_true
+}
+
+@target(javascript)
+pub fn component_static_nested_simple_re_renders_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let _runtime =
+    mount(runtime, fn(_model) {
+      component.static(fn(nest) {
+        "<h1>Title</h1>"
+        <> nest(
+          component.simple(
+            slice: fn(model: Model) { model.count },
+            render: fn(count, _) {
+              "<b class=\"n\">" <> int.to_string(count) <> "</b>"
+            },
+          ),
+        )
+      })
+    })
+
+  client.dispatch(runtime)(Increment)
+  client.dispatch(runtime)(Increment)
+
+  test_support.get_text("b.n") |> should.equal("2")
+  test_support.get_attribute("b.n", "data-lily-component")
+  |> string.is_empty
+  |> should.be_false
+  test_support.inner_html("#app")
+  |> string.contains("<h1>Title</h1>")
   |> should.be_true
 }
 
@@ -353,7 +387,7 @@ pub fn component_simple_morph_preserves_nested_live_child_test() {
     mount(runtime, fn(_model) {
       component.simple(
         slice: fn(model: Model) { model.count },
-        render: fn(_count, slot) { "<div>" <> slot(child) <> "</div>" },
+        render: fn(_count, nest) { "<div>" <> nest(child) <> "</div>" },
       )
     })
   test_support.focus("#pill")
@@ -373,16 +407,13 @@ pub fn component_simple_morph_defers_exit_transition_test() {
     mount(runtime, fn(_model) {
       component.simple(
         slice: fn(model: Model) { model.transition_item },
-        render: fn(item, slot) {
+        render: fn(item, nest) {
           case item {
             Some(_) ->
-              slot(
+              nest(
                 component.static(fn(_) { "<div id=\"panel\">p</div>" })
-                |> component.transition(
-                  enter: "in",
-                  exit: "out",
-                  duration_milliseconds: 200,
-                ),
+                |> component.transition(enter: "in", exit: "out")
+                |> component.duration(milliseconds: 200),
               )
             None -> ""
           }
@@ -492,6 +523,42 @@ pub fn component_live_refuses_unsafe_attribute_patch_test() {
 }
 
 @target(javascript)
+pub fn component_live_refuses_patches_to_runtime_attributes_test() {
+  // the patch reaches the component's own root, its marks must hold
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let _runtime =
+    mount(runtime, fn(_model) {
+      component.live(
+        slice: fn(model: Model) { model.count },
+        render: fn(_, _) {
+          "<div class=\"box\"><iframe></iframe><object></object></div>"
+        },
+        patch: fn(count) {
+          [
+            component.RemoveAttribute("", "data-lily-component"),
+            component.SetAttribute("", "DATA-LILY-COMPONENT", "r0c99"),
+            component.SetAttribute("", "data-lily-message", "forged"),
+            component.SetAttribute("iframe", "srcdoc", "<script></script>"),
+            component.SetAttribute("object", "data", " javascript:alert(1)"),
+            component.SetAttribute("", "data-count", int.to_string(count)),
+          ]
+        },
+      )
+    })
+  let id = test_support.get_attribute(".box", "data-lily-component")
+  client.dispatch(runtime)(Increment)
+  client.dispatch(runtime)(Increment)
+
+  test_support.get_attribute(".box", "data-lily-component") |> should.equal(id)
+  test_support.get_attribute(".box", "data-lily-message") |> should.equal("")
+  test_support.get_attribute("iframe", "srcdoc") |> should.equal("")
+  test_support.get_attribute("object", "data") |> should.equal("")
+  // still found by its id, so still patched
+  test_support.get_attribute(".box", "data-count") |> should.equal("2")
+}
+
+@target(javascript)
 pub fn component_live_root_keeps_nested_children_reactive_test() {
   // generated app nesting, live > static > simple > static > simple
   // the innermost simple updates though no ancestor re-renders
@@ -504,24 +571,24 @@ pub fn component_live_root_keeps_nested_children_reactive_test() {
     )
   }
   let nav_actions = fn() {
-    component.static(fn(slot) {
-      "<div class=\"actions\">" <> slot(inner()) <> "</div>"
+    component.static(fn(nest) {
+      "<div class=\"actions\">" <> nest(inner()) <> "</div>"
     })
   }
   let navbar = fn() {
-    component.simple(slice: fn(_model: Model) { "const" }, render: fn(_, slot) {
-      "<nav>" <> slot(nav_actions()) <> "</nav>"
+    component.simple(slice: fn(_model: Model) { "const" }, render: fn(_, nest) {
+      "<nav>" <> nest(nav_actions()) <> "</nav>"
     })
   }
   let body = fn() {
-    component.static(fn(slot) { "<main>" <> slot(navbar()) <> "</main>" })
+    component.static(fn(nest) { "<main>" <> nest(navbar()) <> "</main>" })
   }
   let _runtime =
     mount(runtime, fn(_model) {
       component.live(
         slice: fn(_model: Model) { "system" },
-        render: fn(_, slot) {
-          "<div class=\"root\">" <> slot(body()) <> "</div>"
+        render: fn(_, nest) {
+          "<div class=\"root\">" <> nest(body()) <> "</div>"
         },
         patch: fn(_) { [] },
       )
@@ -585,10 +652,144 @@ pub fn component_each_renders_keyed_list_test() {
   let html = test_support.inner_html("#app")
 
   html
-  |> string.contains("data-lily-key")
+  |> string.contains("<span data-lily-key=\"1\">1</span>")
   |> should.be_true
   html
-  |> string.contains("<span>1</span>")
+  |> string.contains("<div")
+  |> should.be_false
+}
+
+@target(javascript)
+pub fn component_each_rows_sit_directly_in_a_list_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  set_rows(runtime, "a,b")
+  let _ =
+    mount(runtime, fn(_model) {
+      component.static(fn(nest) {
+        "<ul>"
+        <> nest(
+          component.each(
+            slice: text_rows,
+            key: fn(row: #(Int, String)) { row.0 },
+            render: fn(row, _) { "<li>" <> row.1 <> "</li>" },
+          ),
+        )
+        <> "</ul>"
+      })
+    })
+  let html = test_support.inner_html("#app")
+
+  html |> string.contains("<div") |> should.be_false
+  html
+  |> string.contains(
+    "<li data-lily-key=\"0\">a</li><li data-lily-key=\"1\">b</li></ul>",
+  )
+  |> should.be_true
+}
+
+@target(javascript)
+pub fn component_each_table_rows_stay_in_the_table_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  set_rows(runtime, "a,b")
+  let _ =
+    mount(runtime, fn(_model) {
+      component.static(fn(nest) {
+        "<table><tbody>"
+        <> nest(
+          component.each(
+            slice: text_rows,
+            key: fn(row: #(Int, String)) { row.0 },
+            render: fn(row, _) { "<tr><td>" <> row.1 <> "</td></tr>" },
+          ),
+        )
+        <> "</tbody></table>"
+      })
+    })
+  set_rows(runtime, "a,c")
+  let html = test_support.inner_html("#app")
+
+  html
+  |> string.contains("<tr data-lily-key=\"1\"><td>c</td></tr></tbody>")
+  |> should.be_true
+}
+
+@target(javascript)
+pub fn component_each_row_with_several_roots_is_wrapped_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  set_rows(runtime, "a")
+  let _ =
+    mount(runtime, fn(_model) {
+      component.each(
+        slice: text_rows,
+        key: fn(row: #(Int, String)) { row.0 },
+        render: fn(row, _) { "<i>" <> row.1 <> "</i><i>!</i>" },
+      )
+    })
+
+  test_support.inner_html("#app")
+  |> string.contains(
+    "<div style=\"display: contents\" data-lily-key=\"0\"><i>a</i><i>!</i></div>",
+  )
+  |> should.be_true
+}
+
+@target(javascript)
+pub fn component_each_survives_its_parent_re_rendering_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  set_rows(runtime, "a,b")
+  let _ =
+    mount(runtime, fn(_model) {
+      component.simple(
+        slice: fn(model: Model) { model.count },
+        render: fn(count, nest) {
+          "<p>"
+          <> int.to_string(count)
+          <> "</p><ul>"
+          <> nest(
+            component.each(
+              slice: text_rows,
+              key: fn(row: #(Int, String)) { row.0 },
+              render: fn(row, _) { "<li>" <> row.1 <> "</li>" },
+            ),
+          )
+          <> "</ul>"
+        },
+      )
+    })
+  client.dispatch(runtime)(Increment)
+  set_rows(runtime, "a,b,c")
+  let html = test_support.inner_html("#app")
+
+  html |> string.contains("<p>1</p>") |> should.be_true
+  html
+  |> string.contains(
+    "<li data-lily-key=\"0\">a</li><li data-lily-key=\"1\">b</li><li data-lily-key=\"2\">c</li></ul>",
+  )
+  |> should.be_true
+}
+
+@target(javascript)
+pub fn component_each_live_patch_can_target_the_row_root_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  set_rows(runtime, "a")
+  let _ =
+    mount(runtime, fn(_model) {
+      component.each_live(
+        slice: text_rows,
+        key: fn(row: #(Int, String)) { row.0 },
+        render: fn(row, _) { "<b class=\"n\">" <> row.1 <> "</b>" },
+        patch: fn(row) { [component.SetText(target: ".n", value: row.1)] },
+      )
+    })
+  set_rows(runtime, "z")
+
+  test_support.inner_html("#app")
+  |> string.contains("<b class=\"n\" data-lily-key=\"0\">z</b>")
   |> should.be_true
 }
 
@@ -602,7 +803,7 @@ pub fn component_mount_renders_simple_once_test() {
     mount(runtime, fn(_model) {
       component.simple(
         slice: fn(model: Model) { model.count },
-        render: fn(count, _slot) {
+        render: fn(count, _nest) {
           test_support.set(renders, test_support.get(renders) + 1)
           "<p>" <> int.to_string(count) <> "</p>"
         },
@@ -623,7 +824,7 @@ pub fn component_mount_renders_live_once_and_patches_nothing_test() {
     mount(runtime, fn(_model) {
       component.live(
         slice: fn(model: Model) { model.count },
-        render: fn(_count, _slot) {
+        render: fn(_count, _nest) {
           test_support.set(initials, test_support.get(initials) + 1)
           "<p class=\"value\"></p>"
         },
@@ -670,7 +871,7 @@ pub fn component_each_append_inserts_only_the_new_row_test() {
 
   inserts |> should.equal(1)
   test_support.inner_html("#app")
-  |> string.contains("<span>5</span>")
+  |> string.contains("\">5</span>")
   |> should.be_true
 }
 
@@ -684,14 +885,11 @@ pub fn component_each_keeps_a_row_in_place_while_it_exits_test() {
       component.each(
         slice: transition_items_list,
         key: fn(id: Int) { int.to_string(id) },
-        render: fn(id, slot) {
-          slot(
+        render: fn(id, nest) {
+          nest(
             component.static(fn(_) { "<b>row-" <> int.to_string(id) <> "</b>" })
-            |> component.transition(
-              enter: "tx-enter",
-              exit: "tx-exit",
-              duration_milliseconds: 200,
-            ),
+            |> component.transition(enter: "tx-enter", exit: "tx-exit")
+            |> component.duration(milliseconds: 200),
           )
         },
       )
@@ -733,7 +931,7 @@ pub fn component_simple_skips_a_rebuilt_slice_with_equal_fields_test() {
     mount(runtime, fn(_model) {
       component.simple(
         slice: fn(model: Model) { #(model.count, model.name) },
-        render: fn(_slice, _slot) {
+        render: fn(_slice, _nest) {
           test_support.set(renders, test_support.get(renders) + 1)
           "<p></p>"
         },
@@ -793,7 +991,7 @@ pub fn component_simple_switch_renders_initial_case_test() {
     })
 
   test_support.inner_html("#app")
-  |> string.contains("<p>A</p>")
+  |> string.contains(">A</p>")
   |> should.be_true
 }
 
@@ -815,8 +1013,8 @@ pub fn component_simple_switch_replaces_on_slice_change_test() {
     })
   client.dispatch(runtime)(SetTab(TabB))
   let html = test_support.inner_html("#app")
-  let has_b = string.contains(html, "<p>B</p>")
-  let has_a = string.contains(html, "<p>A</p>")
+  let has_b = string.contains(html, ">B</p>")
+  let has_a = string.contains(html, ">A</p>")
 
   has_b
   |> should.be_true
@@ -833,8 +1031,8 @@ pub fn component_simple_switch_preserves_identity_when_slice_unchanged_test() {
     mount(runtime, fn(_model) {
       component.simple(
         slice: fn(model: Model) { model.active_tab },
-        render: fn(_tab, slot) {
-          slot(
+        render: fn(_tab, nest) {
+          nest(
             component.simple(
               slice: fn(model: Model) { model.count },
               render: fn(count, _) {
@@ -848,9 +1046,7 @@ pub fn component_simple_switch_preserves_identity_when_slice_unchanged_test() {
   client.dispatch(runtime)(Increment)
   client.dispatch(runtime)(Increment)
 
-  test_support.inner_html("#app")
-  |> string.contains("<span class=\"counter\">2</span>")
-  |> should.be_true
+  test_support.get_text("span.counter") |> should.equal("2")
 }
 
 @target(javascript)
@@ -862,10 +1058,10 @@ pub fn component_simple_switch_cleans_up_old_child_handlers_test() {
     mount(runtime, fn(_model) {
       component.simple(
         slice: fn(model: Model) { model.active_tab },
-        render: fn(tab, slot) {
+        render: fn(tab, nest) {
           case tab {
             TabA ->
-              slot(
+              nest(
                 component.simple(
                   slice: fn(model: Model) { model.count },
                   render: fn(count, _) { int.to_string(count) },
@@ -896,19 +1092,21 @@ pub fn component_simple_switch_with_structural_compares_by_value_test() {
         slice: fn(model: Model) {
           #(model.active_tab, model.secondary_count > 100)
         },
-        render: fn(_pair, slot) {
-          slot(
+        render: fn(_pair, nest) {
+          "<section>"
+          <> nest(
             component.simple(
               slice: fn(model: Model) { model.count },
               render: fn(count, _) { int.to_string(count) },
             ),
           )
+          <> "</section>"
         },
       )
     })
   // a re-render would wipe this marker
   test_support.set_inner_html(
-    "#app > [data-lily-component]",
+    "#app > section",
     "<span id=\"marker\">survived</span>",
   )
   // outer slice #(TabA, False) stays equal, meaning the outer never re-runs
@@ -945,7 +1143,7 @@ pub fn component_simple_switch_inside_fragment_test() {
 
   string.contains(html, "<header>top</header>")
   |> should.be_true
-  string.contains(html, "<p>B</p>")
+  string.contains(html, ">B</p>")
   |> should.be_true
   string.contains(html, "<footer>bottom</footer>")
   |> should.be_true
@@ -964,13 +1162,11 @@ pub fn component_event_on_fragment_root_test() {
     mount(runtime, fn(_model) {
       component.fragment([
         component.static(fn(_) {
-          "<button id=\"frag\" data-message=\"go\">+</button>"
+          "<button id=\"frag\" data-lily-message=\"go\">+</button>"
         }),
       ])
-      |> event.on_click(
-        message: Increment,
-        options: test_support.on_selector("#frag"),
-      )
+      |> event.on_click(message: Increment)
+      |> event.selector("#frag")
     })
   test_support.click("#frag")
 
@@ -979,8 +1175,8 @@ pub fn component_event_on_fragment_root_test() {
 }
 
 @target(javascript)
-pub fn component_event_on_slot_child_of_live_test() {
-  // slot children aren't on the Gleam tree, renderComponent queues them
+pub fn component_event_on_nested_child_of_live_test() {
+  // nested children aren't on the Gleam tree, renderComponent queues them
   // mirrors the welcome example's chat_area
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
@@ -988,29 +1184,26 @@ pub fn component_event_on_slot_child_of_live_test() {
     mount(runtime, fn(_model) {
       let inner =
         component.static(fn(_) {
-          "<button id=\"slotted\" data-message=\"go\">+</button>"
+          "<button id=\"nested\" data-lily-message=\"go\">+</button>"
         })
-        |> event.on_click(
-          message: Increment,
-          options: test_support.on_selector("#slotted"),
-        )
+        |> event.on_click(message: Increment)
+        |> event.selector("#nested")
       component.live(
         slice: fn(_model: Model) { 0 },
-        render: fn(_, slot) {
-          "<div class=\"shell\">" <> slot(inner) <> "</div>"
+        render: fn(_, nest) {
+          "<div class=\"shell\">" <> nest(inner) <> "</div>"
         },
         patch: fn(_) { [] },
       )
     })
-  test_support.click("#slotted")
+  test_support.click("#nested")
 
   client.model(runtime).count
   |> should.equal(1)
 }
 
 @target(javascript)
-pub fn component_event_inside_each_render_ignored_test() {
-  // bindings inside an each's `render` aren't collected
+pub fn component_event_inside_each_row_fires_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   client.dispatch(runtime)(AddTransitionItem(1))
@@ -1019,10 +1212,10 @@ pub fn component_event_inside_each_render_ignored_test() {
       component.each(
         slice: fn(model: Model) { transition_items_list(model) },
         key: fn(id: Int) { int.to_string(id) },
-        render: fn(_id, slot) {
-          slot(
+        render: fn(_id, nest) {
+          nest(
             component.static(fn(_) { "<button id=\"inner\">+</button>" })
-            |> event.on_click(message: Increment, options: event.defaults),
+            |> event.on_click(message: Increment),
           )
         },
       )
@@ -1030,7 +1223,71 @@ pub fn component_event_inside_each_render_ignored_test() {
   test_support.click("#inner")
 
   client.model(runtime).count
-  |> should.equal(0)
+  |> should.equal(1)
+}
+
+@target(javascript)
+pub fn component_event_inside_each_row_registers_once_after_a_re_render_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  set_rows(runtime, "a")
+  let _runtime =
+    mount(runtime, fn(_model) {
+      component.each(
+        slice: text_rows,
+        key: fn(row: #(Int, String)) { row.0 },
+        render: fn(row, nest) {
+          "<section>"
+          <> row.1
+          <> nest(
+            component.static(fn(_) { "<button id=\"row-button\">+</button>" })
+            |> event.on_click(message: Increment),
+          )
+          <> "</section>"
+        },
+      )
+    })
+  // same key, new text
+  set_rows(runtime, "z")
+  test_support.click("#row-button")
+
+  client.model(runtime).count
+  |> should.equal(1)
+  test_support.inner_html("#app")
+  |> string.contains("<section data-lily-key=\"0\">z<button")
+  |> should.be_true
+}
+
+@target(javascript)
+pub fn component_event_inside_a_removed_each_row_is_dropped_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  set_rows(runtime, "a")
+  let _runtime =
+    mount(runtime, fn(_model) {
+      component.fragment([
+        component.static(fn(_) {
+          "<button class=\"go\" id=\"outside\">+</button>"
+        }),
+        component.each(
+          slice: text_rows,
+          key: fn(row: #(Int, String)) { row.0 },
+          render: fn(_row, nest) {
+            nest(
+              component.static(fn(_) { "<i>row</i>" })
+              |> event.on_click(message: Increment)
+              |> event.selector(".go"),
+            )
+          },
+        ),
+      ])
+    })
+  test_support.click("#outside")
+  set_rows(runtime, "")
+  test_support.click("#outside")
+
+  client.model(runtime).count
+  |> should.equal(1)
 }
 
 // =============================================================================
@@ -1054,7 +1311,7 @@ pub fn component_multi_mount_appends_handlers_test() {
       runtime,
       selector: "#overlays",
       to_html: test_support.to_html,
-      to_slot: test_support.to_slot,
+      to_placeholder: test_support.to_placeholder,
       view: fn(_model) {
         component.simple(
           slice: fn(model: Model) { model.secondary_count },
@@ -1109,7 +1366,7 @@ pub fn component_multi_mount_events_globally_delegated_test() {
   let _runtime =
     mount(runtime, fn(_model) {
       component.static(fn(_) {
-        "<button id=\"global-btn\" data-message=\"go\">+</button>"
+        "<button id=\"global-btn\" data-lily-message=\"go\">+</button>"
       })
     })
   let _r2 =
@@ -1117,13 +1374,11 @@ pub fn component_multi_mount_events_globally_delegated_test() {
       runtime,
       selector: "#overlays",
       to_html: test_support.to_html,
-      to_slot: test_support.to_slot,
+      to_placeholder: test_support.to_placeholder,
       view: fn(_model) {
         component.static(fn(_) { "" })
-        |> event.on_click(
-          message: Increment,
-          options: test_support.on_selector("#global-btn"),
-        )
+        |> event.on_click(message: Increment)
+        |> event.selector("#global-btn")
       },
     )
   test_support.click("#global-btn")
@@ -1147,16 +1402,13 @@ pub fn component_transition_enter_class_applied_on_mount_test() {
       component.each(
         slice: fn(model: Model) { transition_items_list(model) },
         key: fn(id: Int) { int.to_string(id) },
-        render: fn(id, slot) {
-          slot(
+        render: fn(id, nest) {
+          nest(
             component.static(fn(_) {
               "<span>item " <> int.to_string(id) <> "</span>"
             })
-            |> component.transition(
-              enter: "fade-enter",
-              exit: "fade-exit",
-              duration_milliseconds: 10,
-            ),
+            |> component.transition(enter: "fade-enter", exit: "fade-exit")
+            |> component.duration(milliseconds: 10),
           )
         },
       )
@@ -1169,7 +1421,7 @@ pub fn component_transition_enter_class_applied_on_mount_test() {
 
 @target(javascript)
 pub fn component_transition_exit_defers_removal_test() -> promise.Promise(Nil) {
-  // wrapper stays with the exit class until the duration elapses
+  // wrapper stays with the exit class until the animation ends
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   client.dispatch(runtime)(AddTransitionItem(1))
@@ -1178,16 +1430,13 @@ pub fn component_transition_exit_defers_removal_test() -> promise.Promise(Nil) {
       component.each(
         slice: fn(model: Model) { transition_items_list(model) },
         key: fn(id: Int) { int.to_string(id) },
-        render: fn(id, slot) {
-          slot(
+        render: fn(id, nest) {
+          nest(
             component.static(fn(_) {
               "<span class=\"item-" <> int.to_string(id) <> "\"></span>"
             })
-            |> component.transition(
-              enter: "tx-enter",
-              exit: "tx-exit",
-              duration_milliseconds: 20,
-            ),
+            |> component.transition(enter: "tx-enter", exit: "tx-exit")
+            |> component.duration(milliseconds: 20),
           )
         },
       )
@@ -1200,7 +1449,7 @@ pub fn component_transition_exit_defers_removal_test() -> promise.Promise(Nil) {
 
   mid_contains_item
   |> should.be_true
-  promise.wait(60)
+  promise.wait(150)
   |> promise.map(fn(_) {
     let final_html = test_support.inner_html("#app")
     string.contains(final_html, "item-1")
@@ -1222,31 +1471,24 @@ pub fn component_transition_re_add_mid_exit_cancels_test() -> promise.Promise(
       component.each(
         slice: fn(model: Model) { transition_items_list(model) },
         key: fn(id: Int) { int.to_string(id) },
-        render: fn(id, slot) {
-          slot(
+        render: fn(id, nest) {
+          nest(
             component.static(fn(_) {
               "<span class=\"keep-" <> int.to_string(id) <> "\"></span>"
             })
-            |> component.transition(
-              enter: "tx2-enter",
-              exit: "tx2-exit",
-              duration_milliseconds: 50,
-            ),
+            |> component.transition(enter: "tx2-enter", exit: "tx2-exit")
+            |> component.duration(milliseconds: 50),
           )
         },
       )
     })
   client.dispatch(runtime)(RemoveTransitionItem(1))
   client.dispatch(runtime)(AddTransitionItem(1))
-  // data-lily-transition-exit keeps the name, leaving class as the only check
+  // the transition sits on the span itself, its class holds the state
   let html = test_support.inner_html("#app")
-  let still_present = string.contains(html, "keep-1")
-  let no_exit_class = !string.contains(html, "class=\"tx2-exit\"")
 
-  still_present
-  |> should.be_true
-  no_exit_class
-  |> should.be_true
+  test_support.get_attribute(".keep-1", "class") |> should.equal("keep-1")
+  html |> string.contains("inert") |> should.be_false
   // past the original duration, the deferred removal must not fire
   promise.wait(80)
   |> promise.map(fn(_) {
@@ -1258,8 +1500,201 @@ pub fn component_transition_re_add_mid_exit_cancels_test() -> promise.Promise(
 }
 
 @target(javascript)
+fn exiting_item_view(
+  duration: fn(component.Component(Model, message, String)) ->
+    component.Component(Model, message, String),
+) -> fn(Model) -> component.Component(Model, message, String) {
+  fn(_model) {
+    component.each(
+      slice: fn(model: Model) { transition_items_list(model) },
+      key: fn(id: Int) { int.to_string(id) },
+      render: fn(id, nest) {
+        nest(
+          component.static(fn(_) {
+            "<span class=\"gone-" <> int.to_string(id) <> "\"></span>"
+          })
+          |> component.transition(enter: "tx3-enter", exit: "tx3-exit")
+          |> duration,
+        )
+      },
+    )
+  }
+}
+
+@target(javascript)
+pub fn component_transition_without_an_animation_removes_at_once_test() -> promise.Promise(
+  Nil,
+) {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  client.dispatch(runtime)(AddTransitionItem(1))
+  let _runtime = mount(runtime, exiting_item_view(fn(component) { component }))
+  client.dispatch(runtime)(RemoveTransitionItem(1))
+
+  promise.wait(0)
+  |> promise.map(fn(_) {
+    test_support.inner_html("#app")
+    |> string.contains("gone-1")
+    |> should.be_false
+    Nil
+  })
+}
+
+@target(javascript)
+fn animated_item_view(
+  _model: Model,
+) -> component.Component(Model, message, String) {
+  component.each(
+    slice: fn(model: Model) { transition_items_list(model) },
+    key: fn(id: Int) { int.to_string(id) },
+    render: fn(id, nest) {
+      nest(
+        // the animation runs inside the transition element
+        component.static(fn(_) {
+          "<div class=\"card\"><span class=\"panel\">"
+          <> int.to_string(id)
+          <> "</span></div>"
+        })
+        |> component.transition(enter: "tx5-enter", exit: "tx5-exit"),
+      )
+    },
+  )
+}
+
+@target(javascript)
+pub fn component_transition_waits_for_an_animation_inside_it_test() -> promise.Promise(
+  Nil,
+) {
+  test_support.reset_dom()
+  test_support.stub_animations("panel", 50)
+  let runtime = test_support.new_runtime()
+  client.dispatch(runtime)(AddTransitionItem(1))
+  let _runtime = mount(runtime, animated_item_view)
+  client.dispatch(runtime)(RemoveTransitionItem(1))
+
+  use _ <- promise.await(promise.wait(20))
+  test_support.inner_html("#app")
+  |> string.contains("tx5-exit")
+  |> should.be_true
+  use _ <- promise.map(promise.wait(130))
+  test_support.unstub_animations()
+  test_support.inner_html("#app")
+  |> string.contains("panel")
+  |> should.be_false
+}
+
+@target(javascript)
+pub fn component_transition_ignores_infinite_animations_test() -> promise.Promise(
+  Nil,
+) {
+  test_support.reset_dom()
+  test_support.stub_animations("nothing-matches", 50)
+  let runtime = test_support.new_runtime()
+  client.dispatch(runtime)(AddTransitionItem(1))
+  let _runtime = mount(runtime, animated_item_view)
+  client.dispatch(runtime)(RemoveTransitionItem(1))
+
+  use _ <- promise.map(promise.wait(0))
+  test_support.unstub_animations()
+  test_support.inner_html("#app")
+  |> string.contains("panel")
+  |> should.be_false
+}
+
+@target(javascript)
+pub fn component_transition_exit_drops_the_enter_class_test() {
+  test_support.reset_dom()
+  test_support.stub_animations("panel", 50)
+  let runtime = test_support.new_runtime()
+  client.dispatch(runtime)(AddTransitionItem(1))
+  let _runtime = mount(runtime, animated_item_view)
+  client.dispatch(runtime)(RemoveTransitionItem(1))
+  let class = test_support.get_attribute(".card", "class")
+  test_support.unstub_animations()
+
+  class |> should.equal("card tx5-exit")
+}
+
+@target(javascript)
+fn one_sided_view(
+  enter: String,
+  exit: String,
+) -> fn(Model) -> component.Component(Model, message, String) {
+  fn(_model) {
+    component.each(
+      slice: fn(model: Model) { transition_items_list(model) },
+      key: fn(id: Int) { int.to_string(id) },
+      render: fn(id, nest) {
+        nest(
+          component.static(fn(_) {
+            "<span class=\"side\">" <> int.to_string(id) <> "</span>"
+          })
+          |> component.transition(enter:, exit:)
+          |> component.duration(milliseconds: 50),
+        )
+      },
+    )
+  }
+}
+
+@target(javascript)
+pub fn component_transition_exit_only_still_holds_removal_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  client.dispatch(runtime)(AddTransitionItem(1))
+  let _runtime = mount(runtime, one_sided_view("", "side-out"))
+  client.dispatch(runtime)(RemoveTransitionItem(1))
+
+  test_support.inner_html("#app")
+  |> string.contains("side-out")
+  |> should.be_true
+}
+
+@target(javascript)
+pub fn component_transition_enter_only_removes_at_once_test() -> promise.Promise(
+  Nil,
+) {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  client.dispatch(runtime)(AddTransitionItem(1))
+  let _runtime = mount(runtime, one_sided_view("side-in", ""))
+  client.dispatch(runtime)(RemoveTransitionItem(1))
+
+  use _ <- promise.map(promise.wait(0))
+  test_support.inner_html("#app")
+  |> string.contains("side")
+  |> should.be_false
+}
+
+@target(javascript)
+pub fn component_transition_exiting_element_is_inert_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  client.dispatch(runtime)(AddTransitionItem(1))
+  let _runtime =
+    mount(runtime, exiting_item_view(component.duration(_, milliseconds: 50)))
+  client.dispatch(runtime)(RemoveTransitionItem(1))
+  let html = test_support.inner_html("#app")
+
+  html |> string.contains("inert=\"\"") |> should.be_true
+  html |> string.contains("aria-hidden=\"true\"") |> should.be_true
+}
+
+@target(javascript)
+pub fn component_duration_sets_the_custom_property_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  client.dispatch(runtime)(AddTransitionItem(1))
+  let _runtime =
+    mount(runtime, exiting_item_view(component.duration(_, milliseconds: 400)))
+
+  test_support.get_attribute(".gone-1", "style")
+  |> should.equal("--lily-transition-duration: 400ms;")
+}
+
+@target(javascript)
 pub fn component_transition_inside_each_keeps_item_attribute_test() {
-  // transition wrapper sits inside the each key wrapper
+  // the row root carries both the key and the transition
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   client.dispatch(runtime)(AddTransitionItem(42))
@@ -1268,16 +1703,13 @@ pub fn component_transition_inside_each_keeps_item_attribute_test() {
       component.each(
         slice: fn(model: Model) { transition_items_list(model) },
         key: fn(id: Int) { int.to_string(id) },
-        render: fn(id, slot) {
-          slot(
+        render: fn(id, nest) {
+          nest(
             component.static(fn(_) {
               "<span>item " <> int.to_string(id) <> "</span>"
             })
-            |> component.transition(
-              enter: "in",
-              exit: "out",
-              duration_milliseconds: 10,
-            ),
+            |> component.transition(enter: "in", exit: "out")
+            |> component.duration(milliseconds: 10),
           )
         },
       )
@@ -1299,17 +1731,12 @@ pub fn component_transition_events_on_outer_wrapper_test() {
   let _runtime =
     mount(runtime, fn(_model) {
       component.static(fn(_) {
-        "<button id=\"tx-btn\" data-message=\"go\">+</button>"
+        "<button id=\"tx-btn\" data-lily-message=\"go\">+</button>"
       })
-      |> component.transition(
-        enter: "fade",
-        exit: "fade-out",
-        duration_milliseconds: 10,
-      )
-      |> event.on_click(
-        message: Increment,
-        options: test_support.on_selector("#tx-btn"),
-      )
+      |> component.transition(enter: "fade", exit: "fade-out")
+      |> component.duration(milliseconds: 10)
+      |> event.on_click(message: Increment)
+      |> event.selector("#tx-btn")
     })
   test_support.click("#tx-btn")
 
@@ -1318,11 +1745,11 @@ pub fn component_transition_events_on_outer_wrapper_test() {
 }
 
 // =============================================================================
-// SLOTTED CHILDREN
+// NESTED CHILDREN
 // =============================================================================
 
 @target(javascript)
-pub fn component_simple_slot_child_added_later_renders_the_current_model_test() {
+pub fn component_simple_nested_child_added_later_renders_the_current_model_test() {
   // first appears on a re-render, must use that render's model
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
@@ -1330,11 +1757,11 @@ pub fn component_simple_slot_child_added_later_renders_the_current_model_test() 
     mount(runtime, fn(_model) {
       component.simple(
         slice: fn(model: Model) { model.active_tab },
-        render: fn(tab, slot) {
+        render: fn(tab, nest) {
           case tab {
             TabA -> "<p>hidden</p>"
             TabB ->
-              slot(
+              nest(
                 component.simple(
                   slice: fn(model: Model) { model.count },
                   render: fn(count, _) {
@@ -1365,15 +1792,15 @@ pub fn component_each_removed_row_drops_children_added_after_it_rendered_test() 
       component.each(
         slice: fn(model: Model) { transition_items_list(model) },
         key: fn(id: Int) { id },
-        render: fn(_id, slot) {
-          slot(
+        render: fn(_id, nest) {
+          nest(
             component.simple(
               slice: fn(model: Model) { model.active_tab },
-              render: fn(tab, slot) {
+              render: fn(tab, nest) {
                 case tab {
                   TabA -> ""
                   TabB ->
-                    slot(
+                    nest(
                       component.simple(
                         slice: fn(model: Model) {
                           test_support.set(slices, test_support.get(slices) + 1)
@@ -1501,15 +1928,13 @@ pub fn component_selector_listener_stops_when_its_component_leaves_test() {
         component.static(fn(_) { "<button id=\"far\">+</button>" }),
         component.simple(
           slice: fn(model: Model) { model.active_tab },
-          render: fn(tab, slot) {
+          render: fn(tab, nest) {
             case tab {
               TabA ->
-                slot(
+                nest(
                   component.static(fn(_) { "<i>listening</i>" })
-                  |> event.on_click(
-                    message: Increment,
-                    options: test_support.on_selector("#far"),
-                  ),
+                  |> event.on_click(message: Increment)
+                  |> event.selector("#far"),
                 )
               TabB -> "<i>gone</i>"
             }
@@ -1535,16 +1960,14 @@ pub fn component_selector_listener_fires_once_after_its_parent_rerenders_test() 
         component.static(fn(_) { "<button id=\"far\">+</button>" }),
         component.simple(
           slice: fn(model: Model) { model.secondary_count },
-          render: fn(count, slot) {
+          render: fn(count, nest) {
             "<i>"
             <> int.to_string(count)
             <> "</i>"
-            <> slot(
+            <> nest(
               component.static(fn(_) { "" })
-              |> event.on_click(
-                message: Increment,
-                options: test_support.on_selector("#far"),
-              ),
+              |> event.on_click(message: Increment)
+              |> event.selector("#far"),
             )
           },
         ),
@@ -1565,10 +1988,8 @@ pub fn component_remount_drops_selector_listeners_of_the_previous_mount_test() {
   let _runtime =
     mount(runtime, fn(_model) {
       component.static(fn(_) { "<p>first</p>" })
-      |> event.on_click(
-        message: Increment,
-        options: test_support.on_selector("#far"),
-      )
+      |> event.on_click(message: Increment)
+      |> event.selector("#far")
     })
   let _runtime =
     mount(runtime, fn(_model) { component.static(fn(_) { "<p>second</p>" }) })
@@ -1593,7 +2014,7 @@ pub fn component_mount_on_a_missing_selector_logs_and_renders_nothing_test() {
           runtime,
           selector: "#nowhere",
           to_html: test_support.to_html,
-          to_slot: test_support.to_slot,
+          to_placeholder: test_support.to_placeholder,
           view: fn(_model) {
             component.simple(
               slice: fn(model: Model) { model.count },
@@ -1628,7 +2049,7 @@ pub fn component_two_runtimes_keep_their_components_apart_test() {
       second,
       selector: "#overlays",
       to_html: test_support.to_html,
-      to_slot: test_support.to_slot,
+      to_placeholder: test_support.to_placeholder,
       view: fn(_model) {
         component.simple(
           slice: fn(model: Model) { model.count },
@@ -1704,14 +2125,11 @@ pub fn component_transition_exit_ignores_a_child_animation_end_test() -> promise
       component.each(
         slice: fn(model: Model) { transition_items_list(model) },
         key: fn(id: Int) { id },
-        render: fn(_id, slot) {
-          slot(
+        render: fn(_id, nest) {
+          nest(
             component.static(fn(_) { "<span class=\"spinner\"></span>" })
-            |> component.transition(
-              enter: "tx3-enter",
-              exit: "tx3-exit",
-              duration_milliseconds: 40,
-            ),
+            |> component.transition(enter: "tx3-enter", exit: "tx3-exit")
+            |> component.duration(milliseconds: 40),
           )
         },
       )
@@ -1727,4 +2145,563 @@ pub fn component_transition_exit_ignores_a_child_animation_end_test() -> promise
     |> should.be_true
     Nil
   })
+}
+
+// =============================================================================
+// ROOT ELEMENTS
+// =============================================================================
+
+@target(javascript)
+fn table_row_view(
+  open: String,
+  close: String,
+) -> fn(Model) -> component.Component(Model, message, String) {
+  fn(_model) {
+    component.static(fn(nest) {
+      open
+      <> nest(
+        component.live(
+          slice: fn(model: Model) { model.count },
+          render: fn(count, _) {
+            "<tr class=\"r\"><td>" <> int.to_string(count) <> "</td></tr>"
+          },
+          patch: fn(count) {
+            [component.SetText(target: "td", value: int.to_string(count))]
+          },
+        ),
+      )
+      <> close
+    })
+  }
+}
+
+@target(javascript)
+pub fn component_live_row_in_a_tbody_is_its_own_root_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let _ = mount(runtime, table_row_view("<table><tbody>", "</tbody></table>"))
+  client.dispatch(runtime)(Increment)
+
+  test_support.get_attribute("table > tbody > tr.r", "data-lily-component")
+  |> string.is_empty
+  |> should.be_false
+  test_support.get_text("tr.r td") |> should.equal("1")
+  let html = test_support.inner_html("#app")
+  html |> string.contains("<div") |> should.be_false
+  html |> string.contains("lily-root") |> should.be_false
+}
+
+@target(javascript)
+pub fn component_live_row_in_a_table_without_tbody_is_its_own_root_test() {
+  // the parser implies the tbody, splitting the marks across parents
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let _ = mount(runtime, table_row_view("<table>", "</table>"))
+  client.dispatch(runtime)(Increment)
+
+  test_support.get_attribute("table > tbody > tr.r", "data-lily-component")
+  |> string.is_empty
+  |> should.be_false
+  test_support.get_text("tr.r td") |> should.equal("1")
+  let html = test_support.inner_html("#app")
+  html |> string.contains("<div") |> should.be_false
+  html |> string.contains("lily-root") |> should.be_false
+}
+
+@target(javascript)
+pub fn component_live_item_in_a_list_is_its_own_root_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let _ =
+    mount(runtime, fn(_model) {
+      component.static(fn(nest) {
+        "<ul>"
+        <> nest(
+          component.live(
+            slice: fn(model: Model) { model.count },
+            render: fn(count, _) { "<li>" <> int.to_string(count) <> "</li>" },
+            patch: fn(count) {
+              [component.SetText(target: "", value: int.to_string(count))]
+            },
+          ),
+        )
+        <> "</ul>"
+      })
+    })
+  client.dispatch(runtime)(Increment)
+
+  test_support.get_attribute("ul > li", "data-lily-component")
+  |> string.is_empty
+  |> should.be_false
+  test_support.get_text("ul > li") |> should.equal("1")
+}
+
+@target(javascript)
+pub fn component_simple_with_several_roots_gets_a_contents_wrapper_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let _ =
+    mount(runtime, fn(_model) {
+      component.simple(
+        slice: fn(model: Model) { model.count },
+        render: fn(count, _) {
+          "<i class=\"a\">" <> int.to_string(count) <> "</i><i>!</i>"
+        },
+      )
+    })
+  client.dispatch(runtime)(Increment)
+
+  test_support.get_attribute("#app > div", "style")
+  |> should.equal("display: contents")
+  test_support.get_attribute("#app > div", "data-lily-component")
+  |> string.is_empty
+  |> should.be_false
+  test_support.get_text("#app > div > i.a") |> should.equal("1")
+}
+
+@target(javascript)
+pub fn component_simple_with_only_text_gets_a_contents_wrapper_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let _ =
+    mount(runtime, fn(_model) {
+      component.simple(
+        slice: fn(model: Model) { model.count },
+        render: fn(count, _) { int.to_string(count) },
+      )
+    })
+  client.dispatch(runtime)(Increment)
+
+  test_support.get_attribute("#app > div", "style")
+  |> should.equal("display: contents")
+  test_support.get_text("#app > div") |> should.equal("1")
+}
+
+@target(javascript)
+pub fn component_simple_going_from_empty_to_one_root_takes_the_root_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let _ =
+    mount(runtime, fn(_model) {
+      component.simple(
+        slice: fn(model: Model) { model.count },
+        render: fn(count, _) {
+          case count {
+            0 -> ""
+            _ -> "<p>" <> int.to_string(count) <> "</p>"
+          }
+        },
+      )
+    })
+  let id = test_support.get_attribute("#app > div", "data-lily-component")
+  id |> string.is_empty |> should.be_false
+
+  client.dispatch(runtime)(Increment)
+  test_support.get_attribute("#app > p", "data-lily-component")
+  |> should.equal(id)
+  test_support.inner_html("#app") |> string.contains("<div") |> should.be_false
+
+  // and back, still the same component
+  client.dispatch(runtime)(Decrement)
+  test_support.get_attribute("#app > div", "data-lily-component")
+  |> should.equal(id)
+}
+
+@target(javascript)
+fn nest_only_row(
+  open: Bool,
+) -> component.Component(Model, test_support.Message, String) {
+  component.simple(
+    slice: fn(model: Model) { model.active_tab },
+    render: fn(tab, nest) {
+      case tab, open {
+        TabA, _ | TabB, True ->
+          nest(
+            component.simple(
+              slice: fn(model: Model) { model.count },
+              render: fn(count, _) {
+                "<tr class=\"c\"><td>" <> int.to_string(count) <> "</td></tr>"
+              },
+            ),
+          )
+        TabB, False -> "<tr class=\"p\"><td>plain</td></tr>"
+      }
+    },
+  )
+}
+
+@target(javascript)
+pub fn component_nest_only_render_shares_its_childs_root_test() {
+  // a <tr> stays in its tbody, the outer id rides on the child's root
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let _ =
+    mount(runtime, fn(_model) {
+      component.static(fn(nest) {
+        "<table><tbody>" <> nest(nest_only_row(True)) <> "</tbody></table>"
+      })
+    })
+  client.dispatch(runtime)(Increment)
+  client.dispatch(runtime)(SetTab(TabB))
+  client.dispatch(runtime)(Increment)
+
+  let ids =
+    test_support.get_attribute("tbody > tr.c", "data-lily-component")
+    |> string.split(" ")
+  list.length(ids) |> should.equal(2)
+  test_support.get_text("tbody > tr.c") |> should.equal("2")
+  test_support.inner_html("#app") |> string.contains("<div") |> should.be_false
+}
+
+@target(javascript)
+pub fn component_nest_only_render_switching_to_markup_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let _ =
+    mount(runtime, fn(_model) {
+      component.static(fn(nest) {
+        "<table><tbody>" <> nest(nest_only_row(False)) <> "</tbody></table>"
+      })
+    })
+  let assert [_child, outer] =
+    test_support.get_attribute("tbody > tr.c", "data-lily-component")
+    |> string.split(" ")
+
+  client.dispatch(runtime)(SetTab(TabB))
+  test_support.get_attribute("tbody > tr.p", "data-lily-component")
+  |> should.equal(outer)
+  test_support.inner_html("#app")
+  |> string.contains("tr class=\"c")
+  |> should.be_false
+
+  // and back, the child's root carries the outer id again
+  client.dispatch(runtime)(SetTab(TabA))
+  client.dispatch(runtime)(Increment)
+  test_support.get_text("tbody > tr.c") |> should.equal("1")
+  test_support.get_attribute("tbody > tr.c", "data-lily-component")
+  |> string.ends_with(" " <> outer)
+  |> should.be_true
+}
+
+@target(javascript)
+fn toggled_panel_view(
+  _model: Model,
+) -> component.Component(Model, test_support.Message, String) {
+  component.simple(
+    slice: fn(model: Model) { model.transition_item },
+    render: fn(item, nest) {
+      case item {
+        Some(_) ->
+          nest(
+            component.static(fn(_) { "<div id=\"panel\">p</div>" })
+            |> component.transition(enter: "in", exit: "out")
+            |> component.duration(milliseconds: 200),
+          )
+        None -> ""
+      }
+    },
+  )
+}
+
+@target(javascript)
+pub fn component_nest_only_child_reopened_mid_exit_comes_back_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let _ = mount(runtime, toggled_panel_view)
+  client.dispatch(runtime)(AddTransitionItem(1))
+  let ids = test_support.get_attribute("#panel", "data-lily-component")
+
+  client.dispatch(runtime)(RemoveTransitionItem(1))
+  test_support.get_attribute("#panel", "class") |> should.equal("out")
+  client.dispatch(runtime)(AddTransitionItem(1))
+
+  // the same element, interactive, with no second panel beside it
+  test_support.inner_html("#app")
+  |> string.split("id=\"panel\"")
+  |> list.length
+  |> should.equal(2)
+  test_support.get_attribute("#panel", "data-lily-component")
+  |> should.equal(ids)
+  test_support.inner_html("#app") |> string.contains("inert") |> should.be_false
+}
+
+@target(javascript)
+pub fn component_resize_listener_follows_a_replaced_root_test() -> promise.Promise(
+  Nil,
+) {
+  test_support.reset_dom()
+  test_support.stub_observers()
+  let runtime = test_support.new_runtime()
+  let _ =
+    mount(runtime, fn(_) {
+      tab_view()
+      |> event.on_resize(handler: fn(_size) { Increment })
+    })
+
+  use _ <- promise.await(promise.wait(0))
+  test_support.observed_tags("ResizeObserver") |> should.equal(["p"])
+  client.dispatch(runtime)(SetTab(TabB))
+
+  use _ <- promise.map(promise.wait(0))
+  let tags = test_support.observed_tags("ResizeObserver")
+  test_support.unstub_observers()
+  tags |> should.equal(["section"])
+}
+
+@target(javascript)
+fn tab_view() -> component.Component(Model, test_support.Message, String) {
+  component.simple(
+    slice: fn(model: Model) { model.active_tab },
+    render: fn(tab, _) {
+      case tab {
+        TabA -> "<p class=\"t\">A</p>"
+        TabB -> "<section class=\"t\">B</section>"
+      }
+    },
+  )
+  |> event.on_click(message: Increment)
+}
+
+@target(javascript)
+pub fn component_simple_root_tag_change_replaces_the_root_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let _ = mount(runtime, fn(_) { tab_view() })
+  let id = test_support.get_attribute(".t", "data-lily-component")
+
+  client.dispatch(runtime)(SetTab(TabB))
+
+  test_support.get_attribute("#app > section.t", "data-lily-component")
+  |> should.equal(id)
+  test_support.inner_html("#app") |> string.contains("<p") |> should.be_false
+  // the listener moved with the id
+  test_support.click(".t")
+  client.model(runtime).count |> should.equal(1)
+}
+
+@target(javascript)
+pub fn component_simple_root_tag_change_inside_an_each_row_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  set_rows(runtime, "a")
+  let _ =
+    mount(runtime, fn(_model) {
+      component.each(
+        slice: text_rows,
+        key: fn(row: #(Int, String)) { row.0 },
+        render: fn(_row, nest) { nest(tab_view()) },
+      )
+    })
+
+  client.dispatch(runtime)(SetTab(TabB))
+
+  // the row's key moved onto the new root, and the list still tracks it
+  test_support.get_attribute("#app > section.t", "data-lily-key")
+  |> should.equal("0")
+  set_rows(runtime, "a,b")
+  test_support.inner_html("#app")
+  |> string.split("data-lily-key")
+  |> list.length
+  |> should.equal(3)
+  test_support.get_attribute("#app > section.t + section.t", "data-lily-key")
+  |> should.equal("1")
+  set_rows(runtime, "")
+  test_support.inner_html("#app")
+  |> string.contains("section")
+  |> should.be_false
+}
+
+@target(javascript)
+pub fn component_simple_with_a_transition_keeps_its_id_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let _ =
+    mount(runtime, fn(_model) {
+      component.simple(
+        slice: fn(model: Model) { model.count },
+        render: fn(count, _) {
+          "<b class=\"c\">" <> int.to_string(count) <> "</b>"
+        },
+      )
+      |> component.transition(enter: "in", exit: "out")
+    })
+  let id = test_support.get_attribute("b.c", "data-lily-component")
+
+  client.dispatch(runtime)(Increment)
+
+  test_support.get_text("b.c") |> should.equal("1")
+  test_support.get_attribute("b.c", "data-lily-component") |> should.equal(id)
+  test_support.get_attribute("b.c", "data-lily-transition-exit")
+  |> should.equal("out")
+  test_support.inner_html("#app") |> string.contains("<div") |> should.be_false
+}
+
+@target(javascript)
+fn live_attribute_view(
+  render: fn(Int) -> String,
+) -> fn(Model) -> component.Component(Model, message, String) {
+  fn(_model) {
+    component.live(
+      slice: fn(model: Model) { model.count },
+      render: fn(count, _) { render(count) },
+      patch: fn(count) {
+        [
+          component.SetAttribute(
+            target: "",
+            name: "data-n",
+            value: int.to_string(count),
+          ),
+        ]
+      },
+    )
+  }
+}
+
+@target(javascript)
+pub fn component_live_empty_target_patches_the_root_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let _ =
+    mount(
+      runtime,
+      live_attribute_view(fn(count) { "<b>" <> int.to_string(count) <> "</b>" }),
+    )
+  client.dispatch(runtime)(Increment)
+
+  test_support.get_attribute("#app > b", "data-n") |> should.equal("1")
+}
+
+@target(javascript)
+pub fn component_live_empty_target_patches_the_wrapper_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let _ =
+    mount(
+      runtime,
+      live_attribute_view(fn(count) {
+        "<b>" <> int.to_string(count) <> "</b><i></i>"
+      }),
+    )
+  client.dispatch(runtime)(Increment)
+
+  test_support.get_attribute("#app > div", "data-n") |> should.equal("1")
+  test_support.get_attribute("#app > div > b", "data-n") |> should.equal("")
+}
+
+@target(javascript)
+pub fn component_transition_on_one_root_uses_the_root_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let _ =
+    mount(runtime, fn(_model) {
+      component.static(fn(_) { "<span class=\"one\">x</span>" })
+      |> component.transition(enter: "in", exit: "out")
+    })
+
+  test_support.get_attribute("#app > span.one", "data-lily-transition-exit")
+  |> should.equal("out")
+  test_support.get_attribute("#app > span.one", "class")
+  |> should.equal("one in")
+}
+
+@target(javascript)
+pub fn component_transition_on_several_roots_gets_a_block_div_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let _ =
+    mount(runtime, fn(_model) {
+      component.static(fn(_) { "<i>a</i><i>b</i>" })
+      |> component.transition(enter: "in out-too", exit: "out")
+    })
+
+  test_support.get_attribute("#app > div", "data-lily-transition-exit")
+  |> should.equal("out")
+  // a contents box can't animate, and both enter classes land
+  test_support.get_attribute("#app > div", "style") |> should.equal("")
+  test_support.get_attribute("#app > div", "class")
+  |> should.equal("in out-too")
+}
+
+@target(javascript)
+pub fn component_transition_exit_and_cancel_keep_a_roots_own_aria_hidden_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  client.dispatch(runtime)(AddTransitionItem(1))
+  let _ =
+    mount(runtime, fn(_model) {
+      component.each(
+        slice: transition_items_list,
+        key: fn(id: Int) { int.to_string(id) },
+        render: fn(_id, nest) {
+          nest(
+            component.static(fn(_) {
+              "<span class=\"own\" aria-hidden=\"true\">x</span>"
+            })
+            |> component.transition(enter: "in", exit: "out")
+            |> component.duration(milliseconds: 50),
+          )
+        },
+      )
+    })
+
+  client.dispatch(runtime)(RemoveTransitionItem(1))
+  test_support.get_attribute(".own", "inert") |> should.equal("")
+  test_support.get_attribute(".own", "data-lily-exiting")
+  |> should.equal("inert")
+
+  client.dispatch(runtime)(AddTransitionItem(1))
+  test_support.get_attribute(".own", "aria-hidden") |> should.equal("true")
+  test_support.inner_html("#app") |> string.contains("inert") |> should.be_false
+}
+
+// =============================================================================
+// CANCELLED EXITS
+// =============================================================================
+
+@target(javascript)
+pub fn component_cancelled_exit_eases_back_test() -> promise.Promise(Nil) {
+  test_support.reset_dom()
+  test_support.stub_animations("panel", 200)
+  let runtime = test_support.new_runtime()
+  client.dispatch(runtime)(AddTransitionItem(1))
+  let _ = mount(runtime, animated_item_view)
+  client.dispatch(runtime)(RemoveTransitionItem(1))
+
+  use _ <- promise.await(promise.wait(60))
+  client.dispatch(runtime)(AddTransitionItem(1))
+
+  // interactive at once, the class stays while the animation plays back
+  test_support.inner_html("#app") |> string.contains("inert") |> should.be_false
+  test_support.get_attribute(".card", "class") |> should.equal("card tx5-exit")
+  test_support.animation_playback_rate(".card") |> should.equal(-1.0)
+
+  use _ <- promise.map(promise.wait(150))
+  test_support.unstub_animations()
+  test_support.get_attribute(".card", "class") |> should.equal("card")
+}
+
+@target(javascript)
+pub fn component_exit_during_a_reversal_turns_it_forward_test() -> promise.Promise(
+  Nil,
+) {
+  test_support.reset_dom()
+  test_support.stub_animations("panel", 200)
+  let runtime = test_support.new_runtime()
+  client.dispatch(runtime)(AddTransitionItem(1))
+  let _ = mount(runtime, animated_item_view)
+  client.dispatch(runtime)(RemoveTransitionItem(1))
+
+  use _ <- promise.await(promise.wait(60))
+  client.dispatch(runtime)(AddTransitionItem(1))
+  use _ <- promise.await(promise.wait(20))
+  client.dispatch(runtime)(RemoveTransitionItem(1))
+  test_support.animation_playback_rate(".card") |> should.equal(1.0)
+
+  // past where the reversal would have ended, the class never left
+  use _ <- promise.await(promise.wait(80))
+  test_support.get_attribute(".card", "class") |> should.equal("card tx5-exit")
+
+  use _ <- promise.map(promise.wait(250))
+  test_support.unstub_animations()
+  test_support.inner_html("#app") |> string.contains("card") |> should.be_false
 }

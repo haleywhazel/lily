@@ -15,8 +15,10 @@ import gleam/list
 import gleam/option.{None, Some}
 @target(javascript)
 import gleam/string
+
 @target(javascript)
 import gleeunit/should
+
 @target(javascript)
 import lily/internal/codec
 @target(javascript)

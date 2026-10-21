@@ -12,18 +12,20 @@
 // IMPORTS
 // =============================================================================
 
-import gleam/list
-import gleam/option
-import lily/server.{type Builder, type Connection, type Server, type ServerEvent}
-import lily/test_support.{type Message, type Model}
-import lily/transport
-
 @target(erlang)
 import gleam/dict
 @target(erlang)
 import gleam/erlang/process
+@target(javascript)
+import gleam/javascript/promise
+import gleam/list
+import gleam/option
+
 @target(erlang)
 import lily/internal/actor
+import lily/server.{type Builder, type Connection, type Server, type ServerEvent}
+import lily/test_support.{type Message, type Model}
+import lily/transport
 
 // =============================================================================
 // PUBLIC TYPES
@@ -33,9 +35,44 @@ import lily/internal/actor
 pub type Frame =
   transport.Protocol(Model, Message)
 
+@target(erlang)
+/// What a test that waits returns, gleeunit awaits it on JavaScript.
+pub type Later =
+  Nil
+
+@target(javascript)
+pub type Later =
+  promise.Promise(Nil)
+
 // =============================================================================
 // PUBLIC FUNCTIONS
 // =============================================================================
+
+@target(erlang)
+/// Runs `next` once `milliseconds` have passed.
+pub fn after(milliseconds: Int, next: fn() -> Nil) -> Later {
+  process.sleep(milliseconds)
+  next()
+}
+
+@target(javascript)
+pub fn after(milliseconds: Int, next: fn() -> Nil) -> Later {
+  promise.wait(milliseconds)
+  |> promise.map(fn(_) { next() })
+}
+
+@target(erlang)
+/// Like [`after`](#after) with another wait to follow.
+pub fn after_then(milliseconds: Int, next: fn() -> Later) -> Later {
+  process.sleep(milliseconds)
+  next()
+}
+
+@target(javascript)
+pub fn after_then(milliseconds: Int, next: fn() -> Later) -> Later {
+  promise.wait(milliseconds)
+  |> promise.await(fn(_) { next() })
+}
 
 @target(erlang)
 /// Wait up to a second for `pid` to die, an already dead one counts.
@@ -108,7 +145,7 @@ pub fn open_broken(
       origin: option.None,
       send: fn(_bytes) { panic as "send closure is gone" },
       client_id:,
-      session: [],
+      seed: [],
       watch: server.Unwatched,
     )
   connection
@@ -118,7 +155,7 @@ pub fn open_broken(
 pub fn open_raw(
   app: Server(Model, Message),
   client_id: String,
-  session: List(Message),
+  seed: List(Message),
 ) -> #(Connection(Model, Message), fn() -> List(BitArray)) {
   let #(record, recorded) = recorder()
   let assert Ok(connection) =
@@ -127,7 +164,7 @@ pub fn open_raw(
       origin: option.None,
       send: record,
       client_id:,
-      session:,
+      seed:,
       watch: server.Unwatched,
     )
   #(connection, fn() {
@@ -140,7 +177,7 @@ pub fn open_raw(
 pub fn open_recording(
   app: Server(Model, Message),
   client_id: String,
-  session: List(Message),
+  seed: List(Message),
 ) -> #(Connection(Model, Message), fn() -> List(Frame)) {
   let #(record, recorded) = recorder()
   let assert Ok(connection) =
@@ -149,7 +186,7 @@ pub fn open_recording(
       origin: option.None,
       send: record,
       client_id:,
-      session:,
+      seed:,
       watch: server.Unwatched,
     )
   #(connection, fn() {
@@ -158,13 +195,13 @@ pub fn open_recording(
   })
 }
 
-/// Like [`open`](#open) with `session` applied first, its updates dropped.
+/// Like [`open`](#open) with `seed` applied first, its updates dropped.
 pub fn open_seeded(
   app: Server(Model, Message),
   client_id: String,
-  session: List(Message),
+  seed: List(Message),
 ) -> #(Connection(Model, Message), fn() -> List(Frame)) {
-  let #(connection, frames) = open_recording(app, client_id, session)
+  let #(connection, frames) = open_recording(app, client_id, seed)
   let _ = frames()
   #(connection, frames)
 }

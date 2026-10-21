@@ -1,11 +1,16 @@
 *.beam
 *.ez
 /build
-example/*/build
 erl_crash.dump
 .DS_Store
 node_modules/
 package-lock.json
 
-# Toolchain stamp written by example/serve.sh to detect a Gleam or OTP upgrade
-.toolchain
+# examples
+examples/**/build
+examples/**/.toolchain
+examples/**/notes.txt
+
+# temp while I work on them
+tutorials
+examples

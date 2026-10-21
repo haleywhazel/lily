@@ -5,9 +5,14 @@
 // IMPORTS
 // =============================================================================
 
+import gleam/dict
+import gleam/int
 import gleam/list
 import gleam/option
+import gleam/string
+
 import gleeunit/should
+
 import lily/server
 import lily/store
 import lily/test_support.{Decrement, Increment, SetName}
@@ -17,6 +22,28 @@ import lily/wire_support
 // =============================================================================
 // HELPERS
 // =============================================================================
+
+// `room:1` up to `room:count`
+fn room_cursors(count: Int) -> List(transport.SyncTarget) {
+  int.range(from: 1, to: count + 1, with: [], run: fn(cursors, n) {
+    [transport.Topic("room:" <> int.to_string(n)), ..cursors]
+  })
+  |> list.reverse
+}
+
+// subscribed to `chat`, its snapshot drained
+fn joined(
+  app: server.Server(test_support.Model, test_support.Message),
+  client_id: String,
+) -> #(
+  server.Connection(test_support.Model, test_support.Message),
+  fn() -> List(wire_support.Frame),
+) {
+  let #(connection, frames) = wire_support.open(app, client_id)
+  wire_support.subscribe(connection, "chat")
+  let _ = frames()
+  #(connection, frames)
+}
 
 fn is_diagnostic(event: server.ServerEvent(model, message)) -> Bool {
   case event {
@@ -32,9 +59,40 @@ fn is_subscribed(event: server.ServerEvent(model, message)) -> Bool {
   }
 }
 
+fn assert_evicted(
+  app: server.Server(test_support.Model, test_support.Message),
+  connection: server.Connection(test_support.Model, test_support.Message),
+  frames: fn() -> List(wire_support.Frame),
+) -> Nil {
+  test_support.subscriber_count(app, "chat")
+  |> should.equal(0)
+  wire_support.topic_message(connection, "chat", Increment)
+  frames()
+  |> should.equal([transport.Dropped(target: transport.Topic("chat"))])
+}
+
 fn denying_server() -> server.Server(test_support.Model, test_support.Message) {
   test_support.new_topic_server_with_access(
     store.Allow(fn(_client_id, _topic_id, _session) { False }),
+  )
+}
+
+// allows a session until its first `IncrementSecondary`
+fn revocable_server() -> server.Server(test_support.Model, test_support.Message) {
+  test_support.new_topic_server_with_access(
+    store.Allow(fn(_client_id, _topic_id, session: test_support.Model) {
+      session.secondary_count == 0
+    }),
+  )
+}
+
+fn switched_server(
+  allowed: test_support.Shared(Bool),
+) -> server.Server(test_support.Model, test_support.Message) {
+  test_support.new_topic_server_with_access(
+    store.Allow(fn(_client_id, _topic_id, _session) {
+      test_support.get_shared(allowed)
+    }),
   )
 }
 
@@ -254,9 +312,9 @@ pub fn topic_crashing_update_drops_the_message_test() {
       serialiser: test_support.custom_serialiser(),
     )
     |> store.topic(
-      prefix: "chat",
-      get: fn(model, _) { model },
-      set: fn(_, _, model) { model },
+      id: "chat",
+      get: fn(model) { model },
+      set: fn(_, model) { model },
       access: store.Open,
     )
   let app =
@@ -319,7 +377,7 @@ pub fn topic_subscribe_to_unknown_topic_sends_rejected_test() {
 
   frames()
   |> should.equal([
-    transport.Rejected(topic_id: "missing", reason: "not found"),
+    transport.Rejected(topic_id: "missing", reason: transport.NotFound),
   ])
   test_support.subscriber_count(app, "missing")
   |> should.equal(-1)
@@ -351,7 +409,9 @@ pub fn topic_allow_false_sends_rejected_test() {
   wire_support.subscribe(c1, "chat")
 
   frames()
-  |> should.equal([transport.Rejected(topic_id: "chat", reason: "denied")])
+  |> should.equal([
+    transport.Rejected(topic_id: "chat", reason: transport.AccessDenied),
+  ])
   test_support.subscriber_count(app, "chat")
   |> should.equal(-1)
 }
@@ -411,7 +471,9 @@ pub fn topic_allow_can_decide_from_the_session_model_test() {
   wire_support.subscribe(member, "chat")
 
   guest_frames()
-  |> should.equal([transport.Rejected(topic_id: "chat", reason: "denied")])
+  |> should.equal([
+    transport.Rejected(topic_id: "chat", reason: transport.AccessDenied),
+  ])
   case member_frames() {
     [transport.Snapshot(..)] -> Nil
     _ -> should.fail()
@@ -431,7 +493,9 @@ pub fn topic_crashing_allow_predicate_denies_test() {
   wire_support.subscribe(c1, "chat")
 
   frames()
-  |> should.equal([transport.Rejected(topic_id: "chat", reason: "denied")])
+  |> should.equal([
+    transport.Rejected(topic_id: "chat", reason: transport.AccessDenied),
+  ])
   test_support.client_count(app)
   |> should.equal(1)
 }
@@ -455,7 +519,7 @@ pub fn topic_each_declared_prefix_has_its_own_access_rule_test() {
   |> should.be_true
   list.contains(
     received,
-    transport.Rejected(topic_id: "room:1", reason: "denied"),
+    transport.Rejected(topic_id: "room:1", reason: transport.AccessDenied),
   )
   |> should.be_true
 }
@@ -463,7 +527,7 @@ pub fn topic_each_declared_prefix_has_its_own_access_rule_test() {
 pub fn topic_message_from_non_subscriber_is_dropped_test() {
   let app = test_support.new_topic_server()
   let #(c1, frames1) = wire_support.open(app, "c1")
-  let #(c2, _frames2) = wire_support.open(app, "c2")
+  let #(c2, frames2) = wire_support.open(app, "c2")
   wire_support.subscribe(c1, "chat")
   let _ = frames1()
 
@@ -472,6 +536,8 @@ pub fn topic_message_from_non_subscriber_is_dropped_test() {
 
   frames1()
   |> should.equal([])
+  frames2()
+  |> should.equal([transport.Dropped(target: transport.Topic("chat"))])
   server.dispatch_topic(app, topic_id: "chat", message: Increment)
   frames1()
   |> should.equal([
@@ -491,6 +557,254 @@ pub fn topic_server_dispatch_is_not_gated_by_access_test() {
 }
 
 // =============================================================================
+// ACCESS RECHECK
+// =============================================================================
+
+pub fn topic_access_is_rechecked_after_a_session_message_test() {
+  let app = revocable_server()
+  let #(c1, frames) = joined(app, "c1")
+
+  wire_support.session_message(c1, test_support.IncrementSecondary)
+
+  frames()
+  |> should.equal([
+    transport.Acknowledge(target: transport.Session, sequence: 1),
+    transport.Rejected(topic_id: "chat", reason: transport.AccessDenied),
+  ])
+  assert_evicted(app, c1, frames)
+}
+
+pub fn topic_access_is_rechecked_after_dispatch_to_test() {
+  let app = revocable_server()
+  let #(c1, frames) = joined(app, "c1")
+
+  server.dispatch_to(
+    app,
+    client_id: "c1",
+    message: test_support.IncrementSecondary,
+  )
+
+  frames()
+  |> should.equal([
+    transport.SessionUpdate(
+      sequence: 1,
+      payload: test_support.IncrementSecondary,
+    ),
+    transport.Rejected(topic_id: "chat", reason: transport.AccessDenied),
+  ])
+  assert_evicted(app, c1, frames)
+}
+
+pub fn topic_resync_of_a_joined_topic_rechecks_access_test() {
+  let allowed = test_support.new_shared(True)
+  let app = switched_server(allowed)
+  let #(c1, frames) = joined(app, "c1")
+  test_support.set_shared(allowed, False)
+
+  wire_support.resync_topic(c1, "chat")
+
+  frames()
+  |> should.equal([
+    transport.Rejected(topic_id: "chat", reason: transport.AccessDenied),
+  ])
+  assert_evicted(app, c1, frames)
+}
+
+pub fn topic_recheck_access_evicts_after_outside_state_changes_test() {
+  let allowed = test_support.new_shared(True)
+  let app = switched_server(allowed)
+  let #(c1, frames) = joined(app, "c1")
+
+  test_support.set_shared(allowed, False)
+  server.recheck_access(app, client_id: "c1")
+
+  frames()
+  |> should.equal([
+    transport.Rejected(topic_id: "chat", reason: transport.AccessDenied),
+  ])
+  assert_evicted(app, c1, frames)
+}
+
+pub fn topic_recheck_access_keeps_a_permitted_topic_test() {
+  let allowed = test_support.new_shared(True)
+  let app = switched_server(allowed)
+  let #(_c1, frames) = joined(app, "c1")
+
+  server.recheck_access(app, client_id: "c1")
+
+  frames()
+  |> should.equal([])
+  test_support.subscriber_count(app, "chat")
+  |> should.equal(1)
+}
+
+pub fn topic_pending_admission_revoked_before_it_lands_never_joins_test() {
+  // the rule revokes itself mid-subscribe, landing ahead of the admission
+  let server_ref = test_support.new_shared(option.None)
+  let #(builder, events) =
+    wire_support.observed(server.new(
+      test_support.topic_store_with([
+        #(
+          "chat",
+          store.Allow(fn(client_id, _topic_id, session: test_support.Model) {
+            case session.secondary_count, test_support.get_shared(server_ref) {
+              0, option.Some(app) -> {
+                server.dispatch_to(
+                  app,
+                  client_id:,
+                  message: test_support.IncrementSecondary,
+                )
+                True
+              }
+              _, _ -> False
+            }
+          }),
+        ),
+      ]),
+      origins: server.AnyOrigin,
+    ))
+  let app = test_support.start_server(builder)
+  test_support.set_shared(server_ref, option.Some(app))
+  let #(c1, frames) = wire_support.open(app, "c1")
+
+  wire_support.subscribe(c1, "chat")
+
+  frames()
+  |> list.contains(transport.Rejected(
+    topic_id: "chat",
+    reason: transport.AccessDenied,
+  ))
+  |> should.be_true
+  events(app)
+  |> list.any(is_subscribed)
+  |> should.be_false
+  assert_evicted(app, c1, frames)
+}
+
+// =============================================================================
+// LIMITS
+// =============================================================================
+
+pub fn topic_subscription_cap_rejects_until_one_is_left_test() {
+  let app =
+    test_support.start_server(
+      test_support.topic_builder()
+      |> server.max_subscriptions(per_client: 2),
+    )
+  let #(c1, frames) = wire_support.open(app, "c1")
+  wire_support.subscribe(c1, "room:1")
+  wire_support.subscribe(c1, "room:2")
+  let _ = frames()
+
+  wire_support.subscribe(c1, "room:3")
+  frames()
+  |> should.equal([
+    transport.Rejected(topic_id: "room:3", reason: transport.OverLimit),
+  ])
+  test_support.subscriber_count(app, "room:3")
+  |> should.equal(-1)
+
+  wire_support.unsubscribe(c1, "room:1")
+  wire_support.subscribe(c1, "room:3")
+  frames()
+  |> list.all(wire_support.is_snapshot)
+  |> should.be_true
+  test_support.subscriber_count(app, "room:3")
+  |> should.equal(1)
+}
+
+pub fn topic_subscription_cap_allows_a_repeat_subscribe_test() {
+  let app =
+    test_support.start_server(
+      test_support.topic_builder()
+      |> server.max_subscriptions(per_client: 1),
+    )
+  let #(c1, frames) = wire_support.open(app, "c1")
+  wire_support.subscribe(c1, "chat")
+
+  wire_support.subscribe(c1, "chat")
+
+  frames()
+  |> list.all(wire_support.is_snapshot)
+  |> should.be_true
+}
+
+pub fn topic_id_over_the_length_cap_is_rejected_test() {
+  let app =
+    test_support.start_server(
+      test_support.topic_builder()
+      |> server.max_topic_id_length(bytes: 8),
+    )
+  let #(c1, frames) = wire_support.open(app, "c1")
+
+  wire_support.subscribe(c1, "room:1234")
+
+  frames()
+  |> should.equal([
+    transport.Rejected(topic_id: "room:1234", reason: transport.OverLimit),
+  ])
+  test_support.subscriber_count(app, "room:1234")
+  |> should.equal(-1)
+}
+
+pub fn topic_id_length_cap_defaults_to_256_bytes_test() {
+  let app = test_support.new_topic_server()
+  let #(c1, frames) = wire_support.open(app, "c1")
+  let longest = "room:" <> string.repeat("x", 251)
+  let too_long = longest <> "x"
+
+  wire_support.subscribe(c1, longest)
+  wire_support.subscribe(c1, too_long)
+
+  let received = frames()
+  list.count(received, wire_support.is_snapshot)
+  |> should.equal(1)
+  list.contains(
+    received,
+    transport.Rejected(topic_id: too_long, reason: transport.OverLimit),
+  )
+  |> should.be_true
+}
+
+pub fn topic_subscription_cap_defaults_to_1000_test() {
+  let app = test_support.new_topic_server()
+  let #(c1, frames) = wire_support.open(app, "c1")
+
+  wire_support.send(c1, transport.Resync(cursors: room_cursors(1001)))
+
+  let received = frames()
+  list.count(received, wire_support.is_snapshot)
+  |> should.equal(1000)
+  list.contains(
+    received,
+    transport.Rejected(topic_id: "room:1001", reason: transport.OverLimit),
+  )
+  |> should.be_true
+}
+
+pub fn topic_resync_with_a_huge_cursor_list_is_bounded_test() {
+  let app =
+    test_support.start_server(
+      test_support.topic_builder()
+      |> server.max_subscriptions(per_client: 2),
+    )
+  let #(c1, frames) = wire_support.open(app, "c1")
+
+  wire_support.send(c1, transport.Resync(cursors: room_cursors(10_000)))
+
+  let received = frames()
+  list.count(received, wire_support.is_snapshot)
+  |> should.equal(2)
+  received
+  |> list.filter(fn(frame) { !wire_support.is_snapshot(frame) })
+  |> should.equal([
+    transport.Rejected(topic_id: "room:3", reason: transport.OverLimit),
+  ])
+  dict.size(test_support.inspect(app).topics)
+  |> should.equal(2)
+}
+
+// =============================================================================
 // RESYNC
 // =============================================================================
 
@@ -501,7 +815,9 @@ pub fn topic_resync_does_not_bypass_access_test() {
   wire_support.resync_topic(c1, "chat")
 
   frames()
-  |> should.equal([transport.Rejected(topic_id: "chat", reason: "denied")])
+  |> should.equal([
+    transport.Rejected(topic_id: "chat", reason: transport.AccessDenied),
+  ])
 }
 
 pub fn topic_denied_subscribe_then_resync_sends_no_snapshot_test() {
@@ -584,6 +900,51 @@ pub fn topic_a_resyncing_client_resubscribes_after_reconnecting_test() {
   second_frames()
   |> should.equal([
     transport.TopicUpdate(topic_id: "chat", sequence: 1, payload: Increment),
+  ])
+}
+
+pub fn topic_message_right_behind_a_resync_is_applied_test() {
+  // a reconnecting client's offline edits follow its resync without a pause
+  let app = test_support.new_topic_server()
+  let #(c1, frames1) = wire_support.open(app, "c1")
+  wire_support.subscribe(c1, "chat")
+  let _ = frames1()
+  let #(c2, frames2) = wire_support.open(app, "c2")
+
+  wire_support.resync_topic(c2, "chat")
+  wire_support.topic_message(c2, "chat", Increment)
+
+  frames2()
+  |> should.equal([
+    transport.Snapshot(
+      target: transport.Topic("chat"),
+      sequence: 0,
+      state: test_support.initial_model(),
+    ),
+    transport.Acknowledge(target: transport.Topic("chat"), sequence: 1),
+  ])
+  frames1()
+  |> should.equal([
+    transport.TopicUpdate(topic_id: "chat", sequence: 1, payload: Increment),
+  ])
+}
+
+pub fn topic_message_ahead_of_its_resync_is_dropped_test() {
+  // the order the old offline queue used, the edit was lost
+  let app = test_support.new_topic_server()
+  let #(c1, frames) = wire_support.open(app, "c1")
+
+  wire_support.topic_message(c1, "chat", Increment)
+  wire_support.resync_topic(c1, "chat")
+
+  frames()
+  |> should.equal([
+    transport.Dropped(target: transport.Topic("chat")),
+    transport.Snapshot(
+      target: transport.Topic("chat"),
+      sequence: 0,
+      state: test_support.initial_model(),
+    ),
   ])
 }
 
@@ -698,6 +1059,19 @@ pub fn topic_stop_tells_subscribers_with_a_final_acknowledge_test() {
   ])
 }
 
+pub fn topic_message_after_stop_is_dropped_test() {
+  let app = test_support.new_topic_server()
+  let #(c1, frames) = wire_support.open(app, "c1")
+  wire_support.subscribe(c1, "chat")
+  wire_support.stop_topic(app, "chat")
+  let _ = frames()
+
+  wire_support.topic_message(c1, "chat", Increment)
+
+  frames()
+  |> should.equal([transport.Dropped(target: transport.Topic("chat"))])
+}
+
 pub fn topic_subscribing_after_stop_starts_the_topic_afresh_test() {
   let app = test_support.new_topic_server()
   let #(c1, frames) = wire_support.open(app, "c1")
@@ -741,7 +1115,7 @@ pub fn topic_message_with_a_mismatching_id_is_dropped_test() {
   wire_support.topic_message(c1, "room:1", Increment)
 
   frames()
-  |> should.equal([])
+  |> should.equal([transport.Dropped(target: transport.Topic("room:1"))])
   case events(app) {
     [server.Diagnostic(level: transport.Warning, ..)] -> Nil
     _ -> should.fail()
@@ -780,7 +1154,7 @@ pub fn topic_session_message_routed_to_a_topic_is_dropped_test() {
   wire_support.session_message(c1, Increment)
 
   frames()
-  |> should.equal([])
+  |> should.equal([transport.Dropped(target: transport.Session)])
   case events(app) {
     [server.Diagnostic(level: transport.Warning, ..)] -> Nil
     _ -> should.fail()
@@ -794,7 +1168,7 @@ pub fn topic_local_message_sent_as_a_session_message_is_dropped_test() {
   wire_support.session_message(c1, test_support.Reset)
 
   frames()
-  |> should.equal([])
+  |> should.equal([transport.Dropped(target: transport.Session)])
 }
 
 pub fn topic_session_message_routed_to_the_session_is_applied_test() {

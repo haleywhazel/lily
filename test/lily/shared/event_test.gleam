@@ -1,10 +1,11 @@
-// lily/event on both targets, data-message codec and inert SSR listeners
+// lily/event on both targets, data-lily-message codec and inert SSR listeners
 
 // =============================================================================
 // IMPORTS
 // =============================================================================
 
 import gleam/string
+
 import gleeunit/should
 
 import lily/component
@@ -50,7 +51,7 @@ pub fn event_listeners_do_not_change_server_rendered_markup_test() {
   let plain = fn(_) { component.static(fn(_) { "<button>go</button>" }) }
   let bound = fn(model) {
     plain(model)
-    |> event.on_click(message: Increment, options: event.defaults)
+    |> event.on_click(message: Increment)
   }
   let render = fn(view) {
     component.render_to_string(
@@ -62,4 +63,29 @@ pub fn event_listeners_do_not_change_server_rendered_markup_test() {
   }
 
   render(bound) |> should.equal(render(plain))
+}
+
+pub fn event_modifiers_do_not_change_server_rendered_markup_test() {
+  let plain = fn(_) { component.static(fn(_) { "<button>go</button>" }) }
+  let modified = fn(model) {
+    plain(model)
+    |> event.once
+    |> event.on_click(message: Increment)
+    |> event.debounce(milliseconds: 100)
+    |> event.throttle(milliseconds: 100)
+    |> event.prevent_default
+    |> event.stop_propagation
+    |> event.reset_form
+    |> event.selector("button")
+  }
+  let render = fn(view) {
+    component.render_to_string(
+      view:,
+      model: test_support.initial_model(),
+      to_html: test_support.to_html,
+      from_string: fn(html) { html },
+    )
+  }
+
+  render(modified) |> should.equal(render(plain))
 }

@@ -1,10 +1,21 @@
 name = "lily"
-version = "0.8.0"
-target = "javascript"
+version = "1.0.0"
+gleam = ">= 1.19.0"
 
 description = "Lily is designed to be a web framework for Gleam that allows for real-time updates while preserving offline functionality!"
 licences = ["Apache-2.0"]
 repository = { type = "github", user = "haleywhazel", repo = "lily" }
+
+
+internal_modules = ["lily/internal/*"]
+
+[documentation]
+pages = [
+    { title = "01 Getting Started", path = "tutorials/01-intro.html", source = "./tutorials/01-intro.md" },
+    { title = "02 Components", path = "tutorials/02-components.html", source = "./tutorials/02-components.md" },
+    { title = "03 Text Inputs", path = "tutorials/03-inputs.html", source = "./tutorials/03-inputs.md" },
+    { title = "04 Forms", path = "tutorials/03-forms.html", source = "./tutorials/03-forms.md" },
+]
 
 [dependencies]
 gleam_stdlib = ">= 0.44.0 and < 2.0.0"

@@ -2,9 +2,8 @@
 // method mapping, shared behaviour in test/lily/shared/actor_test.gleam
 
 @target(javascript)
-import gleam/option
-@target(javascript)
 import gleeunit/should
+
 @target(javascript)
 import lily/internal/actor.{Continue, Halt, Reply}
 @target(javascript)
@@ -20,7 +19,7 @@ type Event {
 }
 
 @target(javascript)
-fn reduce(event: Event, state: Int) -> actor.Outcome(Int, Int) {
+fn reduce(event: Event, state: Int) -> actor.CellOutcome(Int, Int) {
   case event {
     Increment -> Continue(state + 1)
     Read -> Reply(state, state)
@@ -30,8 +29,7 @@ fn reduce(event: Event, state: Int) -> actor.Outcome(Int, Int) {
 
 @target(javascript)
 pub fn cell_halt_stops_and_returns_default_test() {
-  let assert Ok(cell) =
-    actor.start_seeded(fn(_) { 3 }, reduce:, on_down: fn(_) { option.None })
+  let assert Ok(cell) = actor.start_seeded(fn(_) { 3 }, reduce:)
 
   actor.send(cell, Stop)
 

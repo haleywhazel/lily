@@ -6,7 +6,9 @@
 // =============================================================================
 
 import gleam/list
+
 import gleeunit/should
+
 import lily/test_support.{
   type Message, type Model, Decrement, Increment, Noop, Reset, SetName,
 }

@@ -5,7 +5,9 @@
 // =============================================================================
 
 import gleam/list
+
 import gleeunit/should
+
 import lily/server.{type ServerEvent}
 import lily/store
 import lily/test_support.{type Message, type Model, Increment}
@@ -206,7 +208,7 @@ pub fn observers_see_an_unknown_topic_rejected_as_not_found_test() {
     server.SubscriptionRejected(
       client_id: "c1",
       topic_id: "nowhere",
-      reason: "not found",
+      reason: transport.NotFound,
     ),
   ])
 }
@@ -226,7 +228,7 @@ pub fn observers_see_a_refused_subscription_rejected_as_denied_test() {
     server.SubscriptionRejected(
       client_id: "c1",
       topic_id: "private",
-      reason: "denied",
+      reason: transport.AccessDenied,
     ),
   ])
 }
@@ -246,7 +248,7 @@ pub fn observers_see_a_crashing_access_rule_rejected_as_denied_test() {
     server.SubscriptionRejected(
       client_id: "c1",
       topic_id: "private",
-      reason: "denied",
+      reason: transport.AccessDenied,
     ),
   ])
 }
@@ -266,7 +268,7 @@ pub fn observers_see_a_resync_refused_on_the_access_recheck_test() {
     server.SubscriptionRejected(
       client_id: "c2",
       topic_id: "private",
-      reason: "denied",
+      reason: transport.AccessDenied,
     ),
   ])
 }

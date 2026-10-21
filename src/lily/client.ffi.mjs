@@ -45,9 +45,13 @@ export function initialNotify(runtime) {
   flushNotify(runtime);
 }
 
+/** The last match, user content carrying the id comes earlier. */
 export function readEmbeddedSnapshot() {
   if (typeof document === "undefined") return new Error(undefined);
-  const text = document.getElementById("lily-snapshot")?.textContent;
+  const scripts = document.querySelectorAll(
+    'script#lily-snapshot[type="application/octet-stream"]',
+  );
+  const text = scripts[scripts.length - 1]?.textContent;
   if (!text) return new Error(undefined);
   return new Ok(text);
 }
@@ -66,6 +70,8 @@ export function run(runtime, step) {
       log("error", `lily: a client update crashed: ${describe(error)}`);
       continue;
     }
+    // an effect, nothing changed and nothing to observe
+    if (next === undefined) continue;
     runtime.model = next[0];
     for (const observer of runtime.observers) {
       try {
@@ -77,6 +83,14 @@ export function run(runtime, step) {
   }
   runtime.draining = false;
   scheduleNotify(runtime);
+}
+
+/** Queues `effect` in line with the steps, no model change, no observers. */
+export function runEffect(runtime, effect) {
+  run(runtime, () => {
+    effect();
+    return undefined;
+  });
 }
 
 /** Skips the observers and renderers. */

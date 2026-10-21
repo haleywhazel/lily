@@ -5,18 +5,27 @@
 
 Lily is a web framework for Gleam that focuses specifically on having real-time sync with the server while keeping client interactions for offline capability!
 
+Features:
+
+* Automatic client and server syncing
+* Simple way to get shared multi-user states
+* Offline-first by default
+* Optimistic updates on the client while retaining an authoritative server
+* Fine-grained control over rendering without needing to memoisation
+* OTP supervision to handle crashes
+
 ## How Lily works
 
-In Lily, states are owned authoritatively by a single store that communicates with the server to prevent sprawling component states. Unlike Lustre, however, rendering is owned by each individual component and they can dictate exactly how they want rendering to occur. At its core, you have a message and update loop that handles state changes (which syncs with the server), and individual components that listen to parts of the model and render as necessary.
+In Lily, states are owned by a store that is synced across the client and server to prevent states from being lost as the number of components grows, like in Lustre and Elm. Unlike Lustre, however, rendering is owned by each individual component, giving you a bit more control over how you want rendering to occur. At its core, you have a message and update loop that handles state changes (which syncs with the server), and individual components that listen to parts of the model and render as necessary.
 
 Lily is designed to work with existing Gleam libraries (wisp/mist/ewe, Lustre HTML layouts) and delegates parts such as creating server and handling websocket connections to them.
 
-## When should you use Lily?
+## When should you (not) use Lily?
 
-For most use cases, Lily is probably overkill, as there is additional boilerplate code to ensure the client/server sync while preserving offline interactivity. When *not* to use Lily (and use something like Lustre instead): static webpages, SPAs, SSR without needing offline interactivity. This covers the vast majority of common use cases. What Lily can do is also technically doable with Lustre, but Lily saves a bit of time by dealing with client-server connections on its own. There's also the Libero package which should give similar features to Lily when used with Lustre with less effort, although Lily doesn't use any codegen.
+While Lily makes writing web applications that require both offline-functionality and syncing between server and client(s) easier, this also means that there is more boilerplate code that is required. For simple applications like static webpages, SPAs, SSR without needing offline interactivity, it's probably easier to use other frameworks like Phoenix LiveView and Lustre if you want to take advantage of the BEAM VM! However, that doesn't mean these applications aren't doable in Lily – feel free to do so anyway :) and have fun writing code with Lily!
 
-## Example
+## Tutorial
 
-See the `/example` folder within the repo for an example Lily application, a
+WIP NOT IN REPO YET
 
-Note: while I did decide to add a JS implementation to everything on the server-side to get docs to compile for the server modules and functions, I would recommend using the Erlang target instead to take advantage of the BEAM VM, otherwise it's probably a better idea to just use a more mature JS platform.
+The sidebar should contain links to a tutorial that walks you through common use cases of Lily. Each page builds up to a single project that you can also find inside the `/examples` folder of the GitHub repo.

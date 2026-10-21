@@ -7,7 +7,9 @@
 
 import gleam/dict
 import gleam/result
+
 import gleeunit/should
+
 import lily/store
 import lily/transport
 
@@ -84,9 +86,9 @@ fn with_chat(
 ) -> store.Store(OuterModel, Message, store.Synced) {
   store.topic(
     app_store,
-    prefix: "chat",
-    get: fn(model: OuterModel, _id) { model.chat },
-    set: fn(model, _id, chat) { OuterModel(..model, chat:) },
+    id: "chat",
+    get: fn(model: OuterModel) { model.chat },
+    set: fn(model, chat) { OuterModel(..model, chat:) },
     access: store.Open,
   )
 }
@@ -96,9 +98,9 @@ fn with_news(
 ) -> store.Store(OuterModel, Message, store.Synced) {
   store.topic(
     app_store,
-    prefix: "news",
-    get: fn(model: OuterModel, _id) { model.news },
-    set: fn(model, _id, news) { OuterModel(..model, news:) },
+    id: "news",
+    get: fn(model: OuterModel) { model.news },
+    set: fn(model, news) { OuterModel(..model, news:) },
     access: store.Open,
   )
 }
@@ -106,7 +108,7 @@ fn with_news(
 fn with_rooms(
   app_store: store.Store(OuterModel, Message, store.Synced),
 ) -> store.Store(OuterModel, Message, store.Synced) {
-  store.topic(
+  store.topics(
     app_store,
     prefix: "room:",
     get: fn(model: OuterModel, id) {
@@ -257,10 +259,10 @@ pub fn merge_snapshot_family_hands_the_rest_of_the_id_to_the_slice_test() {
   |> should.equal(Ok(2))
 }
 
-pub fn merge_snapshot_fixed_topic_gets_an_empty_rest_test() {
+pub fn merge_snapshot_family_matching_its_whole_prefix_gets_an_empty_rest_test() {
   let app_store =
     base()
-    |> store.topic(
+    |> store.topics(
       prefix: "chat",
       get: fn(model: OuterModel, rest) {
         case rest {
@@ -286,7 +288,7 @@ pub fn merge_snapshot_longest_prefix_picks_the_slice_test() {
   let app_store =
     base()
     |> with_rooms
-    |> store.topic(
+    |> store.topics(
       prefix: "room:vip:",
       get: fn(model: OuterModel, _id) { model.news },
       set: fn(model, _id, news) { OuterModel(..model, news:) },

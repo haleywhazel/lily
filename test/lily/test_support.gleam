@@ -9,25 +9,24 @@
 
 import gleam/bit_array
 import gleam/dict.{type Dict}
+@target(javascript)
+import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode.{type Decoder}
 import gleam/json.{type Json}
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set.{type Set}
-import lily/internal/actor
-import lily/server
-import lily/store
-import lily/transport.{type Serialiser}
+import gleam/string
 
-@target(javascript)
-import gleam/dynamic.{type Dynamic}
 @target(javascript)
 import lily/client
 @target(javascript)
 import lily/component
-@target(javascript)
-import lily/event
+import lily/internal/actor
+import lily/server
+import lily/store
+import lily/transport.{type Serialiser}
 
 // =============================================================================
 // PUBLIC TYPES
@@ -43,6 +42,8 @@ pub type Message {
   IncrementSecondary
   AddTransitionItem(Int)
   RemoveTransitionItem(Int)
+  // the last item in stock, only the first claim gets it
+  Claim(String)
 }
 
 pub type Model {
@@ -65,6 +66,9 @@ pub type Nested {
 }
 
 pub type Ref(value)
+
+/// Like [`Ref`](#Ref) but readable from the server and topic processes.
+pub type Shared(value)
 
 pub type Tab {
   TabA
@@ -95,6 +99,11 @@ pub type WithTuple {
 @external(javascript, "./test_support.ffi.mjs", "activeElementId")
 pub fn active_element_id() -> String
 
+@target(javascript)
+/// The first stubbed animation's playback rate under `selector`, 0 when none.
+@external(javascript, "./test_support.ffi.mjs", "animationPlaybackRate")
+pub fn animation_playback_rate(_selector: String) -> Float
+
 /// Default depth cap, no modules. Reads both formats whatever `format` is.
 pub fn automatic_serialiser(
   format: transport.Format,
@@ -120,6 +129,10 @@ pub fn automatic_topic_store() -> store.Store(Model, Message, store.Synced) {
   |> store.sync(route: topic_route, modules: [])
   |> declare_topics([#("chat", store.Open), #("room:", store.Open)])
 }
+
+@target(javascript)
+@external(javascript, "./test_support.ffi.mjs", "beforeUnloadPrevented")
+pub fn before_unload_prevented() -> Bool
 
 pub fn boot_id(app: server.Server(Model, Message)) -> String {
   inspect(app).boot_id
@@ -165,7 +178,10 @@ pub fn client_count(app: server.Server(Model, Message)) -> Int {
 /// last call.
 pub fn connect_capturing(
   runtime: client.Runtime(Model, Message, store.Synced),
-) -> #(transport.Handler, fn() -> List(transport.Protocol(Model, Message))) {
+) -> #(
+  transport.ConnectorHandler,
+  fn() -> List(transport.Protocol(Model, Message)),
+) {
   let #(handler, sent) = connect_raw(runtime)
   #(handler, fn() {
     list.map(sent(), fn(bytes) {
@@ -180,11 +196,11 @@ pub fn connect_capturing(
 /// [`connect_capturing`](#connect_capturing) with raw bytes.
 pub fn connect_raw(
   runtime: client.Runtime(Model, Message, store.Synced),
-) -> #(transport.Handler, fn() -> List(BitArray)) {
+) -> #(transport.ConnectorHandler, fn() -> List(BitArray)) {
   let sent = new([])
   let handler =
     new(
-      transport.Handler(
+      transport.ConnectorHandler(
         received: fn(_) { Nil },
         opened: fn() { Nil },
         closed: fn() { Nil },
@@ -257,6 +273,8 @@ pub fn encode_message(message: Message) -> Json {
         #("tag", json.string("RemoveTransitionItem")),
         #("id", json.int(id)),
       ])
+    Claim(who) ->
+      json.object([#("tag", json.string("Claim")), #("who", json.string(who))])
   }
 }
 
@@ -302,6 +320,10 @@ pub fn focus(_selector: String) -> Nil
 @external(javascript, "./test_support.ffi.mjs", "getRef")
 pub fn get(cell: Ref(value)) -> value
 
+@external(erlang, "lily_test_support_ffi", "get_shared")
+@external(javascript, "./test_support.ffi.mjs", "getRef")
+pub fn get_shared(cell: Shared(value)) -> value
+
 @target(javascript)
 @external(javascript, "./test_support.ffi.mjs", "getAttribute")
 pub fn get_attribute(_selector: String, _name: String) -> String
@@ -327,10 +349,6 @@ pub fn get_text(_selector: String) -> String
 /// Empty when absent.
 @external(javascript, "./test_support.ffi.mjs", "getValue")
 pub fn get_value(_selector: String) -> String
-
-@target(javascript)
-@external(javascript, "./test_support.ffi.mjs", "getWebSocketSent")
-pub fn get_websocket_sent(_websocket: Dynamic) -> List(String)
 
 @target(javascript)
 @external(javascript, "./test_support.ffi.mjs", "historyLength")
@@ -388,8 +406,28 @@ pub fn json_envelope(
 }
 
 @target(javascript)
+@external(javascript, "./test_support.ffi.mjs", "dispatchKeyDetail")
+pub fn key_detail(
+  _selector: String,
+  _key: String,
+  _code: String,
+  _repeat: Bool,
+  _composing: Bool,
+) -> Nil
+
+@target(javascript)
 @external(javascript, "./test_support.ffi.mjs", "dispatchKeyEvent")
 pub fn key_event(_selector: String, _event_name: String, _key: String) -> Nil
+
+@target(javascript)
+@external(javascript, "./test_support.ffi.mjs", "keyEventPrevented")
+pub fn key_event_prevented(
+  _selector: String,
+  _event_name: String,
+  _key: String,
+  _ctrl: Bool,
+  _meta: Bool,
+) -> Bool
 
 pub fn local_store() -> store.Store(Model, Message, store.Synced) {
   store.new(init: initial_model(), update: update)
@@ -398,6 +436,14 @@ pub fn local_store() -> store.Store(Model, Message, store.Synced) {
     serialiser: custom_serialiser(),
   )
 }
+
+@target(javascript)
+@external(javascript, "./test_support.ffi.mjs", "dispatchMedia")
+pub fn media_event(
+  _selector: String,
+  _event_name: String,
+  _current_time: Float,
+) -> Nil
 
 pub fn message_decoder() -> Decoder(Message) {
   use tag <- decode.field("tag", decode.string)
@@ -422,6 +468,10 @@ pub fn message_decoder() -> Decoder(Message) {
     "RemoveTransitionItem" -> {
       use id <- decode.field("id", decode.int)
       decode.success(RemoveTransitionItem(id))
+    }
+    "Claim" -> {
+      use who <- decode.field("who", decode.string)
+      decode.success(Claim(who))
     }
     _ -> decode.failure(Noop, "Message")
   }
@@ -468,20 +518,11 @@ pub fn mount_html(
       runtime,
       selector: "#app",
       to_html: to_html,
-      to_slot: to_slot,
-      view: fn(_model) { attach(component.static(fn(_slot) { html })) },
+      to_placeholder: to_placeholder,
+      view: fn(_model) { attach(component.static(fn(_nest) { html })) },
     )
   Nil
 }
-
-@target(javascript)
-@external(javascript, "./test_support.ffi.mjs", "dispatchMouseEvent")
-pub fn mouse_event(
-  _selector: String,
-  _event_name: String,
-  _client_x: Int,
-  _client_y: Int,
-) -> Nil
 
 @target(javascript)
 /// Reloads and assigns jsdom was asked for.
@@ -496,6 +537,10 @@ pub fn new(value: value) -> Ref(value)
 pub fn new_runtime() -> client.Runtime(Model, Message, store.Synced) {
   client.start(local_store())
 }
+
+@external(erlang, "lily_test_support_ffi", "new_shared")
+@external(javascript, "./test_support.ffi.mjs", "newRef")
+pub fn new_shared(value: value) -> Shared(value)
 
 pub fn new_server() -> server.Server(Model, Message) {
   new_server_with_origins(server.AnyOrigin)
@@ -526,11 +571,6 @@ pub fn new_topic_server_with_access(
   ))
 }
 
-@target(javascript)
-pub fn on_selector(selector: String) -> event.EventOptions {
-  event.EventOptions(..event.defaults, selector: Some(selector))
-}
-
 pub fn open_session_store() -> store.Store(Model, Message, store.Synced) {
   store.new(init: initial_model(), update: update)
   |> store.sync_with(
@@ -548,6 +588,25 @@ pub fn opened_connector() -> transport.Connector {
     transport.Channel(send: fn(_) { Ok(Nil) }, close: fn() { Nil })
   })
 }
+
+@target(javascript)
+@external(javascript, "./test_support.ffi.mjs", "dispatchPointerDetail")
+pub fn pointer_detail(
+  _selector: String,
+  _event_name: String,
+  _button: Int,
+  _pointer_type: String,
+) -> Bool
+
+@target(javascript)
+/// Tags of the connected elements a stubbed `kind` observer watches.
+@external(javascript, "./test_support.ffi.mjs", "observedTags")
+pub fn observed_tags(_kind: String) -> List(String)
+
+@target(javascript)
+/// Window and document listeners for `name` added and not removed.
+@external(javascript, "./test_support.ffi.mjs", "pageListenerCount")
+pub fn page_listener_count(_name: String) -> Int
 
 @target(javascript)
 @external(javascript, "./test_support.ffi.mjs", "popstateTo")
@@ -582,6 +641,14 @@ pub fn reset_mocks() -> Nil
 @external(javascript, "./test_support.ffi.mjs", "resetUrl")
 pub fn reset_url() -> Nil
 
+@target(javascript)
+@external(javascript, "./test_support.ffi.mjs", "resizeWindow")
+pub fn resize_window(_width: Int, _height: Int) -> Nil
+
+@target(javascript)
+@external(javascript, "./test_support.ffi.mjs", "scrollTo")
+pub fn scroll_to(_selector: String, _top: Int, _left: Int) -> Nil
+
 pub fn session_builder() -> server.Builder(Model, Message) {
   server.new(session_store(), origins: server.AnyOrigin)
 }
@@ -599,9 +666,25 @@ pub fn session_store() -> store.Store(Model, Message, store.Synced) {
 @external(javascript, "./test_support.ffi.mjs", "setRef")
 pub fn set(cell: Ref(value), value: value) -> Nil
 
+@external(erlang, "lily_test_support_ffi", "set_shared")
+@external(javascript, "./test_support.ffi.mjs", "setRef")
+pub fn set_shared(cell: Shared(value), value: value) -> Nil
+
+@target(javascript)
+@external(javascript, "./test_support.ffi.mjs", "setFiles")
+pub fn set_files(_selector: String, _names: List(String)) -> Nil
+
 @target(javascript)
 @external(javascript, "./test_support.ffi.mjs", "setInnerHtml")
 pub fn set_inner_html(_selector: String, _html: String) -> Nil
+
+@target(javascript)
+@external(javascript, "./test_support.ffi.mjs", "setOnline")
+pub fn set_online(_online: Bool) -> Nil
+
+@target(javascript)
+@external(javascript, "./test_support.ffi.mjs", "setVisibility")
+pub fn set_visibility(_visible: Bool) -> Nil
 
 pub fn start_server(
   builder: server.Builder(Model, Message),
@@ -609,6 +692,14 @@ pub fn start_server(
   let assert Ok(app) = server.start(builder)
   app
 }
+
+@target(javascript)
+@external(javascript, "./test_support.ffi.mjs", "stubAnimations")
+pub fn stub_animations(_class_name: String, _milliseconds: Int) -> Nil
+
+@target(javascript)
+@external(javascript, "./test_support.ffi.mjs", "stubObservers")
+pub fn stub_observers() -> Nil
 
 @target(javascript)
 /// Whether a handler prevented the default.
@@ -638,19 +729,19 @@ pub fn to_html(html: String) -> String {
 }
 
 @target(javascript)
-pub fn to_slot() -> String {
-  "<lily-slot></lily-slot>"
+pub fn to_placeholder() -> String {
+  "<lily-nest></lily-nest>"
 }
 
 pub fn topic_builder() -> server.Builder(Model, Message) {
   server.new(topic_store(), origins: server.AnyOrigin)
 }
 
-/// Counters to `chat`, `SetName(id)` to `id`, `IncrementSecondary` and `Noop`
-/// to the session, the rest local.
+/// Counters and claims to `chat`, `SetName(id)` to `id`, `IncrementSecondary`
+/// and `Noop` to the session, the rest local.
 pub fn topic_route(message: Message) -> store.Route {
   case message {
-    Increment | Decrement -> store.Topic("chat")
+    Increment | Decrement | Claim(_) -> store.Topic("chat")
     SetName(id) -> store.Topic(id)
     IncrementSecondary | Noop -> store.Session
     Reset | SetTab(_) | AddTransitionItem(_) | RemoveTransitionItem(_) ->
@@ -663,7 +754,8 @@ pub fn topic_store() -> store.Store(Model, Message, store.Synced) {
   topic_store_with([#("chat", store.Open), #("room:", store.Open)])
 }
 
-/// Each topic a prefix with its access rule, every slice the whole model.
+/// Each topic with its access rule, every slice the whole model. An id ending
+/// in ':' declares a family with `store.topics`, anything else an exact id.
 pub fn topic_store_with(
   topics: List(#(String, store.Access(Model))),
 ) -> store.Store(Model, Message, store.Synced) {
@@ -682,19 +774,28 @@ pub fn topic_watched(
 }
 
 @target(javascript)
+@external(javascript, "./test_support.ffi.mjs", "dispatchTransfer")
+pub fn transfer_event(
+  _selector: String,
+  _event_name: String,
+  _text: String,
+) -> Bool
+
+@target(javascript)
 @external(javascript, "./test_support.ffi.mjs", "triggerEventSourceError")
 pub fn trigger_event_source_error(_event_source: Dynamic) -> Nil
 
 @target(javascript)
-@external(javascript, "./test_support.ffi.mjs", "triggerEventSourceMessage")
-pub fn trigger_event_source_message(
-  _event_source: Dynamic,
-  _data: String,
-) -> Nil
-
-@target(javascript)
 @external(javascript, "./test_support.ffi.mjs", "triggerEventSourceOpen")
 pub fn trigger_event_source_open(_event_source: Dynamic) -> Nil
+
+@target(javascript)
+@external(javascript, "./test_support.ffi.mjs", "triggerResize")
+pub fn trigger_resize(_width: Float, _height: Float) -> Nil
+
+@target(javascript)
+@external(javascript, "./test_support.ffi.mjs", "triggerVisible")
+pub fn trigger_visible(_visible: Bool) -> Nil
 
 @target(javascript)
 @external(javascript, "./test_support.ffi.mjs", "triggerWebSocketClose")
@@ -707,6 +808,14 @@ pub fn trigger_websocket_message(_websocket: Dynamic, _data: String) -> Nil
 @target(javascript)
 @external(javascript, "./test_support.ffi.mjs", "triggerWebSocketOpen")
 pub fn trigger_websocket_open(_websocket: Dynamic) -> Nil
+
+@target(javascript)
+@external(javascript, "./test_support.ffi.mjs", "unstubAnimations")
+pub fn unstub_animations() -> Nil
+
+@target(javascript)
+@external(javascript, "./test_support.ffi.mjs", "unstubObservers")
+pub fn unstub_observers() -> Nil
 
 pub fn update(model: Model, message: Message) -> Model {
   case message {
@@ -724,12 +833,21 @@ pub fn update(model: Model, message: Message) -> Model {
         Some(current) if current == id -> Model(..model, transition_item: None)
         _ -> model
       }
+    Claim(who) ->
+      case model.name {
+        "" -> Model(..model, name: who)
+        _ -> model
+      }
   }
 }
 
 @target(javascript)
 @external(javascript, "./test_support.ffi.mjs", "websocketUrl")
 pub fn websocket_url(_websocket: Dynamic) -> String
+
+@target(javascript)
+@external(javascript, "./test_support.ffi.mjs", "dispatchWheel")
+pub fn wheel_event(_selector: String, _delta_y: Float, _delta_mode: Int) -> Bool
 
 @target(javascript)
 @external(javascript, "./test_support.ffi.mjs", "writeLocalStorage")
@@ -751,13 +869,24 @@ fn declare_topics(
   let base =
     store.session(base, get: fn(model) { model }, set: fn(_, model) { model })
   list.fold(topics, base, fn(app_store, topic) {
-    store.topic(
-      app_store,
-      prefix: topic.0,
-      get: fn(model, _id) { model },
-      set: fn(_, _id, model) { model },
-      access: topic.1,
-    )
+    case string.ends_with(topic.0, ":") {
+      True ->
+        store.topics(
+          app_store,
+          prefix: topic.0,
+          get: fn(model, _rest) { model },
+          set: fn(_, _rest, model) { model },
+          access: topic.1,
+        )
+      False ->
+        store.topic(
+          app_store,
+          id: topic.0,
+          get: fn(model) { model },
+          set: fn(_, model) { model },
+          access: topic.1,
+        )
+    }
   })
 }
 
@@ -776,9 +905,13 @@ fn frame_decoder(
       use client_id <- decode.field("client_id", decode.string)
       decode.success(transport.Connected(client_id:))
     }
+    "dropped" -> {
+      use target <- decode.field("target", target_decoder())
+      decode.success(transport.Dropped(target:))
+    }
     "rejected" -> {
       use topic_id <- decode.field("topic_id", decode.string)
-      use reason <- decode.field("reason", decode.string)
+      use reason <- decode.field("reason", reason_decoder())
       decode.success(transport.Rejected(topic_id:, reason:))
     }
     "resync" -> {
@@ -821,9 +954,10 @@ fn frame_decoder(
     }
     "version" -> {
       use hash <- decode.field("hash", decode.string)
-      decode.success(transport.Version(hash:))
+      use protocol <- decode.field("protocol", decode.int)
+      decode.success(transport.Version(hash:, protocol:))
     }
-    _ -> decode.failure(transport.Version(""), "Protocol")
+    _ -> decode.failure(transport.Version("", 0), "Protocol")
   }
 }
 
@@ -840,10 +974,12 @@ fn frame_json(
       ])
     transport.Connected(client_id:) ->
       tagged("connected", [#("client_id", json.string(client_id))])
+    transport.Dropped(target:) ->
+      tagged("dropped", [#("target", target_json(target))])
     transport.Rejected(topic_id:, reason:) ->
       tagged("rejected", [
         #("topic_id", json.string(topic_id)),
-        #("reason", json.string(reason)),
+        #("reason", reason_json(reason)),
       ])
     transport.Resync(cursors:) ->
       tagged("resync", [#("cursors", json.array(cursors, target_json))])
@@ -875,8 +1011,11 @@ fn frame_json(
       ])
     transport.Unsubscribe(topic_id:) ->
       tagged("unsubscribe", [#("topic_id", json.string(topic_id))])
-    transport.Version(hash:) ->
-      tagged("version", [#("hash", json.string(hash))])
+    transport.Version(hash:, protocol:) ->
+      tagged("version", [
+        #("hash", json.string(hash)),
+        #("protocol", json.int(protocol)),
+      ])
   }
 }
 
@@ -894,11 +1033,29 @@ fn tab_to_string(tab: Tab) -> String {
   }
 }
 
+fn reason_decoder() -> Decoder(transport.RejectionReason) {
+  use reason <- decode.then(decode.string)
+  case reason {
+    "denied" -> decode.success(transport.AccessDenied)
+    "limit" -> decode.success(transport.OverLimit)
+    "not found" -> decode.success(transport.NotFound)
+    _ -> decode.failure(transport.NotFound, "RejectionReason")
+  }
+}
+
+fn reason_json(reason: transport.RejectionReason) -> Json {
+  json.string(case reason {
+    transport.AccessDenied -> "denied"
+    transport.NotFound -> "not found"
+    transport.OverLimit -> "limit"
+  })
+}
+
 fn tagged(kind: String, fields: List(#(String, Json))) -> Json {
   json.object([#("type", json.string(kind)), ..fields])
 }
 
-fn target_decoder() -> Decoder(transport.Target) {
+fn target_decoder() -> Decoder(transport.SyncTarget) {
   use kind <- decode.field("kind", decode.string)
   case kind {
     "session" -> decode.success(transport.Session)
@@ -910,7 +1067,7 @@ fn target_decoder() -> Decoder(transport.Target) {
   }
 }
 
-fn target_json(target: transport.Target) -> Json {
+fn target_json(target: transport.SyncTarget) -> Json {
   case target {
     transport.Session -> json.object([#("kind", json.string("session"))])
     transport.Topic(id:) ->

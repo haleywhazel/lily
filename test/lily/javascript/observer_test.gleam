@@ -6,8 +6,10 @@
 
 @target(javascript)
 import gleam/list
+
 @target(javascript)
 import gleeunit/should
+
 @target(javascript)
 import lily/client.{type ClientEvent}
 @target(javascript)
@@ -207,14 +209,18 @@ pub fn observer_connected_version_and_rejected_frames_are_events_test() {
   let #(handler, _sent) = test_support.connect_capturing(runtime)
 
   handler.received(frame(transport.Connected(client_id: "abc")))
-  handler.received(frame(transport.Version(hash: "v1")))
-  handler.received(frame(transport.Rejected(topic_id: "t", reason: "denied")))
+  handler.received(
+    frame(transport.Version(hash: "v1", protocol: transport.protocol_version)),
+  )
+  handler.received(
+    frame(transport.Rejected(topic_id: "t", reason: transport.AccessDenied)),
+  )
 
   seen(events)
   |> should.equal([
     client.ClientIdAssigned("abc"),
     client.VersionAnnounced("v1"),
-    client.SubscriptionRejected("t", "denied"),
+    client.SubscriptionRejected("t", transport.AccessDenied),
   ])
 }
 

@@ -7,6 +7,7 @@
 
 @target(erlang)
 import gleeunit/should
+
 @target(erlang)
 import lily/test_support.{type Message, type Model}
 @target(erlang)

@@ -6,7 +6,9 @@
 // =============================================================================
 
 import gleam/list
+
 import gleeunit/should
+
 import lily/server
 import lily/store
 import lily/test_support.{type Message, type Model, Increment, Noop}
@@ -173,7 +175,7 @@ pub fn negotiation_rejected_goes_out_in_the_client_format_test() {
   |> should.equal([Json])
   list.map(sent, wire_support.decode_automatic)
   |> should.equal([
-    transport.Rejected(topic_id: "nowhere", reason: "not found"),
+    transport.Rejected(topic_id: "nowhere", reason: transport.NotFound),
   ])
 }
 
@@ -307,9 +309,9 @@ pub fn negotiation_topic_encodes_an_update_once_not_per_subscriber_test() {
     store.new(init: test_support.initial_model(), update: test_support.update)
     |> store.sync_with(route: test_support.topic_route, serialiser: counting)
     |> store.topic(
-      prefix: "chat",
-      get: fn(model, _id) { model },
-      set: fn(_, _id, model) { model },
+      id: "chat",
+      get: fn(model) { model },
+      set: fn(_, model) { model },
       access: store.Open,
     )
   let app =

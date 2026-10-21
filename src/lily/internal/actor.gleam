@@ -5,22 +5,21 @@
 // IMPORTS
 // =============================================================================
 
-import gleam/erlang/process.{type Pid}
-import gleam/option.{type Option}
-import gleam/result
-import lily/transport.{type Level}
-
-@target(javascript)
-import gleam/list
-
 @target(erlang)
 import gleam/dict.{type Dict}
+import gleam/erlang/process.{type Pid}
+@target(javascript)
+import gleam/list
+import gleam/option.{type Option}
 @target(erlang)
 import gleam/otp/actor
 @target(erlang)
 import gleam/otp/factory_supervisor
 @target(erlang)
 import gleam/otp/supervision
+import gleam/result
+
+import lily/transport.{type DiagnosticLevel}
 
 // =============================================================================
 // INTERNAL TYPES
@@ -59,7 +58,7 @@ pub type CellName(event, reply)
 
 /// Only `Reply` answers a [`call`](#call).
 @internal
-pub type Outcome(state, reply) {
+pub type CellOutcome(state, reply) {
   Continue(state)
   Reply(state, reply)
   Halt(state)
@@ -152,13 +151,13 @@ pub fn call(
 }
 
 @internal
-pub fn log(level: Level, message: String) -> Nil {
+pub fn log(level: DiagnosticLevel, message: String) -> Nil {
   do_log(level, message)
 }
 
 @target(erlang)
-/// Leaks an atom, meaning it should be called once at startup, never in a
-/// loop or restart path.
+/// Leaks an atom, so call it once at startup. Don't call it in a loop or a
+/// restart path.
 @internal
 pub fn new_name(prefix: String) -> CellName(event, reply) {
   CellName(name: process.new_name(prefix))
@@ -221,18 +220,38 @@ pub fn send(cell: Cell(state, event, reply), event: event) -> Nil {
 
 @target(erlang)
 @internal
+pub fn send_after(
+  cell: Cell(state, event, reply),
+  milliseconds: Int,
+  event: event,
+) -> Nil {
+  let _ = process.send_after(cell.subject, milliseconds, Cast(event:))
+  Nil
+}
+
+@target(javascript)
+@internal
+pub fn send_after(
+  cell: Cell(state, event, reply),
+  milliseconds: Int,
+  event: event,
+) -> Nil {
+  later(milliseconds, fn() { send(cell, event) })
+}
+
+@target(erlang)
+@internal
 pub fn start_in_supervisor(
   supervisor: Supervisor,
   initial: fn(Toolkit(state, event, reply)) -> state,
-  reduce reduce: fn(event, state) -> Outcome(state, reply),
+  reduce reduce: fn(event, state) -> CellOutcome(state, reply),
 ) -> Result(Cell(state, event, reply), Nil) {
-  let on_down = fn(_) { option.None }
   case supervisor {
-    NoSupervisor -> start_seeded(initial, reduce:, on_down:)
+    NoSupervisor -> start_seeded(initial, reduce:)
     Supervisor(factory:, ..) -> {
       let reply_to = process.new_subject()
       let child = fn() {
-        start_linked(initial, reduce, on_down, False, option.None)
+        start_linked(initial, reduce, False, option.None)
         |> result.map(fn(cell) {
           process.send(reply_to, cell)
           cell.pid
@@ -251,19 +270,18 @@ pub fn start_in_supervisor(
 pub fn start_in_supervisor(
   _supervisor: Supervisor,
   initial: fn(Toolkit(state, event, reply)) -> state,
-  reduce reduce: fn(event, state) -> Outcome(state, reply),
+  reduce reduce: fn(event, state) -> CellOutcome(state, reply),
 ) -> Result(Cell(state, event, reply), Nil) {
-  start_seeded(initial, reduce:, on_down: fn(_) { option.None })
+  start_seeded(initial, reduce:)
 }
 
 /// Unlinked, keeping a crashing cell from taking the caller down.
 @internal
 pub fn start_seeded(
   initial: fn(Toolkit(state, event, reply)) -> state,
-  reduce reduce: fn(event, state) -> Outcome(state, reply),
-  on_down on_down: fn(String) -> Option(event),
+  reduce reduce: fn(event, state) -> CellOutcome(state, reply),
 ) -> Result(Cell(state, event, reply), Nil) {
-  start_linked(initial, reduce, on_down, False, option.None)
+  start_linked(initial, reduce, False, option.None)
   |> result.map(unlinked)
 }
 
@@ -272,11 +290,10 @@ pub fn start_seeded(
 @internal
 pub fn start_with_supervisor(
   initial: fn(Toolkit(state, event, reply)) -> state,
-  reduce reduce: fn(event, state) -> Outcome(state, reply),
-  on_down on_down: fn(String) -> Option(event),
+  reduce reduce: fn(event, state) -> CellOutcome(state, reply),
   name name: CellName(event, reply),
 ) -> Result(Cell(state, event, reply), Nil) {
-  start_linked(initial, reduce, on_down, True, option.Some(name))
+  start_linked(initial, reduce, True, option.Some(name))
 }
 
 @target(erlang)
@@ -291,33 +308,34 @@ pub fn supervisor_pid(supervisor: Supervisor) -> Option(Pid) {
 @target(erlang)
 /// Also flushes a death message already in flight.
 @internal
-pub fn unwatch(cell: Cell(state, event, reply), key: String) -> Nil {
-  actor.send(cell.subject, Unwatch(key:))
+pub fn unwatch(cell: Cell(state, event, reply), down down: event) -> Nil {
+  actor.send(cell.subject, Unwatch(down:))
 }
 
 @target(javascript)
 @internal
-pub fn unwatch(_cell: Cell(state, event, reply), _key: String) -> Nil {
+pub fn unwatch(_cell: Cell(state, event, reply), down _down: event) -> Nil {
   Nil
 }
 
 @target(erlang)
-/// Watching a key twice replaces the earlier watch.
+/// Delivers `down` to the cell when `watched` dies. An equal `down` replaces
+/// the earlier watch.
 @internal
 pub fn watch(
   cell: Cell(state, event, reply),
-  key: String,
-  watched: Watched,
+  watched watched: Watched,
+  down down: event,
 ) -> Nil {
-  actor.send(cell.subject, Watch(key:, watched:))
+  actor.send(cell.subject, Watch(watched:, down:))
 }
 
 @target(javascript)
 @internal
 pub fn watch(
   _cell: Cell(state, event, reply),
-  _key: String,
-  _watched: Watched,
+  watched _watched: Watched,
+  down _down: event,
 ) -> Nil {
   Nil
 }
@@ -351,7 +369,7 @@ pub fn watched_from(_pid: Pid) -> Watched {
 }
 
 @target(erlang)
-/// Call at the call site, never in a reducer, since watching is async.
+/// Call at the call site. Don't call it in a reducer, since watching is async.
 @internal
 pub fn watched_here() -> Watched {
   Watched(pid: process.self())
@@ -382,24 +400,23 @@ type Envelope(event, reply) {
   Call(event: event, reply_to: process.Subject(reply))
   Cast(event: event)
   Down(down: process.Down)
-  Unwatch(key: String)
-  Watch(key: String, watched: Watched)
+  Unwatch(down: event)
+  Watch(watched: Watched, down: event)
 }
 
 @target(erlang)
 type Runner(state, event, reply) {
   Runner(
     state: state,
-    reduce: fn(event, state) -> Outcome(state, reply),
-    on_down: fn(String) -> Option(event),
-    keys: Dict(process.Monitor, String),
-    monitors: Dict(String, process.Monitor),
+    reduce: fn(event, state) -> CellOutcome(state, reply),
+    downs: Dict(process.Monitor, event),
+    monitors: Dict(event, process.Monitor),
   )
 }
 
 @target(javascript)
 type Runner(state, event, reply) {
-  Runner(state: state, reduce: fn(event, state) -> Outcome(state, reply))
+  Runner(state: state, reduce: fn(event, state) -> CellOutcome(state, reply))
 }
 
 // =============================================================================
@@ -409,15 +426,15 @@ type Runner(state, event, reply) {
 @target(erlang)
 fn add_watch(
   runner: Runner(state, event, reply),
-  key: String,
   watched: Watched,
+  down: event,
 ) -> Runner(state, event, reply) {
-  let runner = drop_watch(runner, key)
+  let runner = drop_watch(runner, down)
   let monitor = process.monitor(watched.pid)
   Runner(
     ..runner,
-    keys: dict.insert(runner.keys, monitor, key),
-    monitors: dict.insert(runner.monitors, key, monitor),
+    downs: dict.insert(runner.downs, monitor, down),
+    monitors: dict.insert(runner.monitors, down, monitor),
   )
 }
 
@@ -471,12 +488,12 @@ fn cell_selector(
 }
 
 @target(erlang)
-fn do_log(level: Level, message: String) -> Nil {
+fn do_log(level: DiagnosticLevel, message: String) -> Nil {
   ffi_log(level, message)
 }
 
 @target(javascript)
-fn do_log(level: Level, message: String) -> Nil {
+fn do_log(level: DiagnosticLevel, message: String) -> Nil {
   let method = case level {
     transport.Failure -> "error"
     transport.Warning -> "warn"
@@ -487,17 +504,17 @@ fn do_log(level: Level, message: String) -> Nil {
 @target(erlang)
 fn drop_watch(
   runner: Runner(state, event, reply),
-  key: String,
+  down: event,
 ) -> Runner(state, event, reply) {
-  case dict.get(runner.monitors, key) {
+  case dict.get(runner.monitors, down) {
     Error(_) -> runner
     Ok(monitor) -> {
       // also flushes an in-flight death message
       process.demonitor_process(monitor:)
       Runner(
         ..runner,
-        keys: dict.delete(runner.keys, monitor),
-        monitors: dict.delete(runner.monitors, key),
+        downs: dict.delete(runner.downs, monitor),
+        monitors: dict.delete(runner.monitors, down),
       )
     }
   }
@@ -512,8 +529,8 @@ fn handle(
     Call(event:, reply_to:) -> apply_event(runner, event, option.Some(reply_to))
     Cast(event:) -> apply_event(runner, event, option.None)
     Down(down:) -> handle_down(runner, down)
-    Unwatch(key:) -> actor.continue(drop_watch(runner, key))
-    Watch(key:, watched:) -> actor.continue(add_watch(runner, key, watched))
+    Unwatch(down:) -> actor.continue(drop_watch(runner, down))
+    Watch(watched:, down:) -> actor.continue(add_watch(runner, watched, down))
   }
 }
 
@@ -522,16 +539,13 @@ fn handle_down(
   runner: Runner(state, event, reply),
   down: process.Down,
 ) -> actor.Next(Runner(state, event, reply), Envelope(event, reply)) {
-  case dict.get(runner.keys, down.monitor) {
+  case dict.get(runner.downs, down.monitor) {
     Error(_) -> actor.continue(runner)
-    Ok(key) -> {
+    Ok(event) -> {
       // drop_watch owns the paired delete so the dicts can't drift, and
       // demonitoring a fired monitor is a no-op
-      let runner = drop_watch(runner, key)
-      case runner.on_down(key) {
-        option.None -> actor.continue(runner)
-        option.Some(event) -> apply_event(runner, event, option.None)
-      }
+      let runner = drop_watch(runner, event)
+      apply_event(runner, event, option.None)
     }
   }
 }
@@ -582,8 +596,7 @@ fn run_queue(cell: Cell(state, event, reply)) -> Nil {
 @target(erlang)
 fn start_linked(
   initial: fn(Toolkit(state, event, reply)) -> state,
-  reduce: fn(event, state) -> Outcome(state, reply),
-  on_down: fn(String) -> Option(event),
+  reduce: fn(event, state) -> CellOutcome(state, reply),
   supervised: Bool,
   name: Option(CellName(event, reply)),
 ) -> Result(Cell(state, event, reply), Nil) {
@@ -597,8 +610,7 @@ fn start_linked(
             Runner(
               state: initial(Toolkit(cell:, supervisor:)),
               reduce:,
-              on_down:,
-              keys: dict.new(),
+              downs: dict.new(),
               monitors: dict.new(),
             )
           actor.initialised(runner)
@@ -624,8 +636,7 @@ fn start_linked(
 @target(javascript)
 fn start_linked(
   initial: fn(Toolkit(state, event, reply)) -> state,
-  reduce: fn(event, state) -> Outcome(state, reply),
-  _on_down: fn(String) -> Option(event),
+  reduce: fn(event, state) -> CellOutcome(state, reply),
   _supervised: Bool,
   _name: Option(CellName(event, reply)),
 ) -> Result(Cell(state, event, reply), Nil) {
@@ -690,11 +701,15 @@ fn unlinked(cell: Cell(state, event, reply)) -> Cell(state, event, reply) {
 
 @target(erlang)
 @external(erlang, "lily_actor_ffi", "log")
-fn ffi_log(level: Level, message: String) -> Nil
+fn ffi_log(level: DiagnosticLevel, message: String) -> Nil
 
 @target(javascript)
 @external(javascript, "./actor.ffi.mjs", "log")
 fn ffi_log(level: String, message: String) -> Nil
+
+@target(javascript)
+@external(javascript, "./actor.ffi.mjs", "later")
+fn later(milliseconds: Int, run: fn() -> Nil) -> Nil
 
 @target(javascript)
 @external(javascript, "./actor.ffi.mjs", "protect")

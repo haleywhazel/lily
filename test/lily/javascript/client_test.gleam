@@ -10,15 +10,17 @@ import gleam/bit_array
 import gleam/list
 @target(javascript)
 import gleam/string
+
 @target(javascript)
 import gleeunit/should
+
 @target(javascript)
 import lily/client
 @target(javascript)
 import lily/store
 @target(javascript)
 import lily/test_support.{
-  type Message, type Model, Increment, Model, Noop, SetName,
+  type Message, type Model, Claim, Increment, Model, Noop, SetName,
 }
 @target(javascript)
 import lily/transport
@@ -38,6 +40,39 @@ fn subscribing_runtime() -> client.Runtime(Model, Message, store.Synced) {
     }
   })
   |> client.start
+}
+
+@target(javascript)
+/// Always wants `chat`, opened, with the resync drained.
+fn chat_client() -> #(
+  client.Runtime(Model, Message, store.Synced),
+  transport.ConnectorHandler,
+  fn() -> List(transport.Protocol(Model, Message)),
+) {
+  let runtime =
+    test_support.topic_store()
+    |> store.subscriptions(fn(_) { ["chat"] })
+    |> client.start
+  let #(handler, sent) = test_support.connect_capturing(runtime)
+  handler.opened()
+  let _ = sent()
+  #(runtime, handler, sent)
+}
+
+@target(javascript)
+fn chat_snapshot(model: Model) -> transport.Protocol(Model, Message) {
+  transport.Snapshot(target: transport.Topic("chat"), sequence: 0, state: model)
+}
+
+@target(javascript)
+fn receive(
+  handler: transport.ConnectorHandler,
+  frame: transport.Protocol(Model, Message),
+) -> Nil {
+  handler.received(transport.encode(
+    frame,
+    serialiser: test_support.custom_serialiser(),
+  ))
 }
 
 @target(javascript)
@@ -160,6 +195,32 @@ pub fn client_hydrate_uses_embedded_snapshot_test() {
 }
 
 @target(javascript)
+pub fn client_hydrate_ignores_user_content_carrying_the_snapshot_id_test() {
+  test_support.reset_dom()
+  let encode = fn(count) {
+    transport.encode(
+      transport.Snapshot(
+        target: transport.Session,
+        sequence: 0,
+        state: test_support.Model(..test_support.initial_model(), count:),
+      ),
+      serialiser: test_support.custom_serialiser(),
+    )
+    |> bit_array.base64_encode(True)
+  }
+  // earlier in the page, as rendered user content would be
+  test_support.set_inner_html(
+    "#app",
+    "<pre id=\"lily-snapshot\">" <> encode(666) <> "</pre>",
+  )
+  test_support.inject_snapshot_script(encode(7))
+
+  let runtime = test_support.new_runtime()
+
+  client.model(runtime).count |> should.equal(7)
+}
+
+@target(javascript)
 pub fn client_hydrate_keeps_a_script_closing_tag_in_the_model_test() {
   test_support.reset_dom()
   let hostile = "</script><img src=x onerror=alert(1)>"
@@ -227,7 +288,9 @@ pub fn client_dispatch_routed_to_a_topic_sends_topic_message_test() {
   client.dispatch(runtime)(Increment)
 
   sent()
-  |> should.equal([transport.TopicMessage(topic_id: "chat", payload: Increment)])
+  |> should.equal([
+    transport.TopicMessage(topic_id: "chat", payload: Increment),
+  ])
 }
 
 @target(javascript)
@@ -308,7 +371,7 @@ pub fn client_connector_that_opens_inside_connect_still_resyncs_test() {
   client.update_model(runtime, with: wanting("chat"))
   let sent: test_support.Ref(List(BitArray)) = test_support.new([])
   let connector =
-    transport.connector(fn(handler: transport.Handler) {
+    transport.connector(fn(handler: transport.ConnectorHandler) {
       // ready before connect returns, like a synchronous transport
       handler.opened()
       transport.Channel(
@@ -335,6 +398,61 @@ pub fn client_connector_that_opens_inside_connect_still_resyncs_test() {
   // and the sync carries on from there
   client.update_model(runtime, with: wanting("chat,room:1"))
   test_support.get(sent) |> list.length |> should.equal(2)
+}
+
+@target(javascript)
+pub fn client_protocol_mismatch_closes_for_good_test() {
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let runtime = client.start(test_support.topic_store())
+  let events = test_support.new([])
+  let _ =
+    client.observe(runtime, fn(event, _model) {
+      test_support.set(events, [event, ..test_support.get(events)])
+    })
+  let handler =
+    test_support.new(
+      transport.ConnectorHandler(
+        received: fn(_) { Nil },
+        opened: fn() { Nil },
+        closed: fn() { Nil },
+      ),
+    )
+  let sent: test_support.Ref(List(BitArray)) = test_support.new([])
+  let closes = test_support.new(0)
+  let connector =
+    transport.connector(fn(connected) {
+      test_support.set(handler, connected)
+      transport.Channel(
+        send: fn(bytes) {
+          test_support.set(sent, [bytes, ..test_support.get(sent)])
+          Ok(Nil)
+        },
+        close: fn() { test_support.set(closes, test_support.get(closes) + 1) },
+      )
+    })
+  let _ = client.connect(runtime, with: connector)
+  let handler = test_support.get(handler)
+  let server = transport.protocol_version + 1
+
+  handler.received(transport.encode(
+    transport.Version(hash: "v2", protocol: server),
+    serialiser: test_support.custom_serialiser(),
+  ))
+
+  test_support.get(closes) |> should.equal(1)
+  let assert [client.Diagnostic(level: transport.Failure, ..), mismatch, ..] =
+    test_support.get(events)
+  mismatch
+  |> should.equal(client.ProtocolMismatch(
+    server:,
+    client: transport.protocol_version,
+  ))
+
+  // a later open or dispatch sends nothing, frames may be misread
+  handler.opened()
+  client.dispatch(runtime)(Increment)
+  test_support.get(sent) |> should.equal([])
 }
 
 @target(javascript)
@@ -484,6 +602,207 @@ pub fn client_does_not_resubscribe_after_a_resync_covers_the_topic_test() {
     }
   })
   |> should.be_false
+}
+
+// =============================================================================
+// UNCONFIRMED EDITS
+// =============================================================================
+
+@target(javascript)
+pub fn client_snapshot_keeps_an_unconfirmed_message_applied_test() {
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let #(runtime, handler, _sent) = chat_client()
+  client.dispatch(runtime)(Increment)
+
+  // the server hasn't applied it yet
+  receive(handler, chat_snapshot(test_support.initial_model()))
+
+  client.model(runtime).count |> should.equal(1)
+}
+
+@target(javascript)
+pub fn client_snapshot_does_not_replay_an_acknowledged_message_test() {
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let #(runtime, handler, _sent) = chat_client()
+  client.dispatch(runtime)(Increment)
+  receive(handler, transport.Acknowledge(transport.Topic("chat"), 1))
+
+  receive(
+    handler,
+    chat_snapshot(Model(..test_support.initial_model(), count: 1)),
+  )
+
+  client.model(runtime).count |> should.equal(1)
+}
+
+@target(javascript)
+pub fn client_snapshot_replays_only_its_own_target_test() {
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let #(runtime, handler, _sent) = chat_client()
+  client.dispatch(runtime)(Increment)
+
+  receive(
+    handler,
+    transport.Snapshot(
+      target: transport.Topic("room:1"),
+      sequence: 0,
+      state: test_support.initial_model(),
+    ),
+  )
+
+  client.model(runtime).count |> should.equal(0)
+}
+
+@target(javascript)
+pub fn client_remote_update_under_a_pending_message_asks_for_a_snapshot_test() {
+  // the server applied b before a, this client applied a before b
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let #(runtime, handler, sent) = chat_client()
+  client.dispatch(runtime)(Claim("a"))
+  let _ = sent()
+
+  receive(handler, transport.TopicUpdate("chat", 1, Claim("b")))
+  client.model(runtime).name |> should.equal("a")
+  sent() |> should.equal([])
+  receive(handler, transport.Acknowledge(transport.Topic("chat"), 2))
+
+  sent()
+  |> should.equal([transport.Resync(cursors: [transport.Topic("chat")])])
+  receive(
+    handler,
+    chat_snapshot(Model(..test_support.initial_model(), name: "b")),
+  )
+  client.model(runtime).name |> should.equal("b")
+}
+
+@target(javascript)
+pub fn client_remote_update_with_nothing_pending_asks_for_nothing_test() {
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let #(runtime, handler, sent) = chat_client()
+  client.dispatch(runtime)(Claim("a"))
+  receive(handler, transport.Acknowledge(transport.Topic("chat"), 1))
+  let _ = sent()
+
+  receive(handler, transport.TopicUpdate("chat", 2, Claim("b")))
+
+  sent() |> should.equal([])
+  client.model(runtime).name |> should.equal("a")
+}
+
+@target(javascript)
+pub fn client_remote_update_waits_for_every_pending_message_test() {
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let #(runtime, handler, sent) = chat_client()
+  client.dispatch(runtime)(Increment)
+  client.dispatch(runtime)(Increment)
+  receive(handler, transport.TopicUpdate("chat", 1, Increment))
+  let _ = sent()
+
+  receive(handler, transport.Acknowledge(transport.Topic("chat"), 2))
+  sent() |> should.equal([])
+  receive(handler, transport.Acknowledge(transport.Topic("chat"), 3))
+
+  sent()
+  |> should.equal([transport.Resync(cursors: [transport.Topic("chat")])])
+}
+
+@target(javascript)
+pub fn client_dropped_message_rolls_back_through_a_snapshot_test() {
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let #(runtime, handler, sent) = chat_client()
+  client.dispatch(runtime)(Increment)
+  let _ = sent()
+
+  receive(handler, transport.Dropped(transport.Topic("chat")))
+
+  sent()
+  |> should.equal([transport.Resync(cursors: [transport.Topic("chat")])])
+  receive(handler, chat_snapshot(test_support.initial_model()))
+  client.model(runtime).count |> should.equal(0)
+}
+
+@target(javascript)
+pub fn client_dropped_on_a_topic_not_joined_asks_for_nothing_test() {
+  // a resync would join it
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let #(runtime, handler, sent) = chat_client()
+  client.dispatch(runtime)(SetName("room:1"))
+  let _ = sent()
+
+  receive(handler, transport.Dropped(transport.Topic("room:1")))
+
+  sent() |> should.equal([])
+}
+
+@target(javascript)
+pub fn client_dropped_while_closed_waits_for_the_reconnect_test() {
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let #(runtime, handler, sent) = chat_client()
+  client.dispatch(runtime)(Increment)
+  handler.closed()
+  receive(handler, transport.Dropped(transport.Topic("chat")))
+  client.dispatch(runtime)(Increment)
+  // nothing asked for while closed
+  sent()
+  |> should.equal([
+    transport.TopicMessage(topic_id: "chat", payload: Increment),
+    transport.TopicMessage(topic_id: "chat", payload: Increment),
+  ])
+
+  handler.opened()
+
+  sent()
+  |> should.equal([
+    transport.Resync(cursors: [transport.Session, transport.Topic("chat")]),
+  ])
+}
+
+@target(javascript)
+pub fn client_reconnect_snapshot_does_not_replay_a_delivered_message_test() {
+  // the old connection's fate is unknown, the new snapshot decides
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let #(runtime, handler, _sent) = chat_client()
+  client.dispatch(runtime)(Increment)
+  handler.closed()
+
+  handler.opened()
+  receive(
+    handler,
+    chat_snapshot(Model(..test_support.initial_model(), count: 1)),
+  )
+
+  client.model(runtime).count |> should.equal(1)
+}
+
+@target(javascript)
+pub fn client_snapshot_does_not_fire_message_applied_for_replayed_messages_test() {
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let #(runtime, handler, _sent) = chat_client()
+  client.dispatch(runtime)(Increment)
+  let applied = test_support.new(0)
+  let _ =
+    client.observe(runtime, fn(event, _model) {
+      case event {
+        client.MessageApplied(..) ->
+          test_support.set(applied, test_support.get(applied) + 1)
+        _ -> Nil
+      }
+    })
+
+  receive(handler, chat_snapshot(test_support.initial_model()))
+
+  test_support.get(applied) |> should.equal(0)
 }
 
 // =============================================================================

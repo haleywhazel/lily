@@ -10,15 +10,17 @@ import gleam/dict
 import gleam/list
 import gleam/set
 import gleam/string
+
 import gleeunit/should
+
 import lily/store
 import lily/test_support.{
   type Message, type Model, Increment, SetName, WithDict, WithSet, WithTuple,
 }
 import lily/transport.{
-  type Protocol, Acknowledge, Connected, Rejected, Resync, Session,
-  SessionMessage, SessionUpdate, Snapshot, Subscribe, Topic, TopicMessage,
-  TopicUpdate, Unsubscribe, Version,
+  type Protocol, AccessDenied, Acknowledge, Connected, Dropped, NotFound,
+  OverLimit, Rejected, Resync, Session, SessionMessage, SessionUpdate, Snapshot,
+  Subscribe, Topic, TopicMessage, TopicUpdate, Unsubscribe, Version,
 }
 
 // =============================================================================
@@ -80,7 +82,9 @@ fn every_frame() -> List(Protocol(Model, Message)) {
     Acknowledge(target: Session, sequence: 42),
     Acknowledge(target: Topic(id: "chat"), sequence: 1),
     Connected(client_id: "abc123"),
-    Rejected(topic_id: "secret", reason: "denied"),
+    Dropped(target: Session),
+    Dropped(target: Topic(id: "chat")),
+    Rejected(topic_id: "secret", reason: AccessDenied),
     Resync(cursors: [Session, Topic(id: "chat")]),
     SessionMessage(payload: SetName("Alice")),
     SessionUpdate(sequence: 4, payload: Increment),
@@ -93,7 +97,7 @@ fn every_frame() -> List(Protocol(Model, Message)) {
     TopicMessage(topic_id: "chat", payload: Increment),
     TopicUpdate(topic_id: "chat", sequence: 3, payload: Increment),
     Unsubscribe(topic_id: "chat"),
-    Version(hash: "abc123"),
+    Version(hash: "abc123", protocol: 1),
   ]
 }
 
@@ -152,9 +156,23 @@ pub fn snapshot_connected_test() {
   )
 }
 
+pub fn snapshot_dropped_session_test() {
+  assert_encoded(
+    Dropped(target: Session),
+    "82A474797065A764726F70706564A674617267657481A46B696E64A773657373696F6E",
+  )
+}
+
+pub fn snapshot_dropped_topic_test() {
+  assert_encoded(
+    Dropped(target: Topic(id: "chat")),
+    "82A474797065A764726F70706564A674617267657482A46B696E64A5746F706963A26964A463686174",
+  )
+}
+
 pub fn snapshot_rejected_test() {
   assert_encoded(
-    Rejected(topic_id: "secret", reason: "denied"),
+    Rejected(topic_id: "secret", reason: AccessDenied),
     "83A474797065A872656A6563746564A8746F7069635F6964A6736563726574A6726561736F6EA664656E696564",
   )
 }
@@ -250,8 +268,8 @@ pub fn snapshot_unsubscribe_test() {
 
 pub fn snapshot_version_test() {
   assert_encoded(
-    Version(hash: "abc123"),
-    "82A474797065A776657273696F6EA468617368A6616263313233",
+    Version(hash: "abc123", protocol: 1),
+    "83A474797065A776657273696F6EA468617368A6616263313233A870726F746F636F6C01",
   )
 }
 
@@ -275,6 +293,36 @@ pub fn roundtrip_connected_test() {
   assert_roundtrip(Connected(client_id: "abc123"))
 }
 
+pub fn roundtrip_dropped_session_test() {
+  test_support.register_fixtures()
+  assert_roundtrip(Dropped(target: Session))
+}
+
+pub fn roundtrip_dropped_topic_test() {
+  test_support.register_fixtures()
+  assert_roundtrip(Dropped(target: Topic(id: "chat")))
+}
+
+pub fn roundtrip_rejected_test() {
+  test_support.register_fixtures()
+  assert_roundtrip(Rejected(topic_id: "secret", reason: AccessDenied))
+}
+
+pub fn roundtrip_rejected_every_reason_test() {
+  test_support.register_fixtures()
+  assert_roundtrip(Rejected(topic_id: "secret", reason: NotFound))
+  assert_roundtrip(Rejected(topic_id: "secret", reason: OverLimit))
+}
+
+pub fn rejected_with_unknown_reason_fails_to_decode_test() {
+  let bytes =
+    bit_array.from_string(
+      "{\"type\":\"rejected\",\"topic_id\":\"x\",\"reason\":\"nope\"}",
+    )
+  transport.decode(bytes, serialiser: test_support.message_pack_serialiser())
+  |> should.equal(Error(Nil))
+}
+
 pub fn roundtrip_resync_session_topic_test() {
   test_support.register_fixtures()
   assert_roundtrip(Resync(cursors: [Session, Topic(id: "chat")]))
@@ -292,7 +340,7 @@ pub fn roundtrip_session_update_test() {
 
 pub fn roundtrip_version_test() {
   test_support.register_fixtures()
-  assert_roundtrip(Version(hash: "abc123"))
+  assert_roundtrip(Version(hash: "abc123", protocol: 1))
 }
 
 // =============================================================================
@@ -430,6 +478,11 @@ pub fn roundtrip_snapshot_test() {
 pub fn roundtrip_subscribe_test() {
   test_support.register_fixtures()
   assert_roundtrip(Subscribe(topic_id: "chat"))
+}
+
+pub fn roundtrip_topic_message_test() {
+  test_support.register_fixtures()
+  assert_roundtrip(TopicMessage(topic_id: "chat", payload: Increment))
 }
 
 pub fn roundtrip_topic_update_test() {

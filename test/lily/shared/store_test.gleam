@@ -5,7 +5,9 @@
 // =============================================================================
 
 import gleam/int
+
 import gleeunit/should
+
 import lily/store
 import lily/test_support.{Decrement, Increment, SetName}
 import lily/transport
@@ -155,10 +157,38 @@ pub fn store_access_for_an_open_topic_is_open_test() {
   }
 }
 
-pub fn store_access_for_a_fixed_prefix_also_claims_longer_ids_test() {
-  // `chat` claims `chatter` too, meaning family prefixes end with a separator
-  store.access_for(test_support.topic_store(), "chatter")
+pub fn store_access_for_an_exact_id_matches_only_that_id_test() {
+  store.access_for(test_support.topic_store(), "chat")
   |> should.be_ok
+  store.access_for(test_support.topic_store(), "chatter")
+  |> should.be_error
+}
+
+pub fn store_access_for_an_id_matching_no_declaration_is_rejected_test() {
+  store.access_for(test_support.topic_store(), "room")
+  |> should.be_error
+  store.access_for(test_support.topic_store(), "lobby:1")
+  |> should.be_error
+}
+
+pub fn store_access_an_exact_id_beats_a_matching_prefix_test() {
+  let app_store =
+    test_support.topic_store_with([
+      #("room:", store.Open),
+      #("room:secret", store.Allow(fn(_, _, _) { False })),
+    ])
+  let assert Ok(store.Allow(_)) = store.access_for(app_store, "room:secret")
+  let assert Ok(store.Open) = store.access_for(app_store, "room:secretive")
+}
+
+pub fn store_access_an_exact_id_beats_a_longer_declared_prefix_test() {
+  let app_store =
+    test_support.topic_store_with([
+      #("room:1", store.Allow(fn(_, _, _) { False })),
+      #("room:", store.Open),
+      #("room:1:", store.Open),
+    ])
+  let assert Ok(store.Allow(_)) = store.access_for(app_store, "room:1")
 }
 
 pub fn store_access_for_a_family_covers_every_id_under_it_test() {
@@ -202,7 +232,7 @@ pub fn store_access_longest_prefix_wins_regardless_of_declaration_order_test() {
   let assert Ok(store.Allow(_)) = store.access_for(app_store, "room:secret:1")
 }
 
-pub fn store_redeclaring_a_prefix_replaces_the_earlier_rule_test() {
+pub fn store_redeclaring_an_id_replaces_the_earlier_rule_test() {
   let app_store =
     test_support.topic_store_with([
       #("chat", store.Open),
@@ -211,17 +241,39 @@ pub fn store_redeclaring_a_prefix_replaces_the_earlier_rule_test() {
   let assert Ok(store.Allow(_)) = store.access_for(app_store, "chat")
 }
 
+pub fn store_redeclaring_a_prefix_replaces_the_earlier_rule_test() {
+  let app_store =
+    test_support.topic_store_with([
+      #("room:", store.Open),
+      #("room:", store.Allow(fn(_, _, _) { False })),
+    ])
+  let assert Ok(store.Allow(_)) = store.access_for(app_store, "room:1")
+}
+
 // =============================================================================
-// LONGEST PREFIX
+// MATCHING
 // =============================================================================
 
-pub fn store_longest_prefix_picks_the_longest_match_test() {
-  let entries = [#("room:", 1), #("room:secret:", 2), #("chat", 3)]
+pub fn store_match_topic_picks_the_longest_prefix_test() {
+  let entries = [
+    #(store.IdPrefix("room:"), 1),
+    #(store.IdPrefix("room:secret:"), 2),
+    #(store.ExactId("chat"), 3),
+  ]
 
-  store.longest_prefix(entries, "room:secret:1", fn(entry) { entry.0 })
-  |> should.equal(Ok(#("room:secret:", 2)))
-  store.longest_prefix(entries, "room:1", fn(entry) { entry.0 })
-  |> should.equal(Ok(#("room:", 1)))
-  store.longest_prefix(entries, "lobby", fn(entry) { entry.0 })
+  store.match_topic(entries, "room:secret:1", fn(entry) { entry.0 })
+  |> should.equal(Ok(#(#(store.IdPrefix("room:secret:"), 2), "1")))
+  store.match_topic(entries, "room:1", fn(entry) { entry.0 })
+  |> should.equal(Ok(#(#(store.IdPrefix("room:"), 1), "1")))
+  store.match_topic(entries, "lobby", fn(entry) { entry.0 })
   |> should.equal(Error(Nil))
+}
+
+pub fn store_match_topic_an_exact_id_has_an_empty_rest_test() {
+  let entries = [#(store.IdPrefix("ch"), 1), #(store.ExactId("chat"), 2)]
+
+  store.match_topic(entries, "chat", fn(entry) { entry.0 })
+  |> should.equal(Ok(#(#(store.ExactId("chat"), 2), "")))
+  store.match_topic(entries, "chatter", fn(entry) { entry.0 })
+  |> should.equal(Ok(#(#(store.IdPrefix("ch"), 1), "atter")))
 }

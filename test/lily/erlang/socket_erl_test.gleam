@@ -9,8 +9,10 @@
 import gleam/erlang/process
 @target(erlang)
 import gleam/option
+
 @target(erlang)
 import gleeunit/should
+
 @target(erlang)
 import lily/server
 @target(erlang)

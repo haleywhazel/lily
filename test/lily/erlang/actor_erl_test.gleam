@@ -2,9 +2,8 @@
 // mapping, shared behaviour in test/lily/shared/actor_test.gleam
 
 @target(erlang)
-import gleam/option
-@target(erlang)
 import gleeunit/should
+
 @target(erlang)
 import lily/internal/actor.{Halt}
 @target(erlang)
@@ -20,7 +19,7 @@ type Event {
 }
 
 @target(erlang)
-fn reduce(event: Event, state: Int) -> actor.Outcome(Int, Nil) {
+fn reduce(event: Event, state: Int) -> actor.CellOutcome(Int, Nil) {
   case event {
     Stop -> Halt(state)
   }
@@ -28,8 +27,7 @@ fn reduce(event: Event, state: Int) -> actor.Outcome(Int, Nil) {
 
 @target(erlang)
 pub fn cell_halt_stops_the_actor_test() {
-  let assert Ok(cell) =
-    actor.start_seeded(fn(_) { 3 }, reduce:, on_down: fn(_) { option.None })
+  let assert Ok(cell) = actor.start_seeded(fn(_) { 3 }, reduce:)
   let pid = actor.watched_pid(actor.watched(cell))
 
   actor.send(cell, Stop)

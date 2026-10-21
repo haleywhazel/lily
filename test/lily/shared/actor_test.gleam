@@ -6,8 +6,8 @@
 // IMPORTS
 // =============================================================================
 
-import gleam/option
 import gleeunit/should
+
 import lily/internal/actor.{type Cell, Continue, Reply}
 import lily/test_support
 import lily/transport
@@ -21,7 +21,7 @@ type Event {
   Read
 }
 
-fn reduce(event: Event, state: Int) -> actor.Outcome(Int, Int) {
+fn reduce(event: Event, state: Int) -> actor.CellOutcome(Int, Int) {
   case event {
     Increment -> Continue(state + 1)
     Read -> Reply(state, state)
@@ -29,10 +29,7 @@ fn reduce(event: Event, state: Int) -> actor.Outcome(Int, Int) {
 }
 
 fn start(initial: Int) -> Cell(Int, Event, Int) {
-  let assert Ok(cell) =
-    actor.start_seeded(fn(_) { initial }, reduce:, on_down: fn(_) {
-      option.None
-    })
+  let assert Ok(cell) = actor.start_seeded(fn(_) { initial }, reduce:)
   cell
 }
 
@@ -63,7 +60,6 @@ fn relay_cell() -> Cell(RelayState, Relay, List(String)) {
     actor.start_seeded(
       fn(toolkit) { RelayState(own: toolkit.cell, log: []) },
       reduce:,
-      on_down: fn(_) { option.None },
     )
   cell
 }

@@ -6,8 +6,10 @@
 
 @target(javascript)
 import gleam/option
+
 @target(javascript)
 import gleeunit/should
+
 @target(javascript)
 import lily/server
 @target(javascript)
@@ -40,7 +42,7 @@ pub fn supervision_connect_as_watch_caller_changes_nothing_test() {
       origin: option.None,
       send: fn(_) { Nil },
       client_id: "c1",
-      session: [],
+      seed: [],
       watch: server.WatchCaller,
     )
 
@@ -57,7 +59,7 @@ pub fn supervision_topics_still_round_trip_for_a_watched_client_test() {
       origin: option.None,
       send: fn(_) { Nil },
       client_id: "c1",
-      session: [],
+      seed: [],
       watch: server.WatchCaller,
     )
 

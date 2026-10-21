@@ -1,6 +1,7 @@
 //// Automatic MessagePack and JSON codec via a [`Reflected`](#Reflected) tree.
 //// On JavaScript a type only decodes once its module is registered through
-//// [`request_module`](#request_module).
+//// [`request_module`](#request_module). Data messages also decode any type
+//// this page encoded, frames don't.
 
 // =============================================================================
 // IMPORTS
@@ -22,6 +23,18 @@ import gleam/string
 // INTERNAL TYPES
 // =============================================================================
 
+@internal
+pub type MessagePackValue {
+  ValueNil
+  ValueBool(Bool)
+  ValueInteger(Int)
+  ValueFloat(Float)
+  ValueString(String)
+  ValueBytes(BitArray)
+  ValueArray(List(MessagePackValue))
+  ValueMap(List(#(MessagePackValue, MessagePackValue)))
+}
+
 /// Dicts and sets go on the wire as reserved `$dict`/`$set` constructors.
 @internal
 pub type Reflected {
@@ -37,18 +50,6 @@ pub type Reflected {
   ReflectedConstructor(name: String, fields: List(Reflected))
 }
 
-@internal
-pub type Value {
-  ValueNil
-  ValueBool(Bool)
-  ValueInteger(Int)
-  ValueFloat(Float)
-  ValueString(String)
-  ValueBytes(BitArray)
-  ValueArray(List(Value))
-  ValueMap(List(#(Value, Value)))
-}
-
 // =============================================================================
 // INTERNAL FUNCTIONS
 // =============================================================================
@@ -61,7 +62,7 @@ pub const default_max_depth = 128
 pub fn decode_bounded(
   bytes: BitArray,
   max_depth: Int,
-) -> Result(#(Value, BitArray), Nil) {
+) -> Result(#(MessagePackValue, BitArray), Nil) {
   decode_at(bytes, 0, max_depth)
 }
 
@@ -73,15 +74,25 @@ pub fn decode_data_message(encoded: String) -> Result(message, Nil) {
       let payload =
         string.drop_start(encoded, string.length(data_message_prefix))
       use bytes <- result.try(bit_array.base64_decode(payload))
-      use value <- result.try(decode_message_pack(bytes, default_max_depth))
-      Ok(passthrough(value))
+      use #(value, _) <- result.try(decode_bounded(bytes, default_max_depth))
+      use reflected <- result.try(message_pack_value_to_reflected(
+        value,
+        default_max_depth,
+      ))
+      use message <- result.try(construct_data_message(reflected))
+      Ok(passthrough(message))
     }
   }
 }
 
 @internal
-pub fn decode_json(value: Dynamic) -> Result(Dynamic, Nil) {
-  use reflected <- result.try(json_to_reflected(value))
+pub fn decode_json(
+  value: Dynamic,
+  max_depth: Int,
+  conform: fn(Reflected) -> Result(Reflected, Nil),
+) -> Result(Dynamic, Nil) {
+  use reflected <- result.try(json_to_reflected(value, max_depth))
+  use reflected <- result.try(conform(reflected))
   construct(reflected)
 }
 
@@ -89,12 +100,14 @@ pub fn decode_json(value: Dynamic) -> Result(Dynamic, Nil) {
 pub fn decode_message_pack(
   bytes: BitArray,
   max_depth: Int,
+  conform: fn(Reflected) -> Result(Reflected, Nil),
 ) -> Result(Dynamic, Nil) {
   use #(message_pack_value, _) <- result.try(decode_bounded(bytes, max_depth))
   use reflected <- result.try(message_pack_value_to_reflected(
     message_pack_value,
     max_depth,
   ))
+  use reflected <- result.try(conform(reflected))
   construct(reflected)
 }
 
@@ -116,8 +129,10 @@ pub fn encode_bin(bytes: BitArray) -> BitArray {
 
 @internal
 pub fn encode_data_message(message: a) -> String {
-  data_message_prefix
-  <> bit_array.base64_encode(encode_message_pack(message), False)
+  let bytes =
+    reflect_data_message(message)
+    |> reflected_to_message_pack
+  data_message_prefix <> bit_array.base64_encode(bytes, False)
 }
 
 @internal
@@ -171,9 +186,9 @@ pub fn encode_string(value: String) -> BitArray {
 
 @internal
 pub fn lookup_string_key(
-  entries: List(#(Value, Value)),
+  entries: List(#(MessagePackValue, MessagePackValue)),
   key: String,
-) -> Result(Value, Nil) {
+) -> Result(MessagePackValue, Nil) {
   case entries {
     [] -> Error(Nil)
     [#(ValueString(name), value), ..] if name == key -> Ok(value)
@@ -249,10 +264,10 @@ fn collect_indexed(
 fn decode_array(
   bytes: BitArray,
   remaining: Int,
-  accumulator: List(Value),
+  accumulator: List(MessagePackValue),
   depth: Int,
   max_depth: Int,
-) -> Result(#(Value, BitArray), Nil) {
+) -> Result(#(MessagePackValue, BitArray), Nil) {
   case remaining {
     0 -> Ok(#(ValueArray(list.reverse(accumulator)), bytes))
     _ ->
@@ -274,7 +289,7 @@ fn decode_at(
   bytes: BitArray,
   depth: Int,
   max_depth: Int,
-) -> Result(#(Value, BitArray), Nil) {
+) -> Result(#(MessagePackValue, BitArray), Nil) {
   use <- bool.guard(when: depth > max_depth, return: Error(Nil))
   case bytes {
     <<0xc0, rest:bytes>> -> Ok(#(ValueNil, rest))
@@ -341,7 +356,10 @@ fn decode_at(
   }
 }
 
-fn decode_bin(bytes: BitArray, length: Int) -> Result(#(Value, BitArray), Nil) {
+fn decode_bin(
+  bytes: BitArray,
+  length: Int,
+) -> Result(#(MessagePackValue, BitArray), Nil) {
   case bytes {
     <<taken:bytes-size(length), rest:bytes>> -> Ok(#(ValueBytes(taken), rest))
     _ -> Error(Nil)
@@ -351,10 +369,10 @@ fn decode_bin(bytes: BitArray, length: Int) -> Result(#(Value, BitArray), Nil) {
 fn decode_map(
   bytes: BitArray,
   remaining: Int,
-  accumulator: List(#(Value, Value)),
+  accumulator: List(#(MessagePackValue, MessagePackValue)),
   depth: Int,
   max_depth: Int,
-) -> Result(#(Value, BitArray), Nil) {
+) -> Result(#(MessagePackValue, BitArray), Nil) {
   case remaining {
     0 -> Ok(#(ValueMap(list.reverse(accumulator)), bytes))
     _ ->
@@ -379,7 +397,7 @@ fn decode_map(
 fn decode_string(
   bytes: BitArray,
   length: Int,
-) -> Result(#(Value, BitArray), Nil) {
+) -> Result(#(MessagePackValue, BitArray), Nil) {
   // too few bytes fails the pattern and falls through to Error
   case bytes {
     <<taken:bytes-size(length), rest:bytes>> ->
@@ -392,7 +410,7 @@ fn decode_string(
 }
 
 fn dict_pair_to_reflected(
-  pair: Value,
+  pair: MessagePackValue,
   max_depth: Int,
 ) -> Result(#(Reflected, Reflected), Nil) {
   case pair {
@@ -412,7 +430,7 @@ fn dict_pair_to_reflected(
 }
 
 fn dict_to_reflected(
-  entries: List(#(Value, Value)),
+  entries: List(#(MessagePackValue, MessagePackValue)),
   max_depth: Int,
 ) -> Result(Reflected, Nil) {
   use pairs_value <- result.try(lookup_string_key(entries, "0"))
@@ -444,14 +462,18 @@ fn encode_nil() -> BitArray {
   <<0xc0>>
 }
 
-fn extract_constructor_name(index: Dict(String, Value)) -> Result(String, Nil) {
+fn extract_constructor_name(
+  index: Dict(String, MessagePackValue),
+) -> Result(String, Nil) {
   case dict.get(index, "_") {
     Ok(ValueString(name)) -> Ok(name)
     _ -> Error(Nil)
   }
 }
 
-fn index_entries(entries: List(#(Value, Value))) -> Dict(String, Value) {
+fn index_entries(
+  entries: List(#(MessagePackValue, MessagePackValue)),
+) -> Dict(String, MessagePackValue) {
   // dict once, O(1) lookups instead of rescanning per field
   list.fold(entries, dict.new(), fn(index, entry) {
     case entry {
@@ -477,6 +499,7 @@ fn indexed_fields_message_pack(
 
 fn json_dict_to_reflected(
   fields: Dict(String, Dynamic),
+  remaining: Int,
 ) -> Result(Reflected, Nil) {
   use zero <- result.try(dict.get(fields, "0"))
   use pairs <- result.try(run_decoder(zero, decode.list(decode.dynamic)))
@@ -488,8 +511,8 @@ fn json_dict_to_reflected(
       ))
       case pair {
         [key_value, value_value] -> {
-          use key <- result.try(json_to_reflected(key_value))
-          use value <- result.try(json_to_reflected(value_value))
+          use key <- result.try(json_to_reflected(key_value, remaining))
+          use value <- result.try(json_to_reflected(value_value, remaining))
           Ok(#(key, value))
         }
         _ -> Error(Nil)
@@ -501,20 +524,22 @@ fn json_dict_to_reflected(
 
 fn json_object_to_reflected(
   fields: Dict(String, Dynamic),
+  remaining: Int,
 ) -> Result(Reflected, Nil) {
+  let convert = json_to_reflected(_, remaining)
   case dict.get(fields, "_") {
     Ok(tag_value) -> {
       use tag <- result.try(run_decoder(tag_value, decode.string))
       case tag {
-        "$dict" -> json_dict_to_reflected(fields)
-        "$set" -> json_set_to_reflected(fields)
+        "$dict" -> json_dict_to_reflected(fields, remaining)
+        "$set" -> json_set_to_reflected(fields, remaining)
         _ ->
-          collect_indexed(fields, 0, [], json_to_reflected)
+          collect_indexed(fields, 0, [], convert)
           |> result.map(ReflectedConstructor(name: tag, fields: _))
       }
     }
     Error(_) ->
-      case collect_indexed(fields, 0, [], json_to_reflected) {
+      case collect_indexed(fields, 0, [], convert) {
         Ok([]) | Error(_) -> Error(Nil)
         Ok(positional) -> Ok(ReflectedTuple(fields: positional))
       }
@@ -547,20 +572,27 @@ fn json_scalar_to_reflected(value: Dynamic) -> Result(Reflected, Nil) {
 
 fn json_set_to_reflected(
   fields: Dict(String, Dynamic),
+  remaining: Int,
 ) -> Result(Reflected, Nil) {
   use zero <- result.try(dict.get(fields, "0"))
   use members <- result.try(run_decoder(zero, decode.list(decode.dynamic)))
-  use reflected <- result.try(list.try_map(members, json_to_reflected))
+  use reflected <- result.try(
+    list.try_map(members, json_to_reflected(_, remaining)),
+  )
   Ok(ReflectedSet(members: reflected))
 }
 
-fn json_to_reflected(value: Dynamic) -> Result(Reflected, Nil) {
+// hostile nesting would exhaust the stack
+fn json_to_reflected(value: Dynamic, remaining: Int) -> Result(Reflected, Nil) {
+  use <- bool.guard(when: remaining < 0, return: Error(Nil))
   case run_decoder(value, decode.dict(decode.string, decode.dynamic)) {
-    Ok(fields) -> json_object_to_reflected(fields)
+    Ok(fields) -> json_object_to_reflected(fields, remaining - 1)
     Error(_) ->
       case run_decoder(value, decode.list(decode.dynamic)) {
         Ok(items) -> {
-          use reflected <- result.try(list.try_map(items, json_to_reflected))
+          use reflected <- result.try(
+            list.try_map(items, json_to_reflected(_, remaining - 1)),
+          )
           Ok(ReflectedList(reflected))
         }
         Error(_) -> json_scalar_to_reflected(value)
@@ -577,7 +609,7 @@ fn map_header(length: Int) -> BitArray {
 }
 
 fn map_to_reflected(
-  entries: List(#(Value, Value)),
+  entries: List(#(MessagePackValue, MessagePackValue)),
   max_depth: Int,
 ) -> Result(Reflected, Nil) {
   // `_`-tagged custom type, tag-less tuple, or `$dict`/`$set` sentinel
@@ -601,7 +633,7 @@ fn map_to_reflected(
 }
 
 fn message_pack_value_to_reflected(
-  value: Value,
+  value: MessagePackValue,
   max_depth: Int,
 ) -> Result(Reflected, Nil) {
   case value {
@@ -708,7 +740,7 @@ fn run_decoder(value: Dynamic, decoder: decode.Decoder(a)) -> Result(a, Nil) {
 }
 
 fn set_to_reflected(
-  entries: List(#(Value, Value)),
+  entries: List(#(MessagePackValue, MessagePackValue)),
   max_depth: Int,
 ) -> Result(Reflected, Nil) {
   use members_value <- result.try(lookup_string_key(entries, "0"))
@@ -789,6 +821,16 @@ fn unsigned_to_bytes_loop(
 @external(javascript, "./codec.ffi.mjs", "construct")
 fn construct(reflected: Reflected) -> Result(Dynamic, Nil)
 
+// falls back to classes this page encoded, never use it for frames
+@external(erlang, "lily_codec_ffi", "construct")
+@external(javascript, "./codec.ffi.mjs", "constructDataMessage")
+fn construct_data_message(reflected: Reflected) -> Result(Dynamic, Nil)
+
 @external(erlang, "lily_codec_ffi", "reflect")
 @external(javascript, "./codec.ffi.mjs", "reflect")
 fn reflect(value: a) -> Reflected
+
+// also records the classes for construct_data_message on JS
+@external(erlang, "lily_codec_ffi", "reflect")
+@external(javascript, "./codec.ffi.mjs", "reflectDataMessage")
+fn reflect_data_message(value: a) -> Reflected

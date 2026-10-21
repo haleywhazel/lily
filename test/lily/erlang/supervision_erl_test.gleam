@@ -17,8 +17,10 @@ import gleam/option
 import gleam/otp/static_supervisor
 @target(erlang)
 import gleam/otp/supervision
+
 @target(erlang)
 import gleeunit/should
+
 @target(erlang)
 import lily/internal/actor
 @target(erlang)
@@ -119,7 +121,7 @@ fn server_pid(app: server.Server(Model, Message)) -> process.Pid {
 /// Idle socket stand-in connected with `watch`, returns once connected.
 fn spawn_connected_owner(
   app: server.Server(Model, Message),
-  watch: server.Watch,
+  watch: server.ConnectionWatch,
 ) -> process.Pid {
   let done = process.new_subject()
   let owner =
@@ -130,7 +132,7 @@ fn spawn_connected_owner(
           origin: option.None,
           send: fn(_) { Nil },
           client_id: "c1",
-          session: [],
+          seed: [],
           watch:,
         )
       process.send(done, connection)
@@ -242,8 +244,8 @@ pub fn supervision_watching_another_process_disconnects_when_that_one_dies_test(
       origin: option.None,
       send: fn(_) { Nil },
       client_id: "c1",
-      session: [],
-      watch: server.Watch(socket),
+      seed: [],
+      watch: server.WatchProcess(socket),
     )
   test_support.client_count(app)
   |> should.equal(1)
@@ -265,8 +267,8 @@ pub fn supervision_watched_connection_closed_explicitly_is_not_disconnected_twic
       origin: option.None,
       send: fn(_) { Nil },
       client_id: "c1",
-      session: [],
-      watch: server.Watch(socket),
+      seed: [],
+      watch: server.WatchProcess(socket),
     )
 
   server.disconnect(connection)
@@ -308,6 +310,19 @@ pub fn supervision_dead_connection_process_is_pruned_test() {
   events(app)
   |> count_disconnects
   |> should.equal(1)
+}
+
+@target(erlang)
+pub fn supervision_monitor_reports_the_server_stopping_test() {
+  let app = test_support.start_server(test_support.topic_builder())
+  let monitor = server.monitor(app)
+
+  server.stop(app)
+
+  process.new_selector()
+  |> process.select_specific_monitor(monitor, fn(_) { Nil })
+  |> process.selector_receive(within: 1000)
+  |> should.equal(Ok(Nil))
 }
 
 // =============================================================================
@@ -437,7 +452,7 @@ pub fn supervision_a_handle_from_before_a_restart_still_serves_test() {
       client_id: "after",
       origin: option.None,
       send: fn(_bytes) { Nil },
-      session: [],
+      seed: [],
       watch: server.Unwatched,
     )
   test_support.client_count(first)
@@ -585,7 +600,7 @@ pub fn supervision_a_restarted_topic_loads_its_model_again_test() {
   let loaded = test_support.Model(..test_support.initial_model(), count: 42)
   let app =
     test_support.topic_builder()
-    |> server.topic_init(prefix: "chat", init: fn(_) {
+    |> server.topic_init(id: "chat", init: fn() {
       record(Nil)
       loaded
     })
@@ -606,7 +621,7 @@ pub fn supervision_a_restarted_topic_loads_its_model_again_test() {
 pub fn supervision_a_slow_loader_holds_up_its_topic_and_not_the_server_test() {
   let app =
     test_support.topic_builder()
-    |> server.topic_init(prefix: "chat", init: fn(_) {
+    |> server.topic_init(id: "chat", init: fn() {
       process.sleep(300)
       test_support.initial_model()
     })
@@ -620,7 +635,7 @@ pub fn supervision_a_slow_loader_holds_up_its_topic_and_not_the_server_test() {
       origin: option.None,
       send: record1,
       client_id: "c1",
-      session: [],
+      seed: [],
       watch: server.Unwatched,
     )
   let assert Ok(c2) =
@@ -629,7 +644,7 @@ pub fn supervision_a_slow_loader_holds_up_its_topic_and_not_the_server_test() {
       origin: option.None,
       send: record2,
       client_id: "c2",
-      session: [],
+      seed: [],
       watch: server.Unwatched,
     )
   let _ = test_support.client_count(app)

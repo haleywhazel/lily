@@ -7,7 +7,9 @@
 
 import gleam/bit_array
 import gleam/list
+
 import gleeunit/should
+
 import lily/server
 import lily/test_support.{type Message, type Model, Increment, SetName}
 import lily/transport.{type Protocol}
@@ -40,7 +42,9 @@ pub fn open_serialiser_round_trips_every_frame_test() {
     transport.Acknowledge(target: transport.Session, sequence: 1),
     transport.Acknowledge(target: transport.Topic("chat"), sequence: 2),
     transport.Connected(client_id: "abc"),
-    transport.Rejected(topic_id: "t", reason: "denied"),
+    transport.Dropped(target: transport.Session),
+    transport.Dropped(target: transport.Topic("chat")),
+    transport.Rejected(topic_id: "t", reason: transport.AccessDenied),
     transport.Resync(cursors: [transport.Session, transport.Topic("a")]),
     transport.Resync(cursors: []),
     transport.SessionMessage(payload: Increment),
@@ -55,7 +59,7 @@ pub fn open_serialiser_round_trips_every_frame_test() {
     transport.TopicMessage(topic_id: "chat", payload: Increment),
     transport.TopicUpdate(topic_id: "chat", sequence: 6, payload: SetName("y")),
     transport.Unsubscribe(topic_id: "chat"),
-    transport.Version(hash: "v1"),
+    transport.Version(hash: "v1", protocol: 1),
   ]
   |> list.each(round_trip)
 }

@@ -26,6 +26,25 @@ export function clearStored(prefix) {
   for (const key of keys) localStorage.removeItem(key);
 }
 
+export function forgetProtocolReload() {
+  try {
+    sessionStorage.removeItem(PROTOCOL_RELOAD_KEY);
+  } catch (_error) {
+    // storage unavailable, nothing was recorded
+  }
+}
+
+/** Listening only while a guard holds, a standing one blocks the bfcache. */
+export function holdLeaveGuard(guard, holds) {
+  if (holds) holdingGuards.add(guard);
+  else holdingGuards.delete(guard);
+  if (holdingGuards.size > 0) {
+    window.addEventListener("beforeunload", askBeforeLeaving);
+  } else {
+    window.removeEventListener("beforeunload", askBeforeLeaving);
+  }
+}
+
 /** A window flag stops a re-boot stacking sockets. */
 export function installHotReload(
   getModel,
@@ -43,7 +62,6 @@ export function installHotReload(
   );
 }
 
-/** One document listener per runtime. */
 export function installLinkInterception(owner, navigate, within, optOut) {
   if (typeof document === "undefined") return;
   if (intercepting.has(owner)) return;
@@ -88,8 +106,43 @@ export function installLinkInterception(owner, navigate, within, optOut) {
 
 export function listenLocation(apply) {
   if (typeof window === "undefined") return;
-  window.addEventListener("popstate", () => apply());
-  window.addEventListener(LOCATION_EVENT, () => apply());
+  onPage(window, "popstate", () => apply());
+  onPage(window, LOCATION_EVENT, () => apply());
+}
+
+export function listenNetwork(runtime, apply) {
+  const report = () => apply(navigator.onLine !== false);
+  onPage(window, "online", report);
+  onPage(window, "offline", report);
+  report();
+  return runtime;
+}
+
+// at most once a frame while the window is dragged
+export function listenViewport(runtime, apply) {
+  let pending = false;
+  const report = () => {
+    pending = false;
+    apply([window.innerWidth, window.innerHeight]);
+  };
+  onPage(window, "resize", () => {
+    if (pending) return;
+    pending = true;
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(report);
+    } else {
+      setTimeout(report, 0);
+    }
+  });
+  report();
+  return runtime;
+}
+
+export function listenVisibility(runtime, apply) {
+  const report = () => apply(document.visibilityState !== "hidden");
+  onPage(document, "visibilitychange", report);
+  report();
+  return runtime;
 }
 
 export function load(path) {
@@ -98,6 +151,10 @@ export function load(path) {
 
 export function navigate(path) {
   changeHistory("pushState", path);
+}
+
+export function newLeaveGuard() {
+  return {};
 }
 
 export function readLocation() {
@@ -145,6 +202,25 @@ export function reload() {
   if (typeof window !== "undefined") window.location.reload();
 }
 
+/** Once per protocol pair, a page still mismatched after it stays stopped. */
+export function reloadForProtocol(server, client) {
+  const pair = `${server}:${client}`;
+  try {
+    if (sessionStorage.getItem(PROTOCOL_RELOAD_KEY) === pair) {
+      log(
+        "warn",
+        `lily: still on wire protocol ${client} after a reload, the server ` +
+          `speaks ${server}, not reloading again`,
+      );
+      return;
+    }
+    sessionStorage.setItem(PROTOCOL_RELOAD_KEY, pair);
+  } catch (_error) {
+    // without storage there is no guard, one reload is still right
+  }
+  reload();
+}
+
 export function replace(path) {
   changeHistory("replaceState", path);
 }
@@ -160,6 +236,12 @@ export function writeStored(key, value) {
 // =============================================================================
 // FUNCTIONS
 // =============================================================================
+
+function askBeforeLeaving(event) {
+  event.preventDefault();
+  // older browsers ask only when this is set
+  event.returnValue = "";
+}
 
 /** History calls emit no popstate, leaving us to fire our own event. */
 function changeHistory(method, path) {
@@ -208,6 +290,19 @@ function devReloadUrl() {
   return `${protocol}//${window.location.hostname}:${port}/dev-reload`;
 }
 
+// one page listener per event, every call adds a callback to it
+function onPage(target, name, callback) {
+  let callbacks = pageCallbacks.get(name);
+  if (!callbacks) {
+    callbacks = [];
+    pageCallbacks.set(name, callbacks);
+    target.addEventListener(name, (event) => {
+      for (const run of callbacks) run(event);
+    });
+  }
+  callbacks.push(callback);
+}
+
 /** In sessionStorage to survive the reload it guards. */
 function reloadedTooRecently(guardMilliseconds) {
   try {
@@ -233,13 +328,22 @@ function stashModelForReload(model) {
 // PRIVATE CONSTANTS
 // =============================================================================
 
+// confirm_leaving guards whose `when` holds
+const holdingGuards = new Set();
+
 // runtimes with a click listener
 const intercepting = new WeakSet();
 
 // fired by navigate and replace for the url setter
 const LOCATION_EVENT = "lily-browser:location";
 
+// event name to the callbacks its one listener runs
+const pageCallbacks = new Map();
+
 const PRIMITIVE_TYPES = new Set(["string", "number", "boolean"]);
+
+// the protocol pair a reload was last made for
+const PROTOCOL_RELOAD_KEY = "lily_protocol_reload";
 
 // shared with the client, one timestamp
 const RELOAD_GUARD_KEY = "lily_dev_last_reload";

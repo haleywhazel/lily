@@ -7,7 +7,9 @@
 
 import gleam/bit_array
 import gleam/string
+
 import gleeunit/should
+
 import lily/store
 import lily/test_support.{
   type Message, type Model, Decrement, Increment, SetName,
@@ -45,11 +47,11 @@ pub fn encode_connected_test() {
 
 pub fn encode_version_test() {
   transport.encode(
-    Version(hash: "abc123"),
+    Version(hash: "abc123", protocol: 1),
     serialiser: test_support.custom_serialiser(),
   )
   |> should.equal(bit_array.from_string(
-    "{\"type\":\"version\",\"hash\":\"abc123\"}",
+    "{\"type\":\"version\",\"hash\":\"abc123\",\"protocol\":1}",
   ))
 }
 
@@ -134,13 +136,34 @@ pub fn decode_connected_test() {
   |> should.equal(Ok(Connected(client_id: "abc123")))
 }
 
+pub fn decode_json_deeper_than_the_cap_fails_test() {
+  // a server reads JSON from any client, the cap must hold there too
+  test_support.register_fixtures()
+  let nested = fn(depth) {
+    "{\"type\":\"session_message\",\"payload\":"
+    <> string.repeat("[", depth)
+    <> string.repeat("]", depth)
+    <> "}"
+  }
+  let serialiser = test_support.automatic_serialiser(transport.Json)
+
+  transport.decode(bit_array.from_string(nested(10_000)), serialiser:)
+  |> should.equal(Error(Nil))
+  transport.decode(bit_array.from_string(nested(130)), serialiser:)
+  |> should.equal(Error(Nil))
+  transport.decode(bit_array.from_string(nested(100)), serialiser:)
+  |> should.be_ok
+}
+
 pub fn decode_version_test() {
   test_support.register_fixtures()
   transport.decode(
-    bit_array.from_string("{\"type\":\"version\",\"hash\":\"abc123\"}"),
+    bit_array.from_string(
+      "{\"type\":\"version\",\"hash\":\"abc123\",\"protocol\":1}",
+    ),
     serialiser: test_support.custom_serialiser(),
   )
-  |> should.equal(Ok(Version(hash: "abc123")))
+  |> should.equal(Ok(Version(hash: "abc123", protocol: 1)))
 }
 
 pub fn decode_acknowledge_test() {
@@ -419,13 +442,13 @@ pub fn channel_send_reports_an_undelivered_frame_test() {
 pub fn run_connector_passes_handler_through_test() {
   let received_cell = test_support.new(<<>>)
   let connector =
-    transport.connector(fn(handler: transport.Handler) {
+    transport.connector(fn(handler: transport.ConnectorHandler) {
       // proves the handler was passed through
       handler.received(bit_array.from_string("relayed"))
       transport.Channel(send: fn(_) { Ok(Nil) }, close: fn() { Nil })
     })
   let handler =
-    transport.Handler(
+    transport.ConnectorHandler(
       received: fn(bytes) { test_support.set(received_cell, bytes) },
       opened: fn() { Nil },
       closed: fn() { Nil },
@@ -449,7 +472,7 @@ pub fn run_connector_returns_built_transport_test() {
       )
     })
   let handler =
-    transport.Handler(
+    transport.ConnectorHandler(
       received: fn(_) { Nil },
       opened: fn() { Nil },
       closed: fn() { Nil },

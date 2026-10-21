@@ -14,8 +14,10 @@ import gleam/list
 import gleam/string
 @target(javascript)
 import gleam/uri.{type Uri}
+
 @target(javascript)
 import gleeunit/should
+
 @target(javascript)
 import lily/browser
 @target(javascript)
@@ -76,9 +78,9 @@ fn count_field() -> browser.PersistedField(Model) {
 }
 
 @target(javascript)
-fn send_version(handler: transport.Handler, hash: String) -> Nil {
+fn send_version(handler: transport.ConnectorHandler, hash: String) -> Nil {
   handler.received(transport.encode(
-    transport.Version(hash:),
+    transport.Version(hash:, protocol: transport.protocol_version),
     serialiser: test_support.custom_serialiser(),
   ))
 }
@@ -289,6 +291,107 @@ pub fn browser_intercept_links_ignores_external_and_special_links_test() {
   test_support.click_prevented("#dl") |> should.be_false
   test_support.click_prevented("#frag") |> should.be_false
   test_support.get(captured) |> should.equal(["/"])
+}
+
+// =============================================================================
+// PAGE SIGNALS
+// =============================================================================
+
+@target(javascript)
+pub fn browser_visibility_tracks_the_tab_test() {
+  test_support.set_visibility(True)
+  let runtime =
+    test_support.new_runtime()
+    |> browser.visibility(set: fn(model, visible) {
+      Model(..model, connected: visible)
+    })
+  client.model(runtime).connected |> should.be_true
+
+  test_support.set_visibility(False)
+  client.model(runtime).connected |> should.be_false
+  test_support.set_visibility(True)
+}
+
+@target(javascript)
+pub fn browser_network_tracks_online_test() {
+  test_support.set_online(True)
+  let runtime =
+    test_support.new_runtime()
+    |> browser.network(set: fn(model, online) {
+      Model(..model, connected: online)
+    })
+  client.model(runtime).connected |> should.be_true
+
+  test_support.set_online(False)
+  client.model(runtime).connected |> should.be_false
+  test_support.set_online(True)
+}
+
+@target(javascript)
+pub fn browser_viewport_tracks_the_window_size_test() {
+  test_support.resize_window(800, 600)
+  let runtime =
+    test_support.new_runtime()
+    |> browser.viewport(set: fn(model, size) {
+      let #(width, height) = size
+      Model(..model, count: width * 10_000 + height)
+    })
+  client.model(runtime).count |> should.equal(8_000_600)
+
+  test_support.resize_window(1024, 768)
+  client.model(runtime).count |> should.equal(10_240_768)
+}
+
+@target(javascript)
+pub fn browser_confirm_leaving_asks_only_while_it_holds_test() {
+  let runtime =
+    test_support.new_runtime()
+    |> browser.confirm_leaving(when: fn(model) { model.name != "" })
+  test_support.before_unload_prevented() |> should.be_false
+
+  client.update_model(runtime, with: fn(model) { Model(..model, name: "draft") })
+  test_support.before_unload_prevented() |> should.be_true
+  client.update_model(runtime, with: fn(model) { Model(..model, name: "") })
+}
+
+@target(javascript)
+pub fn browser_confirm_leaving_listens_only_while_it_holds_test() {
+  // a standing beforeunload listener keeps the page out of the bfcache
+  let before = test_support.page_listener_count("beforeunload")
+  let runtime =
+    test_support.new_runtime()
+    |> browser.confirm_leaving(when: fn(model) { model.name != "" })
+  test_support.page_listener_count("beforeunload") |> should.equal(before)
+
+  client.update_model(runtime, with: fn(model) { Model(..model, name: "draft") })
+  test_support.page_listener_count("beforeunload") |> should.equal(before + 1)
+  client.update_model(runtime, with: fn(model) { Model(..model, name: "") })
+  test_support.page_listener_count("beforeunload") |> should.equal(before)
+}
+
+@target(javascript)
+pub fn browser_page_signals_share_one_listener_test() {
+  let track = fn(runtime) {
+    runtime
+    |> browser.viewport(set: fn(model, size) {
+      let #(width, _) = size
+      Model(..model, count: width)
+    })
+    |> browser.network(set: fn(model, online) {
+      Model(..model, connected: online)
+    })
+  }
+  let first = track(test_support.new_runtime())
+  let resize = test_support.page_listener_count("resize")
+  let online = test_support.page_listener_count("online")
+  let second = track(test_support.new_runtime())
+
+  test_support.page_listener_count("resize") |> should.equal(resize)
+  test_support.page_listener_count("online") |> should.equal(online)
+  // and both still hear it
+  test_support.resize_window(640, 480)
+  client.model(first).count |> should.equal(640)
+  client.model(second).count |> should.equal(640)
 }
 
 // =============================================================================
@@ -521,6 +624,55 @@ pub fn browser_reload_on_new_version_ignores_an_unchanged_hash_test() {
   send_version(handler, "v1")
 
   test_support.navigation_count() |> should.equal(before)
+}
+
+@target(javascript)
+pub fn browser_reload_on_new_version_reloads_on_a_protocol_mismatch_test() {
+  // a cached page meeting a newer server, no baseline hash yet
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let runtime = test_support.new_runtime() |> browser.reload_on_new_version
+  let before = test_support.navigation_count()
+
+  let #(handler, _sent) = test_support.connect_capturing(runtime)
+  handler.received(transport.encode(
+    transport.Version(hash: "v1", protocol: transport.protocol_version + 1),
+    serialiser: test_support.custom_serialiser(),
+  ))
+
+  test_support.navigation_count() |> should.equal(before + 1)
+}
+
+@target(javascript)
+fn send_mismatch(handler: transport.ConnectorHandler) -> Nil {
+  handler.received(transport.encode(
+    transport.Version(hash: "v1", protocol: transport.protocol_version + 1),
+    serialiser: test_support.custom_serialiser(),
+  ))
+}
+
+@target(javascript)
+pub fn browser_reload_on_new_version_reloads_once_per_protocol_pair_test() {
+  // the reloaded page still mismatches, a stale cache say, and stays stopped
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let before = test_support.navigation_count()
+
+  let first = test_support.new_runtime() |> browser.reload_on_new_version
+  let #(handler, _sent) = test_support.connect_capturing(first)
+  send_mismatch(handler)
+  let reloaded = test_support.new_runtime() |> browser.reload_on_new_version
+  let #(handler, _sent) = test_support.connect_capturing(reloaded)
+  send_mismatch(handler)
+
+  test_support.navigation_count() |> should.equal(before + 1)
+
+  // a matching server clears the guard, a later mismatch reloads again
+  let fresh = test_support.new_runtime() |> browser.reload_on_new_version
+  let #(handler, _sent) = test_support.connect_capturing(fresh)
+  send_version(handler, "v3")
+  send_mismatch(handler)
+  test_support.navigation_count() |> should.equal(before + 2)
 }
 
 // =============================================================================

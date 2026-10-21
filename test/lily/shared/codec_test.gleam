@@ -7,7 +7,9 @@
 // =============================================================================
 
 import gleam/bit_array
+
 import gleeunit/should
+
 import lily/internal/codec.{
   ValueArray, ValueBool, ValueBytes, ValueFloat, ValueInteger, ValueMap,
   ValueNil, ValueString,
@@ -22,7 +24,7 @@ fn assert_encodes(actual: BitArray, expected_hex: String) -> Nil {
   |> should.equal(expected_hex)
 }
 
-fn assert_decodes(hex: String, expected: codec.Value) -> Nil {
+fn assert_decodes(hex: String, expected: codec.MessagePackValue) -> Nil {
   let assert Ok(bytes) = bit_array.base16_decode(hex)
   let assert Ok(#(value, rest)) =
     codec.decode_bounded(bytes, codec.default_max_depth)
@@ -386,8 +388,8 @@ pub fn auto_decode_rejects_a_nested_bin_test() {
   // a bin decoded as a nested value must not reset the depth budget
   let bytes = codec.encode_array([codec.encode_bin(nested_array(2))])
 
-  codec.decode_message_pack(bytes, 2)
+  codec.decode_message_pack(bytes, 2, Ok)
   |> should.be_error
-  codec.decode_message_pack(codec.encode_bin(<<0xc0>>), 128)
+  codec.decode_message_pack(codec.encode_bin(<<0xc0>>), 128, Ok)
   |> should.be_error
 }

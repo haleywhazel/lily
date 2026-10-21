@@ -18,16 +18,21 @@ export { registerModule } from "./internal/codec.ffi.mjs";
 // EXPORT FUNCTIONS
 // =============================================================================
 
-/** `makeHandler` and `makeChannel` are passed-in Gleam constructors. */
+/**
+ * `makeConnectorHandler` and `makeChannel` are passed-in Gleam constructors.
+ * The first frame sent after an open goes ahead of the queue, which flushes
+ * right behind it. The runtime sends its `Resync` there.
+ */
 export function offlineConnect(
   connect,
   storageKey,
   handler,
-  makeHandler,
+  makeConnectorHandler,
   makeChannel,
 ) {
   const queue = createOfflineQueue(storageKey);
   let channel = null;
+  let leading = false;
 
   function flush() {
     if (!channel || queue.size === 0) return;
@@ -39,22 +44,45 @@ export function offlineConnect(
     queue.drainSent(sent);
   }
 
+  function sendOrQueue(bytes) {
+    const result = channel.send(bytes);
+    if (result instanceof GleamError) queue.queuePending(bytes.rawBuffer);
+    return result;
+  }
+
   channel = connect(
-    makeHandler(
+    makeConnectorHandler(
       handler.received,
       () => {
-        flush();
+        leading = true;
         handler.opened();
+        // nothing was sent while opening, flush anyway
+        if (leading && channel) {
+          leading = false;
+          flush();
+        }
       },
-      handler.closed,
+      () => {
+        leading = false;
+        handler.closed();
+      },
     ),
   );
 
   return makeChannel(
     (bytes) => {
-      const result = channel.send(bytes);
-      if (result instanceof GleamError) queue.queuePending(bytes.rawBuffer);
-      return result;
+      if (leading) {
+        leading = false;
+        const result = sendOrQueue(bytes);
+        flush();
+        return result;
+      }
+      // behind frames still queued, keeps the order
+      if (queue.size > 0) {
+        queue.queuePending(bytes.rawBuffer);
+        return new GleamError(undefined);
+      }
+      return sendOrQueue(bytes);
     },
     () => channel.close(),
   );
@@ -80,6 +108,7 @@ export function websocketConnect(
   let socket = null;
   let reconnectDelay = reconnectBase;
   let reconnectTimer = null;
+  let stopped = false;
 
   function openConnection() {
     if (reconnectTimer) {
@@ -112,7 +141,7 @@ export function websocketConnect(
     socket.onclose = function () {
       socket = null;
       handler.closed();
-      scheduleReconnect();
+      if (!stopped) scheduleReconnect();
     };
   }
 
@@ -141,7 +170,9 @@ export function websocketConnect(
       socket.send(bytes.rawBuffer);
       return new Ok(undefined);
     },
+    // for good, the close event doesn't reconnect
     () => {
+      stopped = true;
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;

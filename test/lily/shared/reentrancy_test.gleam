@@ -5,7 +5,9 @@
 // =============================================================================
 
 import gleam/list
+
 import gleeunit/should
+
 import lily/server
 import lily/test_support.{Increment}
 import lily/transport
