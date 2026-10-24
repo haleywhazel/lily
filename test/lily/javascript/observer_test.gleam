@@ -235,6 +235,7 @@ pub fn observer_a_snapshot_reports_the_model_before_the_merge_test() {
   handler.received(
     frame(transport.Snapshot(
       target: transport.Session,
+      epoch: 0,
       sequence: 4,
       state: incoming,
     )),

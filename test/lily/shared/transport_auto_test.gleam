@@ -6,6 +6,7 @@
 // =============================================================================
 
 import gleam/list
+import gleam/option
 
 import gleeunit/should
 
@@ -83,14 +84,24 @@ pub fn auto_roundtrip_multi_field_test() {
   let model =
     test_support.Model(..test_support.initial_model(), count: 5, name: "Bob")
 
-  assert_roundtrips(Snapshot(target: Session, sequence: 1, state: model))
+  assert_roundtrips(Snapshot(
+    target: Session,
+    epoch: 0,
+    sequence: 1,
+    state: model,
+  ))
 }
 
 pub fn auto_roundtrip_boolean_field_test() {
   let model =
     test_support.Model(..test_support.initial_model(), connected: True)
 
-  assert_roundtrips(Snapshot(target: Session, sequence: 0, state: model))
+  assert_roundtrips(Snapshot(
+    target: Session,
+    epoch: 0,
+    sequence: 0,
+    state: model,
+  ))
 }
 
 // =============================================================================
@@ -106,7 +117,7 @@ pub fn auto_roundtrip_topic_update_test() {
 }
 
 pub fn auto_roundtrip_resync_test() {
-  assert_roundtrips(Resync(cursors: [Session]))
+  assert_roundtrips(Resync(cursors: [transport.Unknown(Session)]))
 }
 
 pub fn auto_roundtrip_acknowledge_test() {
@@ -121,7 +132,12 @@ pub fn auto_roundtrip_nested_test() {
   let inner =
     test_support.Model(..test_support.initial_model(), count: 3, name: "Eve")
   let frame: transport.Protocol(test_support.Nested, Message) =
-    Snapshot(target: Session, sequence: 1, state: test_support.Nested(inner:))
+    Snapshot(
+      target: Session,
+      epoch: 0,
+      sequence: 1,
+      state: test_support.Nested(inner:),
+    )
 
   roundtrip(frame, json())
   |> should.equal(Ok(frame))
@@ -131,6 +147,7 @@ pub fn auto_roundtrip_list_field_test() {
   let frame: transport.Protocol(test_support.WithList, Message) =
     Snapshot(
       target: Session,
+      epoch: 0,
       sequence: 0,
       state: test_support.WithList(items: [1, 2, 3]),
     )
@@ -290,4 +307,32 @@ pub fn auto_invalid_bytes_returns_error_test() {
 
   transport.decode(<<0xFF, 0xFE, 0x00>>, serialiser:)
   |> should.be_error
+}
+
+// =============================================================================
+// PEEK
+// =============================================================================
+
+pub fn auto_peek_reads_a_message_target_from_either_format_test() {
+  let session = transport.SessionMessage(payload: test_support.Increment)
+  let topic =
+    transport.TopicMessage(topic_id: "room:1", payload: test_support.Increment)
+  list.each([transport.Json, transport.MessagePack], fn(format) {
+    let serialiser = test_support.automatic_serialiser(format)
+    transport.encode(session, serialiser:)
+    |> transport.peek_target
+    |> should.equal(option.Some(transport.Session))
+    transport.encode(topic, serialiser:)
+    |> transport.peek_target
+    |> should.equal(option.Some(transport.Topic("room:1")))
+    transport.encode(transport.Subscribe(topic_id: "room:1"), serialiser:)
+    |> transport.peek_target
+    |> should.equal(option.None)
+  })
+  transport.peek_target(<<
+    "{\"type\":\"topic_message\",\"topic_id\":\"a\\\"b\"",
+  >>)
+  |> should.equal(option.Some(transport.Topic("a\"b")))
+  transport.peek_target(<<"junk">>)
+  |> should.equal(option.None)
 }

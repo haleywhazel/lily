@@ -3,10 +3,9 @@
 //// rendering keeps them light (lighter than Lustre or LiveView components, for
 //// example), and having a lot of components is not an anti-pattern in Lily.
 ////
-//// Each component is a [`ComponentType`](#ComponentType) plus zero or more
-//// [`Decoration`](#Decoration)s (the things you pipe on, like a transition or
-//// an event listener). Don't reach for the constructors directly, call the
-//// builder function for the type you want.
+//// Each component is one of the kinds below plus whatever you pipe onto it,
+//// such as a [`transition`](#transition) or an event listener from
+//// [event](./event.html).
 ////
 //// There are five kinds, and every one takes a `render` function that returns
 //// your `html` type:
@@ -53,8 +52,8 @@
 //// ```gleam
 //// component.live(
 ////   slice: fn(model) { model.is_active },
-////   render: fn(_, nest) {
-////     html.section([attribute.class("column")], [
+////   render: fn(is_active, nest) {
+////     html.section([attribute.classes([#("active", is_active)])], [
 ////       html.h2([], [html.text("Title")]),
 ////       nest(component.each(
 ////         slice: fn(model) { cards_for(model) },
@@ -208,6 +207,8 @@ import gleam/string
 
 import lily/client.{type Runtime}
 import lily/internal/codec
+import lily/store
+import lily/transport
 
 // =============================================================================
 // PUBLIC TYPES
@@ -285,7 +286,7 @@ pub fn duration(
 ///   slice: fn(model) { model.counters },
 ///   key: fn(counter) { counter.id },
 ///   render: fn(counter, _) {
-///     html.div([class("counter")], [
+///     html.div([attribute.class("counter")], [
 ///       html.text(int.to_string(counter.value))
 ///     ])
 ///   }
@@ -365,8 +366,10 @@ pub fn fragment(
 ///   slice: fn(model) { model.data },
 ///   render: fn(data, _) {
 ///     html.div([], [
-///       html.span([class("value")], [html.text(int.to_string(data))]),
-///       html.div([class("bar")], [])
+///       html.span([attribute.class("value")], [
+///         html.text(int.to_string(data)),
+///       ]),
+///       html.div([attribute.class("bar")], [])
 ///     ])
 ///   },
 ///   patch: fn(data) {
@@ -399,7 +402,8 @@ pub fn live(
 ///
 /// Clicks on an element whose `data-lily-message` comes from
 /// [`event.encode_message`](./event.html#encode_message) are dispatched for
-/// you.
+/// you. A message that fails the store's [`schema`](./store.html#schema), or
+/// an attribute over 16 KiB, is ignored.
 ///
 /// Mount other selectors on the same runtime to drive several roots from one
 /// model. Mounting the same selector again replaces it.
@@ -432,7 +436,12 @@ pub fn mount(
       to_html,
       to_placeholder,
       client.dispatch(runtime),
-      codec.decode_data_message,
+      // markup from data can name any registered constructor, the schema
+      // holds a click to what a client message may be
+      codec.decode_data_message_with(
+        _,
+        transport.message_conformer(store.schema_of(client.store_of(runtime))),
+      ),
     )
   })
   runtime

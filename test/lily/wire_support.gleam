@@ -85,24 +85,54 @@ pub fn await_down(pid: process.Pid) -> Nil {
   Nil
 }
 
-pub fn decode(bytes: BitArray) -> Frame {
-  let assert Ok(protocol) =
-    transport.decode(bytes, serialiser: test_support.custom_serialiser())
-  protocol
+/// The snapshot a `chat` subscriber gets of `model`, epoch read as 0.
+pub fn chat_snapshot(model: Model) -> Frame {
+  transport.Snapshot(
+    target: transport.Topic("chat"),
+    epoch: 0,
+    sequence: 0,
+    state: model,
+  )
 }
 
-/// Automatic serialiser, reads either format.
+/// A snapshot's epoch is random per server, read as 0 so frames compare, see
+/// [`decode_exact`](#decode_exact).
+pub fn decode(bytes: BitArray) -> Frame {
+  without_epoch(decode_exact(bytes))
+}
+
+/// Automatic serialiser, reads either format, epochs read as 0.
 pub fn decode_automatic(bytes: BitArray) -> Frame {
   let assert Ok(protocol) =
     transport.decode(
       bytes,
       serialiser: test_support.automatic_serialiser(transport.Json),
     )
+  without_epoch(protocol)
+}
+
+/// Keeps the epoch.
+pub fn decode_exact(bytes: BitArray) -> Frame {
+  let assert Ok(protocol) =
+    transport.decode(bytes, serialiser: test_support.custom_serialiser())
   protocol
 }
 
 pub fn encode(frame: Frame) -> BitArray {
   transport.encode(frame, serialiser: test_support.custom_serialiser())
+}
+
+@target(erlang)
+/// Poll `condition` for up to `within` ms, for changes with no message.
+pub fn eventually(condition: fn() -> Bool, within within: Int) -> Bool {
+  case condition() {
+    True -> True
+    False if within <= 0 -> False
+    False -> {
+      process.sleep(2)
+      eventually(condition, within: within - 2)
+    }
+  }
 }
 
 pub fn is_snapshot(frame: Frame) -> Bool {
@@ -227,18 +257,25 @@ pub fn recorder() -> #(fn(value) -> Nil, fn() -> List(value)) {
 }
 
 pub fn resync_session(connection: Connection(Model, Message)) -> Nil {
-  send(connection, transport.Resync(cursors: [transport.Session]))
+  send(
+    connection,
+    transport.Resync(cursors: [transport.Unknown(transport.Session)]),
+  )
 }
 
 pub fn resync_topic(
   connection: Connection(Model, Message),
   topic_id: String,
 ) -> Nil {
-  send(connection, transport.Resync(cursors: [transport.Topic(topic_id)]))
+  send(
+    connection,
+    transport.Resync(cursors: [transport.Unknown(transport.Topic(topic_id))]),
+  )
 }
 
 pub fn send(connection: Connection(Model, Message), frame: Frame) -> Nil {
-  server.incoming(connection, bytes: encode(frame))
+  let _ = server.incoming(connection, bytes: encode(frame))
+  Nil
 }
 
 /// Send with the automatic serialiser in `format`.
@@ -248,7 +285,14 @@ pub fn send_in(
   format: transport.Format,
 ) -> Nil {
   let serialiser = test_support.automatic_serialiser(format)
-  server.incoming(connection, bytes: transport.encode(frame, serialiser:))
+  let _ =
+    server.incoming(connection, bytes: transport.encode(frame, serialiser:))
+  Nil
+}
+
+@target(erlang)
+pub fn server_pid(app: Server(Model, Message)) -> process.Pid {
+  actor.watched_pid(test_support.inspect(app).watched)
 }
 
 pub fn session_message(
@@ -355,6 +399,13 @@ fn settle_round(app: Server(Model, Message)) -> Nil {
         let _ = actor.rescue(topic.subscriber_count)
         Nil
       })
+  }
+}
+
+fn without_epoch(frame: Frame) -> Frame {
+  case frame {
+    transport.Snapshot(..) -> transport.Snapshot(..frame, epoch: 0)
+    _ -> frame
   }
 }
 

@@ -39,7 +39,7 @@
 //// setter, [`navigate`](#navigate) and [`replace`](#replace) move around, and
 //// [`intercept_links`](#intercept_links) lets ordinary `<a href>` links do so
 //// without a page reload. Use [`load`](#load) when the server has to handle
-//// the path.
+//// the path, and [`load_external`](#load_external) for another site.
 ////
 //// State that should outlive a reload is described with
 //// [`persisted_field`](#persisted_field) and switched on with
@@ -53,10 +53,10 @@
 //// [`recover_after_reload`](#recover_after_reload) carries simple fields of
 //// the model across it.
 ////
-//// Four page signals mirror the browser into your model the same way.
+//// Three page signals mirror the browser into your model the same way.
 //// [`visibility`](#visibility) tracks whether the tab is showing,
 //// [`network`](#network) whether the browser is online and
-//// [`viewport`](#viewport) the window's size.
+//// [`viewport`](#viewport) the window's size. Separately,
 //// [`confirm_leaving`](#confirm_leaving) asks before the page is closed with
 //// unsaved changes.
 
@@ -78,7 +78,6 @@ import gleam/uri.{type Uri}
 import lily/client.{type Runtime}
 @target(javascript)
 import lily/internal/actor.{type Box}
-@target(javascript)
 import lily/transport
 
 // =============================================================================
@@ -153,7 +152,7 @@ pub fn connection_status(
 }
 
 /// Reloads the page on every `lily_dev` rebuild while developing. Does nothing
-/// unless the page is on `localhost` or `127.0.0.1`.
+/// unless the page is on `localhost`, `127.0.0.1` or `[::1]`.
 ///
 /// Pair with [`recover_after_reload`](#recover_after_reload) to keep simple
 /// model fields across the reload.
@@ -181,7 +180,11 @@ pub fn hot_reload(
 pub fn intercept_links(
   runtime: Runtime(model, message, mode),
 ) -> Runtime(model, message, mode) {
-  intercept_links_with(runtime, within: "document", opt_out_attribute: opt_out)
+  intercept_links_with(
+    runtime,
+    within: "document",
+    opt_out_attribute: "data-lily-native",
+  )
 }
 
 /// Like [`intercept_links`](#intercept_links) but limited to links inside a
@@ -208,6 +211,10 @@ pub fn intercept_links_with(
 /// Use it when the server has to handle the path, after a logout that clears a
 /// cookie or when entering a server-rendered flow. The connection closes.
 ///
+/// It only loads a page on this origin, a `javascript:` URL or another site is
+/// refused with a warning, which keeps a path that came from data from running
+/// script. Use [`load_external`](#load_external) for another site.
+///
 /// ```gleam
 /// browser.load("/logout")
 /// ```
@@ -215,8 +222,21 @@ pub fn load(path: String) -> Nil {
   ffi_load(path)
 }
 
+/// Full page navigation to another site, such as a payment page. Any origin,
+/// but only an absolute `http` or `https` URL, anything else is refused with a
+/// warning.
+///
+/// ```gleam
+/// browser.load_external("https://pay.example.com/checkout")
+/// ```
+pub fn load_external(url: String) -> Nil {
+  ffi_load_external(url)
+}
+
 /// Pushes a history entry and tells the [`url`](#url) setter, letting the model
 /// follow the new location without a page load.
+///
+/// Only a path on this origin, anything else is refused with a warning.
 ///
 /// ```gleam
 /// browser.navigate("/projects/42")
@@ -299,11 +319,18 @@ pub fn persisted_field(
 /// into `initial` by name. Anything else, a nested custom type, a list or an
 /// option, keeps the fresh value.
 ///
+/// Only on `localhost`, `127.0.0.1` or `[::1]`, elsewhere `initial` comes back
+/// untouched, the stash is a development aid.
+///
 /// ```gleam
 /// let initial = browser.recover_after_reload(shared.initial_model())
 /// ```
 pub fn recover_after_reload(initial: model) -> model {
-  ffi_recover_after_reload(initial)
+  // the stash is only ever written on a dev page, elsewhere it's not ours
+  case transport.is_local_page() {
+    True -> ffi_recover_after_reload(initial)
+    False -> initial
+  }
 }
 
 /// Reloads the current page.
@@ -318,9 +345,12 @@ pub fn reload() -> Nil {
 /// Reloads the page when the server announces a different build than the first
 /// one this runtime saw.
 ///
-/// That means a new deploy or a restarted server. A `ProtocolMismatch`
-/// reloads too, once per pair of protocols. The server and
-/// [`persist`](#persist) bring most state back after the reload.
+/// That means a new deploy or a restarted server. A
+/// [`client.ProtocolMismatch`](./client.html#ClientEvent) reloads too, once
+/// per pair of protocols. At most two such reloads happen in ten seconds and
+/// six in ten minutes, counted in sessionStorage, and without sessionStorage
+/// it doesn't reload at all. The server and [`persist`](#persist) bring most
+/// state back after the reload.
 ///
 /// ```gleam
 /// runtime |> browser.reload_on_new_version
@@ -334,6 +364,8 @@ pub fn reload_on_new_version(
 /// Replaces the current history entry and tells the [`url`](#url) setter.
 /// Companion to [`navigate`](#navigate) for changes that should not add a back
 /// button stop, like a sort order or a filter.
+///
+/// Only a path on this origin, anything else is refused with a warning.
 ///
 /// ```gleam
 /// browser.replace("/projects?sort=newest")
@@ -403,9 +435,7 @@ type LeaveGuard
 // PRIVATE FUNCTIONS
 // =============================================================================
 
-const opt_out = "data-lily-native"
-
-// unchanged so existing stored data survives
+// what stored values are keyed under, changing it would orphan them
 const storage_prefix = "lily_session_"
 
 @target(javascript)
@@ -538,7 +568,7 @@ fn reload_on_new_version_in_page(
         case actor.box_get(baseline) {
           None -> actor.box_set(baseline, Some(hash))
           Some(first) if first == hash -> Nil
-          Some(_) -> ffi_reload()
+          Some(_) -> ffi_reload_for_version()
         }
       }
       // a new build brings a client that speaks the server's protocol
@@ -598,6 +628,11 @@ fn ffi_load(_path: String) -> Nil {
   Nil
 }
 
+@external(javascript, "./browser.ffi.mjs", "loadExternal")
+fn ffi_load_external(_url: String) -> Nil {
+  Nil
+}
+
 @external(javascript, "./browser.ffi.mjs", "navigate")
 fn ffi_navigate(_path: String) -> Nil {
   Nil
@@ -616,6 +651,10 @@ fn ffi_reload() -> Nil {
 @target(javascript)
 @external(javascript, "./browser.ffi.mjs", "reloadForProtocol")
 fn ffi_reload_for_protocol(server: Int, client: Int) -> Nil
+
+@target(javascript)
+@external(javascript, "./browser.ffi.mjs", "reloadForVersion")
+fn ffi_reload_for_version() -> Nil
 
 @external(javascript, "./browser.ffi.mjs", "replace")
 fn ffi_replace(_path: String) -> Nil {

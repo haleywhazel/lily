@@ -27,7 +27,7 @@ fn round_trip(frame: Protocol(Model, Message)) -> Nil {
 
 fn open_server() -> server.Server(Model, Message) {
   test_support.start_server(server.new(
-    test_support.open_session_store(),
+    test_support.session_store(),
     origins: server.AnyOrigin,
   ))
 }
@@ -45,13 +45,22 @@ pub fn open_serialiser_round_trips_every_frame_test() {
     transport.Dropped(target: transport.Session),
     transport.Dropped(target: transport.Topic("chat")),
     transport.Rejected(topic_id: "t", reason: transport.AccessDenied),
-    transport.Resync(cursors: [transport.Session, transport.Topic("a")]),
+    transport.Resync(cursors: [
+      transport.Unknown(transport.Session),
+      transport.Unknown(transport.Topic("a")),
+    ]),
     transport.Resync(cursors: []),
     transport.SessionMessage(payload: Increment),
     transport.SessionUpdate(sequence: 4, payload: SetName("x")),
-    transport.Snapshot(target: transport.Session, sequence: 5, state: model),
+    transport.Snapshot(
+      target: transport.Session,
+      epoch: 0,
+      sequence: 5,
+      state: model,
+    ),
     transport.Snapshot(
       target: transport.Topic("room:1"),
+      epoch: 0,
       sequence: 0,
       state: model,
     ),
@@ -128,7 +137,7 @@ pub fn open_serialiser_server_answers_a_resync_with_a_snapshot_test() {
   server.incoming(
     connection,
     bytes: transport.encode(
-      transport.Resync(cursors: [transport.Session]),
+      transport.Resync(cursors: [transport.Unknown(transport.Session)]),
       serialiser: test_support.custom_serialiser(),
     ),
   )
@@ -137,6 +146,7 @@ pub fn open_serialiser_server_answers_a_resync_with_a_snapshot_test() {
   |> should.equal([
     transport.Snapshot(
       target: transport.Session,
+      epoch: 0,
       sequence: 1,
       state: test_support.Model(..test_support.initial_model(), count: 1),
     ),

@@ -6,6 +6,9 @@
 // IMPORTS
 // =============================================================================
 
+import gleam/list
+import gleam/string
+
 import gleeunit/should
 
 import lily/internal/actor.{type Cell, Continue, Reply}
@@ -142,6 +145,16 @@ pub fn rescue_captures_panic_as_error_test() {
   |> should.be_error
 }
 
+pub fn rescue_bounds_a_huge_reason_to_one_line_test() {
+  let huge = string.repeat("a line\n", 10_000)
+  let assert Error(reason) = actor.rescue(fn() { panic as huge })
+
+  { string.length(reason) < 1100 }
+  |> should.be_true
+  string.contains(reason, "\n")
+  |> should.be_false
+}
+
 pub fn rescue_or_returns_the_default_on_a_crash_test() {
   actor.rescue_or("test", 7, fn() { panic as "boom" })
   |> should.equal(7)
@@ -160,4 +173,19 @@ pub fn rescue_send_reports_a_crashing_send_test() {
 pub fn rescue_send_reports_a_working_send_test() {
   actor.rescue_send("test", fn(_) { Nil }, <<1>>)
   |> should.be_true
+}
+
+// =============================================================================
+// LIMITED LOGS
+// =============================================================================
+
+pub fn rescue_or_logs_a_repeated_crash_once_per_window_test() {
+  test_support.capture_log_levels(fn() {
+    list.repeat(Nil, 5)
+    |> list.each(fn(_) {
+      actor.rescue_or("repeated", Nil, fn() { panic as "again" })
+    })
+  })
+  |> list.count(fn(line) { string.contains(line.1, "repeated crashed") })
+  |> should.equal(1)
 }

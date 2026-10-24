@@ -74,7 +74,6 @@ pub fn render_fragment_concatenates_children_test() {
 // =============================================================================
 
 pub fn render_each_renders_per_item_test() {
-  // initial_model has 3 default cards
   render(fn(_) {
     component.each(
       slice: fn(_) { [1, 2, 3] },

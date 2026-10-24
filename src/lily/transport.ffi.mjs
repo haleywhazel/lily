@@ -10,6 +10,7 @@
 // =============================================================================
 
 import { BitArray, Error as GleamError, Ok, toList } from "../gleam.mjs";
+import { log } from "./internal/actor.ffi.mjs";
 
 // re-exported for user FFIs, the registry lives in codec
 export { registerModule } from "./internal/codec.ffi.mjs";
@@ -21,31 +22,37 @@ export { registerModule } from "./internal/codec.ffi.mjs";
 /**
  * `makeConnectorHandler` and `makeChannel` are passed-in Gleam constructors.
  * The first frame sent after an open goes ahead of the queue, which flushes
- * right behind it. The runtime sends its `Resync` there.
+ * right behind it. The runtime sends its `Resync` there, and never queues it,
+ * the next open sends a fresh one. Frames queued under another queue
+ * version, stored as `protocol`, are dropped, they'd be read as something
+ * else.
  */
 export function offlineConnect(
   connect,
   storageKey,
+  protocol,
   handler,
   makeConnectorHandler,
   makeChannel,
 ) {
-  const queue = createOfflineQueue(storageKey);
+  const queue = createOfflineQueue(storageKey, protocol);
   let channel = null;
   let leading = false;
+  // between an open and its close, when a queued frame may go out early
+  let open = false;
 
   function flush() {
     if (!channel || queue.size === 0) return;
     let sent = 0;
     for (const frame of queue.all()) {
-      if (channel.send(new BitArray(frame)) instanceof GleamError) break;
+      if (sendSafely(channel, new BitArray(frame)) instanceof GleamError) break;
       sent++;
     }
     queue.drainSent(sent);
   }
 
   function sendOrQueue(bytes) {
-    const result = channel.send(bytes);
+    const result = sendSafely(channel, bytes);
     if (result instanceof GleamError) queue.queuePending(bytes.rawBuffer);
     return result;
   }
@@ -55,6 +62,7 @@ export function offlineConnect(
       handler.received,
       () => {
         leading = true;
+        open = true;
         handler.opened();
         // nothing was sent while opening, flush anyway
         if (leading && channel) {
@@ -64,6 +72,7 @@ export function offlineConnect(
       },
       () => {
         leading = false;
+        open = false;
         handler.closed();
       },
     ),
@@ -73,23 +82,27 @@ export function offlineConnect(
     (bytes) => {
       if (leading) {
         leading = false;
-        const result = sendOrQueue(bytes);
+        const result = channel ? sendSafely(channel, bytes) : new GleamError();
         flush();
         return result;
       }
-      // behind frames still queued, keeps the order
+      // a send that failed once while open shouldn't stall the rest, the
+      // queue gets another go first, and a frame behind it keeps the order
+      if (open && queue.size > 0) flush();
       if (queue.size > 0) {
         queue.queuePending(bytes.rawBuffer);
         return new GleamError(undefined);
       }
-      return sendOrQueue(bytes);
+      return channel ? sendOrQueue(bytes) : queueOnly(queue, bytes);
     },
     () => channel.close(),
   );
 }
 
-export function offlinePending(storageKey) {
-  return toList(readQueue(storageKey).map((frame) => new BitArray(frame)));
+export function offlinePending(storageKey, protocol) {
+  return toList(
+    readQueue(storageKey, protocol).map((frame) => new BitArray(frame)),
+  );
 }
 
 export function pageHostname() {
@@ -105,6 +118,22 @@ export function websocketConnect(
   handler,
   makeChannel,
 ) {
+  // a hot loop or a timer past what setTimeout holds would both misbehave
+  reconnectBase = Math.max(reconnectBase, 50);
+  reconnectMax = Math.min(Math.max(reconnectMax, reconnectBase), 2 ** 31 - 1);
+  jitterRatio = Math.min(Math.max(jitterRatio, 0), 1);
+  multiplier = Math.max(multiplier, 1);
+  const address = resolveSocketUrl(url);
+  if (address === null) {
+    log(
+      "error",
+      `lily: ${JSON.stringify(url)} isn't a WebSocket URL, not connecting`,
+    );
+    return makeChannel(
+      () => new GleamError(undefined),
+      () => undefined,
+    );
+  }
   let socket = null;
   let reconnectDelay = reconnectBase;
   let reconnectTimer = null;
@@ -117,7 +146,7 @@ export function websocketConnect(
     }
 
     try {
-      socket = new WebSocket(resolveSocketUrl(url));
+      socket = new WebSocket(address);
       socket.binaryType = "arraybuffer";
     } catch (_error) {
       scheduleReconnect();
@@ -125,11 +154,13 @@ export function websocketConnect(
     }
 
     socket.onopen = function () {
-      reconnectDelay = reconnectBase;
       handler.opened();
     };
 
+    // a server that closes every socket straight away still backs off, the
+    // delay only resets once one has heard from it
     socket.onmessage = function (event) {
+      reconnectDelay = reconnectBase;
       if (event.data instanceof ArrayBuffer) {
         handler.received(new BitArray(new Uint8Array(event.data)));
       } else if (typeof event.data === "string") {
@@ -198,19 +229,25 @@ function base64ToFrame(text) {
   return bytes;
 }
 
-/** Seeded from storage, letting early frames join an earlier page's queue. */
-function createOfflineQueue(storageKey) {
-  let pending = readQueue(storageKey);
+// seeded from storage, letting early frames join an earlier page's queue
+function createOfflineQueue(storageKey, protocol) {
+  let pending = readQueue(storageKey, protocol);
   let persistScheduled = false;
 
   function persist() {
     try {
       sessionStorage.setItem(
         storageKey,
-        JSON.stringify(pending.map(frameToBase64)),
+        JSON.stringify({ protocol, frames: pending.map(frameToBase64) }),
       );
     } catch (_error) {
-      // quota exceeded, frames stay in memory
+      // quota exceeded, frames stay in memory and a stale copy mustn't be
+      // sent again after a reload
+      try {
+        sessionStorage.removeItem(storageKey);
+      } catch (_ignored) {
+        // storage unavailable
+      }
     }
   }
 
@@ -265,20 +302,54 @@ function frameToBase64(frame) {
   return globalThis.btoa(parts.join(""));
 }
 
-function readQueue(storageKey) {
+// held while there's no channel yet, sent once it opens
+function queueOnly(queue, bytes) {
+  queue.queuePending(bytes.rawBuffer);
+  return new GleamError(undefined);
+}
+
+// a bare array is a version 1 queue
+function readQueue(storageKey, protocol) {
   try {
     const raw = sessionStorage.getItem(storageKey);
-    return raw ? JSON.parse(raw).map(base64ToFrame) : [];
+    if (!raw) return [];
+    const stored = JSON.parse(raw);
+    const frames = Array.isArray(stored)
+      ? protocol === 1
+        ? stored
+        : []
+      : stored?.protocol === protocol && Array.isArray(stored.frames)
+        ? stored.frames
+        : [];
+    if (frames.length === 0) sessionStorage.removeItem(storageKey);
+    return frames.map(base64ToFrame);
   } catch (_error) {
     return [];
   }
 }
 
+// ws or wss for the page's scheme, `null` for a URL that can't be either
 function resolveSocketUrl(url) {
-  if (/^wss?:/i.test(url) || !globalThis.location) return url;
-  const resolved = new URL(url, globalThis.location.href);
-  resolved.protocol = resolved.protocol === "https:" ? "wss:" : "ws:";
-  return resolved.href;
+  const trimmed = url.trim();
+  if (!globalThis.location) return /^wss?:/i.test(trimmed) ? trimmed : null;
+  try {
+    const resolved = new URL(trimmed, globalThis.location.href);
+    const scheme = SOCKET_SCHEMES[resolved.protocol];
+    if (!scheme) return null;
+    resolved.protocol = scheme;
+    return resolved.href;
+  } catch (_error) {
+    return null;
+  }
+}
+
+// a custom channel's send can throw, that's a frame that didn't go out
+function sendSafely(channel, bytes) {
+  try {
+    return channel.send(bytes);
+  } catch (_error) {
+    return new GleamError(undefined);
+  }
 }
 
 // =============================================================================
@@ -287,5 +358,12 @@ function resolveSocketUrl(url) {
 
 // bytes per fromCharCode call
 const BASE64_CHUNK = 0x8000;
+
+const SOCKET_SCHEMES = {
+  "http:": "ws:",
+  "https:": "wss:",
+  "ws:": "ws:",
+  "wss:": "wss:",
+};
 
 const TEXT_ENCODER = new TextEncoder();

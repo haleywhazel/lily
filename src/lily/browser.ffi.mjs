@@ -8,7 +8,7 @@
 // IMPORTS
 // =============================================================================
 
-import { Ok, Error } from "../gleam.mjs";
+import { Error, List, Ok } from "../gleam.mjs";
 import { parse as parseUri } from "../../gleam_stdlib/gleam/uri.mjs";
 import { log } from "./internal/actor.ffi.mjs";
 
@@ -16,14 +16,19 @@ import { log } from "./internal/actor.ffi.mjs";
 // EXPORT FUNCTIONS
 // =============================================================================
 
+/** Blocked storage throws on access, it's left alone. */
 export function clearStored(prefix) {
-  if (typeof localStorage === "undefined") return;
-  const keys = [];
-  for (let index = 0; index < localStorage.length; index++) {
-    const key = localStorage.key(index);
-    if (key && key.startsWith(prefix)) keys.push(key);
+  try {
+    if (typeof localStorage === "undefined") return;
+    const keys = [];
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index);
+      if (key && key.startsWith(prefix)) keys.push(key);
+    }
+    for (const key of keys) localStorage.removeItem(key);
+  } catch (_error) {
+    // storage blocked, nothing to clear
   }
-  for (const key of keys) localStorage.removeItem(key);
 }
 
 export function forgetProtocolReload() {
@@ -36,6 +41,7 @@ export function forgetProtocolReload() {
 
 /** Listening only while a guard holds, a standing one blocks the bfcache. */
 export function holdLeaveGuard(guard, holds) {
+  if (typeof window === "undefined") return;
   if (holds) holdingGuards.add(guard);
   else holdingGuards.delete(guard);
   if (holdingGuards.size > 0) {
@@ -76,18 +82,20 @@ export function installLinkInterception(owner, navigate, within, optOut) {
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
       return;
     }
-    const target = event.target;
-    const anchor = target && target.closest ? target.closest("a") : null;
+    // the nearest link on the composed path, inside a shadow root or around
+    // one, a shadow root retargets `event.target` to its host
+    const path = event.composedPath?.() ?? [event.target];
+    const anchor = path.find((node) => node?.tagName === "A") ?? null;
     if (!anchor) return;
     // no href, a placeholder
     if (!anchor.hasAttribute("href")) return;
-    if (within !== "document" && !anchor.closest(within)) return;
+    if (within !== "document" && !closestSafely(anchor, within)) return;
     if (anchor.hasAttribute(optOut)) return;
     const anchorTarget = anchor.getAttribute("target");
     if (anchorTarget && anchorTarget !== "_self") return;
     if (anchor.hasAttribute("download")) return;
     const rel = anchor.getAttribute("rel");
-    if (rel && rel.split(/\s+/).includes("external")) return;
+    if (rel && rel.toLowerCase().split(/\s+/).includes("external")) return;
     // mailto, tel, sms and javascript schemes
     if (anchor.protocol !== "http:" && anchor.protocol !== "https:") return;
     if (anchor.origin !== window.location.origin) return;
@@ -111,6 +119,7 @@ export function listenLocation(apply) {
 }
 
 export function listenNetwork(runtime, apply) {
+  if (typeof window === "undefined") return runtime;
   const report = () => apply(navigator.onLine !== false);
   onPage(window, "online", report);
   onPage(window, "offline", report);
@@ -120,6 +129,7 @@ export function listenNetwork(runtime, apply) {
 
 // at most once a frame while the window is dragged
 export function listenViewport(runtime, apply) {
+  if (typeof window === "undefined") return runtime;
   let pending = false;
   const report = () => {
     pending = false;
@@ -139,14 +149,46 @@ export function listenViewport(runtime, apply) {
 }
 
 export function listenVisibility(runtime, apply) {
+  if (typeof document === "undefined") return runtime;
   const report = () => apply(document.visibilityState !== "hidden");
   onPage(document, "visibilitychange", report);
   report();
   return runtime;
 }
 
+/** This origin only, `javascript:` and other sites are refused. */
 export function load(path) {
-  if (typeof window !== "undefined") window.location.assign(path);
+  if (typeof window === "undefined") return;
+  const url = sameOriginUrl(path);
+  if (!url) {
+    log(
+      "warn",
+      `lily: browser.load refused ${JSON.stringify(path)}, it only loads ` +
+        "pages on this origin, use browser.load_external for another site",
+    );
+    return;
+  }
+  window.location.assign(url.href);
+}
+
+/** Any origin, but only an absolute http or https URL. */
+export function loadExternal(address) {
+  if (typeof window === "undefined") return;
+  let url;
+  try {
+    url = new URL(address);
+  } catch (_error) {
+    url = null;
+  }
+  if (!url || !WEB_PROTOCOLS.has(url.protocol)) {
+    log(
+      "warn",
+      `lily: browser.load_external refused ${JSON.stringify(address)}, it ` +
+        "only loads an absolute http or https URL",
+    );
+    return;
+  }
+  window.location.assign(url.href);
 }
 
 export function navigate(path) {
@@ -173,10 +215,17 @@ export function readStored(key) {
 
 /** Adopts only same-typed top-level primitives, the rest stay fresh. */
 export function recoverAfterReload(initial) {
-  if (typeof sessionStorage === "undefined") return initial;
-  const raw = sessionStorage.getItem(RELOAD_STASH_KEY);
-  if (!raw) return initial;
-  sessionStorage.removeItem(RELOAD_STASH_KEY);
+  // only a record's fields, a tuple, list or number model starts fresh
+  if (!isPlainRecord(initial)) return initial;
+  let raw;
+  try {
+    if (typeof sessionStorage === "undefined") return initial;
+    raw = sessionStorage.getItem(RELOAD_STASH_KEY);
+    if (!raw) return initial;
+    sessionStorage.removeItem(RELOAD_STASH_KEY);
+  } catch (_error) {
+    return initial;
+  }
 
   let stashed;
   try {
@@ -184,13 +233,18 @@ export function recoverAfterReload(initial) {
   } catch (_error) {
     return initial;
   }
-  if (stashed === null || typeof stashed !== "object") return initial;
+  if (
+    stashed === null ||
+    typeof stashed !== "object" ||
+    Array.isArray(stashed)
+  ) {
+    return initial;
+  }
 
   const merged = Object.create(Object.getPrototypeOf(initial));
   for (const key of Object.keys(initial)) {
     const stashedValue = stashed[key];
-    const isPrimitive =
-      stashedValue === null || PRIMITIVE_TYPES.has(typeof stashedValue);
+    const isPrimitive = PRIMITIVE_TYPES.has(typeof stashedValue);
     const sameType = typeof stashedValue === typeof initial[key];
     merged[key] =
       key in stashed && isPrimitive && sameType ? stashedValue : initial[key];
@@ -216,7 +270,20 @@ export function reloadForProtocol(server, client) {
     }
     sessionStorage.setItem(PROTOCOL_RELOAD_KEY, pair);
   } catch (_error) {
-    // without storage there is no guard, one reload is still right
+    // without storage nothing could stop a loop, reloadForVersion refuses
+  }
+  reloadForVersion();
+}
+
+/** Bounded, a server flipping builds or protocols can't loop the page. */
+export function reloadForVersion() {
+  if (!versionReloadAllowed()) {
+    log(
+      "warn",
+      "lily: the server announced another build again, not reloading, the " +
+        "page reloaded for a new build too often already",
+    );
+    return;
   }
   reload();
 }
@@ -243,14 +310,34 @@ function askBeforeLeaving(event) {
   event.returnValue = "";
 }
 
-/** History calls emit no popstate, leaving us to fire our own event. */
+// history calls emit no popstate, so this fires our own event
 function changeHistory(method, path) {
   if (typeof window === "undefined") return;
-  window.history[method]({}, "", path);
+  // the browser refuses another origin by throwing, this refuses it with a
+  // warning
+  const url = sameOriginUrl(path);
+  if (!url) {
+    log(
+      "warn",
+      `lily: refused to navigate to ${JSON.stringify(path)}, it isn't a ` +
+        "page on this origin",
+    );
+    return;
+  }
+  window.history[method]({}, "", url.href);
   window.dispatchEvent(new Event(LOCATION_EVENT));
 }
 
-/** Stashes the live model before each reload for recoverAfterReload. */
+// an invalid `within` selector throws, it then matches nothing
+function closestSafely(element, selector) {
+  try {
+    return element.closest(selector);
+  } catch (_error) {
+    return null;
+  }
+}
+
+// stashes the live model before each reload for recoverAfterReload
 function connectDevReload(
   getModel,
   target,
@@ -262,7 +349,8 @@ function connectDevReload(
     socket.onmessage = (event) => {
       let changed = [];
       try {
-        changed = JSON.parse(event.data).changed || [];
+        const parsed = JSON.parse(event.data).changed;
+        changed = Array.isArray(parsed) ? parsed.map(String) : [];
       } catch (_error) {
         changed = [];
       }
@@ -276,18 +364,37 @@ function connectDevReload(
       stashModelForReload(getModel());
       window.location.reload();
     };
-    socket.onclose = () => setTimeout(open, reconnectMilliseconds);
+    socket.onopen = () => {
+      wait = reconnectMilliseconds;
+    };
+    // no dev server answering, the wait grows to 30 s rather than retrying
+    // every second
+    socket.onclose = () => {
+      setTimeout(open, wait);
+      wait = Math.min(wait * 2, 30_000);
+    };
   };
+  let wait = reconnectMilliseconds;
   open();
 }
 
-/** Page port plus one, sparing the app a route. */
+// page port plus one, sparing the app a route
 function devReloadUrl() {
   const isSecure = window.location.protocol === "https:";
   const protocol = isSecure ? "wss:" : "ws:";
   const defaultPort = isSecure ? 443 : 80;
   const port = Number(window.location.port || defaultPort) + 1;
   return `${protocol}//${window.location.hostname}:${port}/dev-reload`;
+}
+
+// a Gleam record or a plain object, not a list, tuple or primitive
+function isPlainRecord(value) {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    !(value instanceof List)
+  );
 }
 
 // one page listener per event, every call adds a callback to it
@@ -303,7 +410,7 @@ function onPage(target, name, callback) {
   callbacks.push(callback);
 }
 
-/** In sessionStorage to survive the reload it guards. */
+// in sessionStorage to survive the reload it guards
 function reloadedTooRecently(guardMilliseconds) {
   try {
     const now = new Date().getTime();
@@ -316,11 +423,54 @@ function reloadedTooRecently(guardMilliseconds) {
   }
 }
 
+// an http(s) URL on this origin or null, a page served from `file:` or an
+// app shell's own scheme has no origin, so its own scheme and host count
+function sameOriginUrl(path) {
+  try {
+    const page = new URL(window.location.href);
+    const url = new URL(path, page);
+    if (WEB_PROTOCOLS.has(url.protocol)) {
+      return url.origin === window.location.origin ? url : null;
+    }
+    const own =
+      !WEB_PROTOCOLS.has(page.protocol) &&
+      !UNSAFE_PROTOCOLS.has(url.protocol) &&
+      url.protocol === page.protocol &&
+      url.host === page.host;
+    return own ? url : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
 function stashModelForReload(model) {
   try {
     sessionStorage.setItem(RELOAD_STASH_KEY, JSON.stringify(model));
   } catch (_error) {
     // recoverAfterReload then keeps the fresh model
+  }
+}
+
+// two in ten seconds and six in ten minutes, a server alternating builds
+// behind a load balancer stops reloading too, counted in sessionStorage to
+// survive the reloads and refused without it
+function versionReloadAllowed() {
+  try {
+    const now = new Date().getTime();
+    const stored = JSON.parse(
+      sessionStorage.getItem(VERSION_RELOAD_KEY) || "[]",
+    );
+    const recent = (Array.isArray(stored) ? stored : []).filter(
+      (at) => typeof at === "number" && now - at < 600_000,
+    );
+    const burst = recent.filter((at) => now - at < 10_000);
+    if (burst.length >= 2) return false;
+    if (recent.length >= 6) return false;
+    recent.push(now);
+    sessionStorage.setItem(VERSION_RELOAD_KEY, JSON.stringify(recent));
+    return true;
+  } catch (_error) {
+    return false;
   }
 }
 
@@ -345,7 +495,19 @@ const PRIMITIVE_TYPES = new Set(["string", "number", "boolean"]);
 // the protocol pair a reload was last made for
 const PROTOCOL_RELOAD_KEY = "lily_protocol_reload";
 
-// shared with the client, one timestamp
+// when the dev server last reloaded the page
 const RELOAD_GUARD_KEY = "lily_dev_last_reload";
 
 const RELOAD_STASH_KEY = "lily_dev_reload_state";
+
+// never a page of the app's, whatever scheme it's served from
+const UNSAFE_PROTOCOLS = new Set([
+  "blob:",
+  "data:",
+  "javascript:",
+  "vbscript:",
+]);
+
+const VERSION_RELOAD_KEY = "lily_version_reloads";
+
+const WEB_PROTOCOLS = new Set(["http:", "https:"]);

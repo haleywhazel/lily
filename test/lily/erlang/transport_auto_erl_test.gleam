@@ -6,12 +6,15 @@
 // =============================================================================
 
 @target(erlang)
+import gleam/string
+
+@target(erlang)
 import gleeunit/should
 
 @target(erlang)
-import lily/test_support.{type Message, type Model}
+import lily/test_support.{type Message, type Model, SetName}
 @target(erlang)
-import lily/transport.{Acknowledge, Session}
+import lily/transport.{Acknowledge, Session, SessionMessage, Subscribe}
 
 // =============================================================================
 // MODULES
@@ -39,3 +42,38 @@ pub fn auto_erl_modules_do_not_change_the_wire_on_the_server_test() {
   |> transport.decode(serialiser: plain)
   |> should.equal(Ok(frame))
 }
+
+// =============================================================================
+// RETENTION
+// =============================================================================
+
+@target(erlang)
+pub fn auto_erl_decoded_strings_do_not_retain_the_frame_test() {
+  let serialiser: transport.Serialiser(Model, Message) =
+    transport.automatic(
+      format: transport.MessagePack,
+      max_decode_depth: 128,
+      modules: [],
+    )
+  let long = string.repeat("x", 200)
+
+  let assert Ok(Subscribe(topic_id:)) =
+    transport.encode(Subscribe(topic_id: long), serialiser:)
+    |> transport.decode(serialiser:)
+  referenced_byte_size(topic_id)
+  |> should.equal(200)
+
+  let assert Ok(SessionMessage(payload: SetName(name))) =
+    transport.encode(SessionMessage(payload: SetName(long)), serialiser:)
+    |> transport.decode(serialiser:)
+  referenced_byte_size(name)
+  |> should.equal(200)
+}
+
+// =============================================================================
+// PRIVATE FFI
+// =============================================================================
+
+@target(erlang)
+@external(erlang, "binary", "referenced_byte_size")
+fn referenced_byte_size(text: String) -> Int

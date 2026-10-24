@@ -182,6 +182,31 @@ pub fn auto_js_resolve_for_page_settles_by_host_to_json_test() {
 }
 
 // =============================================================================
+// INPUT HYGIENE
+// =============================================================================
+
+@target(javascript)
+pub fn auto_js_refuses_a_lone_surrogate_topic_id_test() {
+  let serialiser =
+    transport.automatic(
+      format: transport.Json,
+      max_decode_depth: 128,
+      modules: [],
+    )
+
+  transport.decode(
+    <<"{\"type\":\"subscribe\",\"topic_id\":\"room:\\ud800\"}">>,
+    serialiser:,
+  )
+  |> should.equal(Error(Nil))
+  transport.decode(
+    <<"{\"type\":\"subscribe\",\"topic_id\":\"room:\\ud83d\\ude00\"}">>,
+    serialiser:,
+  )
+  |> should.equal(Ok(transport.Subscribe(topic_id: "room:😀")))
+}
+
+// =============================================================================
 // PRIVATE FFI
 // =============================================================================
 

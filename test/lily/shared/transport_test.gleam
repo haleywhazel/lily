@@ -82,12 +82,12 @@ pub fn encode_session_message_test() {
 pub fn encode_resync_test() {
   let result =
     transport.encode(
-      Resync(cursors: [Session]),
+      Resync(cursors: [transport.Unknown(Session)]),
       serialiser: test_support.custom_serialiser(),
     )
   result
   |> should.equal(bit_array.from_string(
-    "{\"type\":\"resync\",\"cursors\":[{\"kind\":\"session\"}]}",
+    "{\"type\":\"resync\",\"cursors\":[{\"target\":{\"kind\":\"session\"}}]}",
   ))
 }
 
@@ -113,13 +113,13 @@ pub fn encode_snapshot_test() {
     )
   let result =
     transport.encode(
-      Snapshot(target: Session, sequence: 2, state: model),
+      Snapshot(target: Session, epoch: 0, sequence: 2, state: model),
       serialiser: test_support.custom_serialiser(),
     )
 
   result
   |> should.equal(bit_array.from_string(
-    "{\"type\":\"snapshot\",\"target\":{\"kind\":\"session\"},\"sequence\":2,\"state\":{\"count\":5,\"name\":\"Bob\",\"connected\":true,\"active_tab\":\"TabA\",\"secondary_count\":0,\"transition_item\":null}}",
+    "{\"type\":\"snapshot\",\"target\":{\"kind\":\"session\"},\"epoch\":0,\"sequence\":2,\"state\":{\"count\":5,\"name\":\"Bob\",\"connected\":true,\"active_tab\":\"TabA\",\"secondary_count\":0,\"transition_item\":null}}",
   ))
 }
 
@@ -209,13 +209,13 @@ pub fn decode_resync_test() {
   test_support.register_fixtures()
   let bytes =
     bit_array.from_string(
-      "{\"type\":\"resync\",\"cursors\":[{\"kind\":\"session\"}]}",
+      "{\"type\":\"resync\",\"cursors\":[{\"target\":{\"kind\":\"session\"}}]}",
     )
   let result =
     transport.decode(bytes, serialiser: test_support.custom_serialiser())
 
   result
-  |> should.equal(Ok(Resync(cursors: [Session])))
+  |> should.equal(Ok(Resync(cursors: [transport.Unknown(Session)])))
 }
 
 pub fn decode_topic_update_test() {
@@ -237,7 +237,7 @@ pub fn decode_snapshot_test() {
   test_support.register_fixtures()
   let bytes =
     bit_array.from_string(
-      "{\"type\":\"snapshot\",\"target\":{\"kind\":\"session\"},\"sequence\":2,\"state\":{\"count\":0,\"name\":\"\",\"connected\":false,\"active_tab\":\"TabA\",\"secondary_count\":0,\"transition_item\":null}}",
+      "{\"type\":\"snapshot\",\"target\":{\"kind\":\"session\"},\"epoch\":0,\"sequence\":2,\"state\":{\"count\":0,\"name\":\"\",\"connected\":false,\"active_tab\":\"TabA\",\"secondary_count\":0,\"transition_item\":null}}",
     )
   let result =
     transport.decode(bytes, serialiser: test_support.custom_serialiser())
@@ -246,6 +246,7 @@ pub fn decode_snapshot_test() {
   |> should.equal(
     Ok(Snapshot(
       target: Session,
+      epoch: 0,
       sequence: 2,
       state: test_support.initial_model(),
     )),
@@ -263,14 +264,16 @@ pub fn decode_snapshot_with_complex_model_test() {
     )
   let encoded =
     transport.encode(
-      Snapshot(target: Session, sequence: 10, state: model),
+      Snapshot(target: Session, epoch: 0, sequence: 10, state: model),
       serialiser: test_support.custom_serialiser(),
     )
   let result =
     transport.decode(encoded, serialiser: test_support.custom_serialiser())
 
   result
-  |> should.equal(Ok(Snapshot(target: Session, sequence: 10, state: model)))
+  |> should.equal(
+    Ok(Snapshot(target: Session, epoch: 0, sequence: 10, state: model)),
+  )
 }
 
 // =============================================================================
@@ -531,7 +534,7 @@ pub fn max_decode_depth_one_rejects_deeper_snapshot_test() {
   let model = test_support.initial_model()
   let bytes =
     transport.encode(
-      Snapshot(target: Session, sequence: 1, state: model),
+      Snapshot(target: Session, epoch: 0, sequence: 1, state: model),
       serialiser: test_support.message_pack_serialiser(),
     )
   let capped = message_pack_capped(1)
@@ -545,11 +548,13 @@ pub fn max_decode_depth_high_allows_snapshot_test() {
   let model = test_support.initial_model()
   let bytes =
     transport.encode(
-      Snapshot(target: Session, sequence: 1, state: model),
+      Snapshot(target: Session, epoch: 0, sequence: 1, state: model),
       serialiser: test_support.message_pack_serialiser(),
     )
   let uncapped = message_pack_capped(128)
 
   transport.decode(bytes, serialiser: uncapped)
-  |> should.equal(Ok(Snapshot(target: Session, sequence: 1, state: model)))
+  |> should.equal(
+    Ok(Snapshot(target: Session, epoch: 0, sequence: 1, state: model)),
+  )
 }

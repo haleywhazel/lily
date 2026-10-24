@@ -1177,7 +1177,6 @@ pub fn component_event_on_fragment_root_test() {
 @target(javascript)
 pub fn component_event_on_nested_child_of_live_test() {
   // nested children aren't on the Gleam tree, renderComponent queues them
-  // mirrors the welcome example's chat_area
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _runtime =
@@ -1716,7 +1715,6 @@ pub fn component_transition_inside_each_keeps_item_attribute_test() {
     })
   let html = test_support.inner_html("#app")
 
-  // `string.inspect` quotes the key, meaning a substring match
   string.contains(html, "data-lily-key")
   |> should.be_true
   string.contains(html, "data-lily-transition-exit=\"out\"")
@@ -2093,17 +2091,11 @@ pub fn component_each_renders_once_its_container_comes_back_test() {
         render: fn(row, _) { "<i>" <> row.1 <> "</i>" },
       )
     })
-  let id =
-    test_support.get_attribute(
-      "#app > [data-lily-component]",
-      "data-lily-component",
-    )
-  test_support.set_inner_html("#app", "")
+  // the same element leaves the page and comes back, a copy of its markup
+  // wouldn't be the component's
+  test_support.stash_children("#app")
   set_rows(runtime, "a,later")
-  test_support.set_inner_html(
-    "#app",
-    "<div data-lily-component=\"" <> id <> "\"></div>",
-  )
+  test_support.restore_children("#app")
   client.update_model(runtime, with: fn(model) { model })
 
   test_support.inner_html("#app") |> string.contains("later") |> should.be_true
@@ -2704,4 +2696,120 @@ pub fn component_exit_during_a_reversal_turns_it_forward_test() -> promise.Promi
   use _ <- promise.map(promise.wait(250))
   test_support.unstub_animations()
   test_support.inner_html("#app") |> string.contains("card") |> should.be_false
+}
+
+// =============================================================================
+// CRASH ISOLATION
+// =============================================================================
+
+@target(javascript)
+pub fn component_live_patch_refuses_a_data_url_outside_media_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let _ =
+    mount(runtime, fn(_model) {
+      component.live(
+        slice: fn(model: Model) { model.count },
+        render: fn(_, _) {
+          "<div class=\"box\"><iframe sandbox=\"allow-forms\"></iframe><img></div>"
+        },
+        patch: fn(_count) {
+          [
+            component.SetAttribute("iframe", "src", "data:text/html,<b>x</b>"),
+            component.SetAttribute("img", "src", "data:image/png;base64,AA=="),
+            component.RemoveAttribute("iframe", "sandbox"),
+            component.SetAttribute("no-such-element[", "title", "x"),
+            component.SetAttribute("img", "alt", "kept"),
+          ]
+        },
+      )
+    })
+
+  let _ =
+    test_support.capture_logs(fn() { client.dispatch(runtime)(Increment) })
+
+  test_support.get_attribute("iframe", "src") |> should.equal("")
+  test_support.get_attribute("iframe", "sandbox") |> should.equal("allow-forms")
+  test_support.get_attribute("img", "src")
+  |> should.equal("data:image/png;base64,AA==")
+  // the bad selector didn't stop the patches after it
+  test_support.get_attribute("img", "alt") |> should.equal("kept")
+}
+
+@target(javascript)
+pub fn component_ids_are_not_guessable_test() {
+  // markup from data can't name a component it doesn't know the id of
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let _ =
+    mount(runtime, fn(_model) {
+      component.simple(
+        slice: fn(model: Model) { model.count },
+        render: fn(_, _) { "<p id=\"p\">x</p>" },
+      )
+    })
+
+  let id = test_support.get_attribute("#p", "data-lily-component")
+  string.starts_with(id, "r0c") |> should.be_false
+  { string.length(id) > 8 } |> should.be_true
+}
+
+@target(javascript)
+pub fn component_a_throwing_renderer_does_not_wedge_later_renders_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let _ =
+    mount(runtime, fn(_) {
+      component.simple(
+        slice: fn(model: Model) { model.count },
+        render: fn(count, _) {
+          "<p id=\"count\">" <> int.to_string(count) <> "</p>"
+        },
+      )
+    })
+  test_support.add_throwing_renderer(runtime)
+
+  let _ =
+    test_support.capture_logs(fn() {
+      client.dispatch(runtime)(Increment)
+      client.dispatch(runtime)(Increment)
+    })
+
+  test_support.get_text("#count") |> should.equal("2")
+}
+
+@target(javascript)
+pub fn component_a_throwing_component_does_not_stop_its_siblings_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let _ =
+    mount(runtime, fn(_) {
+      component.fragment([
+        component.simple(
+          slice: fn(model: Model) { model.count },
+          render: fn(count, _) {
+            case count {
+              0 -> "<p id=\"bad\">fine</p>"
+              _ -> panic as "render blew up"
+            }
+          },
+        ),
+        component.simple(
+          slice: fn(model: Model) { model.count },
+          render: fn(count, _) {
+            "<p id=\"good\">" <> int.to_string(count) <> "</p>"
+          },
+        ),
+      ])
+    })
+
+  let logs =
+    test_support.capture_logs(fn() {
+      client.dispatch(runtime)(Increment)
+      client.dispatch(runtime)(Increment)
+    })
+
+  test_support.get_text("#good") |> should.equal("2")
+  // logged once, not once per render
+  list.length(logs) |> should.equal(1)
 }

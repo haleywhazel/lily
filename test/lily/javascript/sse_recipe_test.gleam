@@ -108,8 +108,10 @@ fn receive_post(
 ) -> Result(Nil, Nil) {
   use #(_, client_id) <- result.try(string.split_once(url, "?client="))
   use bytes <- result.map(bit_array.base64_decode(body))
-  server.connection(app, client_id:)
-  |> server.incoming(bytes:)
+  let _ =
+    server.connection(app, client_id:)
+    |> server.incoming(bytes:)
+  Nil
 }
 
 @target(javascript)

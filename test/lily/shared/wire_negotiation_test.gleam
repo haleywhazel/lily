@@ -123,7 +123,7 @@ pub fn negotiation_json_client_gets_json_replies_test() {
 
   wire_support.send_in(
     connection,
-    transport.Resync(cursors: [transport.Session]),
+    transport.Resync(cursors: [transport.Unknown(transport.Session)]),
     Json,
   )
   let sent = frames()
@@ -141,7 +141,7 @@ pub fn negotiation_message_pack_client_gets_message_pack_replies_test() {
 
   wire_support.send_in(
     connection,
-    transport.Resync(cursors: [transport.Session]),
+    transport.Resync(cursors: [transport.Unknown(transport.Session)]),
     MessagePack,
   )
 
@@ -269,7 +269,7 @@ pub fn negotiation_topic_resync_snapshot_goes_out_in_the_client_format_test() {
 
   wire_support.send_in(
     json_client,
-    transport.Resync(cursors: [transport.Topic("chat")]),
+    transport.Resync(cursors: [transport.Unknown(transport.Topic("chat"))]),
     Json,
   )
   let sent = json_frames()
@@ -288,10 +288,11 @@ pub fn negotiation_topic_stop_reaches_each_subscriber_in_its_format_test() {
 
   wire_support.stop_topic(app, "chat")
 
+  // the final `Acknowledge` and the `Rejected` after it
   list.map(json_frames(), format_of)
-  |> should.equal([Json])
+  |> should.equal([Json, Json])
   list.map(pack_frames(), format_of)
-  |> should.equal([MessagePack])
+  |> should.equal([MessagePack, MessagePack])
 }
 
 pub fn negotiation_topic_encodes_an_update_once_not_per_subscriber_test() {

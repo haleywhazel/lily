@@ -83,19 +83,19 @@ pub fn idle_topic_started_by_a_dispatch_stops_test() -> Later {
 
 pub fn idle_topic_resubscribed_before_the_ttl_ignores_the_stale_timer_test() -> Later {
   // the first timer fires between the two waits, the topic outlives it
-  let ttl = 200
-  let app = idle_server(ttl)
+  let slow_ttl = 200
+  let app = idle_server(slow_ttl)
   let #(c1, _frames) = wire_support.open(app, "c1")
   wire_support.subscribe(c1, "chat")
   wire_support.unsubscribe(c1, "chat")
 
-  use <- wire_support.after_then(ttl / 2)
+  use <- wire_support.after_then(slow_ttl / 2)
   wire_support.subscribe(c1, "chat")
   wire_support.unsubscribe(c1, "chat")
-  use <- wire_support.after_then(ttl * 7 / 10)
+  use <- wire_support.after_then(slow_ttl * 7 / 10)
   is_running(app)
   |> should.be_true
-  use <- wire_support.after(ttl)
+  use <- wire_support.after(slow_ttl)
   is_running(app)
   |> should.be_false
 }
@@ -134,6 +134,7 @@ pub fn idle_topic_reloads_through_topic_init_on_the_next_subscribe_test() -> Lat
   |> should.equal([
     transport.Snapshot(
       target: transport.Topic("chat"),
+      epoch: 0,
       sequence: 0,
       state: test_support.Model(..test_support.initial_model(), count: 20),
     ),

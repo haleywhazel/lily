@@ -15,17 +15,13 @@ import lily/test_support.{Increment}
 import lily/transport
 
 // =============================================================================
-// HELPERS
-// =============================================================================
-
-// =============================================================================
 // CLIENT
 // =============================================================================
 
 @target(javascript)
 pub fn open_serialiser_client_sends_json_frames_test() {
   test_support.reset_dom()
-  let runtime = client.start(test_support.open_session_store())
+  let runtime = client.start(test_support.session_store())
   let #(_handler, sent) = test_support.connect_capturing(runtime)
 
   client.dispatch(runtime)(Increment)
@@ -37,12 +33,12 @@ pub fn open_serialiser_client_sends_json_frames_test() {
 @target(javascript)
 pub fn open_serialiser_client_applies_a_snapshot_test() {
   test_support.reset_dom()
-  let runtime = client.start(test_support.open_session_store())
+  let runtime = client.start(test_support.session_store())
   let #(handler, _sent) = test_support.connect_capturing(runtime)
   let state = test_support.Model(..test_support.initial_model(), count: 7)
 
   handler.received(transport.encode(
-    transport.Snapshot(target: transport.Session, sequence: 1, state:),
+    transport.Snapshot(target: transport.Session, epoch: 0, sequence: 1, state:),
     serialiser: test_support.custom_serialiser(),
   ))
 
@@ -53,7 +49,7 @@ pub fn open_serialiser_client_applies_a_snapshot_test() {
 @target(javascript)
 pub fn open_serialiser_client_applies_a_session_update_test() {
   test_support.reset_dom()
-  let runtime = client.start(test_support.open_session_store())
+  let runtime = client.start(test_support.session_store())
   let #(handler, _sent) = test_support.connect_capturing(runtime)
 
   handler.received(transport.encode(
@@ -68,7 +64,7 @@ pub fn open_serialiser_client_applies_a_session_update_test() {
 @target(javascript)
 pub fn open_serialiser_client_reports_the_client_id_test() {
   test_support.reset_dom()
-  let runtime = client.start(test_support.open_session_store())
+  let runtime = client.start(test_support.session_store())
   let seen = test_support.new("")
   let _ =
     client.observe(runtime, fn(event, _model) {

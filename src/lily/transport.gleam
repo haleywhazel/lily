@@ -16,11 +16,13 @@
 //// transport of your own), and [`with_offline_queue`](#with_offline_queue)
 //// (to give it the same queueing and replay).
 ////
-//// When a connection opens, the server sends `Connected` and `Version`, and
-//// the client answers with a `Resync` with the session name and every topic it
-//// wants to subscribe to. A client on another wire protocol stops at `Version`
-//// instead. The server replies with a `Snapshot` per target,
-//// then each message travels as a `SessionMessage` or `TopicMessage` and
+//// When a connection opens, the server sends `Version` and then `Connected`,
+//// and the client answers with a `Resync` with the session name and every
+//// topic it wants to subscribe to, each naming the state it already holds
+//// when it can. A client on another wire protocol stops at `Version`
+//// instead. The server replies with a `Snapshot` per target, or `Unchanged`
+//// for one the client already holds as it is, then
+//// each message travels as a `SessionMessage` or `TopicMessage` and
 //// comes back to the other subscribers as an update. The sender gets an
 //// `Acknowledge`, or a `Dropped` when the server didn't apply it.
 ////
@@ -39,9 +41,9 @@
 //// ```
 ////
 //// With the default functions Lily gives you, the communication is done
-//// through JSON when a page is served from `localhost` or `127.0.0.1` and
-//// MessagePack otherwise. This is mainly to make dev environments have more
-//// debuggable frames and smaller transport frames for prod.
+//// through JSON when a page is served from `localhost`, `127.0.0.1` or
+//// `[::1]` and MessagePack otherwise. This is mainly to make dev environments
+//// have more debuggable frames and smaller transport frames for prod.
 ////
 //// To use one format consistently (everywhere), build the serialiser yourself
 //// and pass it to [`store.sync_with`](./store.html#sync_with):
@@ -88,6 +90,7 @@
 // =============================================================================
 
 import gleam/bit_array
+import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
@@ -95,6 +98,7 @@ import gleam/int
 import gleam/json.{type Json}
 import gleam/list
 import gleam/option.{type Option}
+import gleam/pair
 import gleam/result
 import gleam/string
 
@@ -146,6 +150,15 @@ pub opaque type ConstructorDefinition {
   ConstructorDefinition(name: String, fields: List(WireType))
 }
 
+/// A target in a [`Resync`](#Protocol), with how far the client's copy got.
+pub type Cursor {
+  /// Nothing the client can vouch for, it wants a `Snapshot`
+  Unknown(target: SyncTarget)
+  /// The state at `sequence` within `epoch`, from the last `Snapshot` and
+  /// what followed it, answered with `Unchanged` while that's still current
+  Known(target: SyncTarget, epoch: Int, sequence: Int)
+}
+
 /// A custom type's constructors in a [`Schema`](#Schema), from
 /// [`custom`](#custom).
 pub opaque type CustomDefinition {
@@ -176,7 +189,8 @@ pub type DiagnosticLevel {
 pub type Format {
   Json
   MessagePack
-  /// JSON when served from `localhost` or `127.0.0.1` or MessagePack otherwise.
+  /// JSON when served from `localhost`, `127.0.0.1` or `[::1]`, MessagePack
+  /// otherwise.
   ByHost
 }
 
@@ -190,7 +204,9 @@ pub opaque type Module {
 /// The frames a client and server exchange. You only handle them yourself
 /// when you write a [`serialiser`](#serialiser) of your own.
 ///
-/// Sequence numbers count separately for each [`SyncTarget`](#SyncTarget).
+/// Sequence numbers count separately for each [`SyncTarget`](#SyncTarget),
+/// within an epoch the server names in each `Snapshot`, so the pair says
+/// which state a client holds.
 pub type Protocol(model, message) {
   /// Server, confirming a `SessionMessage` or `TopicMessage` was applied.
   Acknowledge(target: SyncTarget, sequence: Int)
@@ -201,14 +217,16 @@ pub type Protocol(model, message) {
 
   /// Server, in place of an `Acknowledge` when a `SessionMessage` or
   /// `TopicMessage` for this target wasn't applied, such as one for a topic
-  /// the client hasn't joined.
+  /// the client hasn't joined, one that fails the schema, or one the server
+  /// refused under its rate limit or load.
   Dropped(target: SyncTarget)
 
   /// Server, when a `Subscribe` is refused or an admitted topic is revoked.
   Rejected(topic_id: String, reason: RejectionReason)
 
-  /// Client, after it connects, listing every target it wants a `Snapshot` of.
-  Resync(cursors: List(SyncTarget))
+  /// Client, after it connects, listing every target it wants a `Snapshot` of,
+  /// with the state it holds when it can vouch for it.
+  Resync(cursors: List(Cursor))
 
   /// Client, a message for its own session store.
   SessionMessage(payload: message)
@@ -218,8 +236,9 @@ pub type Protocol(model, message) {
   /// [`server.dispatch_to_all`](./server.html#dispatch_to_all).
   SessionUpdate(sequence: Int, payload: message)
 
-  /// Server, the whole state of a target, in reply to `Resync` or `Subscribe`.
-  Snapshot(target: SyncTarget, sequence: Int, state: model)
+  /// Server, the whole state of a target, in reply to `Resync` or `Subscribe`,
+  /// at `sequence` within `epoch`.
+  Snapshot(target: SyncTarget, epoch: Int, sequence: Int, state: model)
 
   /// Client, to join a topic. The server replies with `Snapshot` or
   /// `Rejected`.
@@ -230,6 +249,10 @@ pub type Protocol(model, message) {
 
   /// Server, a topic message from another subscriber.
   TopicUpdate(topic_id: String, sequence: Int, payload: message)
+
+  /// Server, in place of a `Snapshot` when the `Resync` cursor named the state
+  /// the target is still in.
+  Unchanged(target: SyncTarget)
 
   /// Client, to leave a topic. Nothing is sent back.
   Unsubscribe(topic_id: String)
@@ -303,7 +326,7 @@ pub opaque type Schema {
 /// Turns [`Protocol`](#Protocol) frames into bytes and back. Build one with
 /// [`automatic`](#automatic) or [`serialiser`](#serialiser).
 pub opaque type Serialiser(model, message) {
-  Auto(format: Format, max_decode_depth: Int)
+  Automatic(format: Format, max_decode_depth: Int)
   Open(
     encode: fn(Protocol(model, message)) -> BitArray,
     decode: fn(BitArray) -> Result(Protocol(model, message), Nil),
@@ -360,7 +383,10 @@ pub type WireType {
 ///
 /// ## Supported shapes
 ///
-/// - Primitives, `Int`, `Float`, `String`, `Bool`, `Nil`.
+/// - Primitives, `Int`, `Float`, `String`, `Bool`, `Nil`. An `Int` must be
+///   within 2^53 - 1 either side of zero, the range both targets hold
+///   exactly, a `Float` must be finite and a `String` can't hold a lone
+///   surrogate. Encoding refuses anything else, and so does decoding.
 /// - Custom types, records and variants, a tagged map whose `_` field carries
 ///   the PascalCase constructor name.
 /// - Lists, as arrays.
@@ -370,6 +396,15 @@ pub type WireType {
 /// - `gleam/set.Set`, as `{"_":"$set","0":[v,...]}`.
 ///
 /// ## Not supported
+///
+/// A tuple whose first element is a `Bool`, `Nil` or a zero-field
+/// constructor, `#(True, x)` say, looks like a custom type on Erlang and is
+/// written as one. JavaScript reads it back as the tuple, unless a constructor
+/// with that name and arity is registered, so keep such names distinct.
+///
+/// A one-field constructor of your own named `Set` holding a `Dict` looks
+/// like `gleam/set.Set` on Erlang and is written as one, so name it something
+/// else.
 ///
 /// `BitArray` fields are not encoded, since on Erlang they can't be told
 /// apart from a `String`. Wrap raw bytes in a type of your own and write a
@@ -388,7 +423,7 @@ pub fn automatic(
   list.each(modules, fn(entry) {
     codec.request_module(entry.package, entry.path)
   })
-  Auto(format:, max_decode_depth:)
+  Automatic(format:, max_decode_depth:)
 }
 
 /// Wraps a `connect` function as a [`Connector`](#Connector), for a transport
@@ -431,24 +466,32 @@ pub fn custom(
   CustomDefinition(module:, name:, constructors:)
 }
 
-/// Decodes bytes into a [`Protocol`](#Protocol) frame.
+/// Decodes bytes into a [`Protocol`](#Protocol) frame. A serialiser of your
+/// own that crashes counts as a failure.
 pub fn decode(
   bytes: BitArray,
   serialiser serialiser: Serialiser(model, message),
 ) -> Result(Protocol(model, message), Nil) {
-  decode_conformed(bytes, serialiser, Ok)
+  decode_inbound(bytes, serialiser:, conform: Ok, from_client: False)
+  |> result.map(pair.first)
+  |> result.replace_error(Nil)
 }
 
 /// Encodes a [`Protocol`](#Protocol) frame into bytes, in the serialiser's
 /// format.
 ///
 /// `ByHost` writes MessagePack where there is no page, such as on the server.
+///
+/// The automatic serialiser raises for a value it can't write, an `Int` past
+/// the wire range, a non-finite `Float` or a lone surrogate, see
+/// [`automatic`](#automatic). Lily's own calls are rescued, so a frame of
+/// yours should only hold values in range.
 pub fn encode(
   protocol: Protocol(model, message),
   serialiser serialiser: Serialiser(model, message),
 ) -> BitArray {
   case serialiser {
-    Auto(format:, ..) -> encode_in(protocol, format)
+    Automatic(format:, ..) -> encode_in(protocol, format)
     Open(encode:, ..) -> encode(protocol)
   }
 }
@@ -591,33 +634,85 @@ pub fn with_offline_queue(
       ffi_offline_connect(
         inner.connect,
         storage_key,
+        queue_version,
         handler,
         ConnectorHandler,
         Channel,
       )
     },
-    pending: fn() { ffi_offline_pending(storage_key) },
+    pending: fn() { ffi_offline_pending(storage_key, queue_version) },
     queues: True,
   )
+}
+
+// =============================================================================
+// INTERNAL TYPES
+// =============================================================================
+
+/// The check a decoded message payload gets, from
+/// [`message_conformer`](#message_conformer).
+@internal
+pub type Conformer =
+  fn(Reflected) -> Result(Reflected, Nil)
+
+/// Why an inbound frame didn't decode.
+@internal
+pub type DecodeFailure {
+  /// Not a frame at all, or one whose fields are wrong
+  Malformed
+  /// A message for `target` whose payload didn't decode or fails the schema
+  Nonconforming(target: SyncTarget)
 }
 
 // =============================================================================
 // INTERNAL FUNCTIONS
 // =============================================================================
 
-// only the automatic serialiser is checked
+// bumped when a frame's shape changes
+@internal
+pub const protocol_version = 1
+
+/// For the schema tests, the server decodes through `decode_inbound`. Only the
+/// automatic serialiser is checked, and only message payloads.
 @internal
 pub fn decode_checked(
   bytes: BitArray,
   serialiser serialiser: Serialiser(model, message),
   schema schema: Option(Schema),
 ) -> Result(Protocol(model, message), Nil) {
-  case schema {
-    option.None -> decode(bytes, serialiser:)
-    option.Some(schema) ->
-      decode_conformed(bytes, serialiser, fn(reflected) {
-        conform(schema, reflected, schema.message, [])
-      })
+  decode_inbound(
+    bytes,
+    serialiser:,
+    conform: message_conformer(schema),
+    from_client: False,
+  )
+  |> result.map(pair.first)
+  |> result.replace_error(Nil)
+}
+
+/// Decodes a frame once, with the format it came in when the serialiser is
+/// automatic, checking message payloads with `conform` from
+/// [`message_conformer`](#message_conformer). A crashing decoder of your own
+/// is `Malformed`. A frame `from_client` may only carry a tag a client sends,
+/// the rest are refused before their payload is read.
+@internal
+pub fn decode_inbound(
+  bytes: BitArray,
+  serialiser serialiser: Serialiser(model, message),
+  conform conform: Conformer,
+  from_client from_client: Bool,
+) -> Result(#(Protocol(model, message), Option(Format)), DecodeFailure) {
+  case
+    rescue(fn() { decode_conformed(bytes, serialiser, conform, from_client) })
+  {
+    // a serialiser of your own decodes any tag, the frame is refused after
+    Ok(Ok(#(protocol, format))) ->
+      case from_client && !is_client_frame(protocol) {
+        True -> Error(Malformed)
+        False -> Ok(#(protocol, format))
+      }
+    Ok(Error(failure)) -> Error(failure)
+    Error(_) -> Error(Malformed)
   }
 }
 
@@ -629,7 +724,7 @@ pub fn encode_as(
   format format: Format,
 ) -> BitArray {
   case serialiser {
-    Auto(..) -> encode_in(protocol, format)
+    Automatic(..) -> encode_in(protocol, format)
     Open(encode:, ..) -> encode(protocol)
   }
 }
@@ -653,8 +748,16 @@ pub fn frame_format(
   serialiser serialiser: Serialiser(model, message),
 ) -> Result(Format, Nil) {
   case serialiser {
-    Auto(..) -> detect_format(bytes)
+    Automatic(..) -> detect_format(bytes)
     Open(..) -> Error(Nil)
+  }
+}
+
+@internal
+pub fn is_automatic(serialiser: Serialiser(model, message)) -> Bool {
+  case serialiser {
+    Automatic(..) -> True
+    Open(..) -> False
   }
 }
 
@@ -663,34 +766,42 @@ pub fn is_local_page() -> Bool {
   is_local_host(page_hostname())
 }
 
+/// The check a client message gets under `schema`, `Ok` without one.
+@internal
+pub fn message_conformer(schema: Option(Schema)) -> Conformer {
+  case schema {
+    option.None -> Ok
+    option.Some(schema) -> fn(reflected) {
+      conform(schema, reflected, schema.message, [])
+    }
+  }
+}
+
+/// Which store a message frame is for, read from the frame's head without
+/// decoding its payload. `None` for anything else or a frame it can't read.
+@internal
+pub fn peek_target(bytes: BitArray) -> Option(SyncTarget) {
+  // lily writes `type` first, then a topic message's `topic_id`
+  let head = case detect_format(bytes) {
+    Ok(MessagePack) -> codec.leading_strings(bytes, 2)
+    Ok(Json) -> json_leading_strings(bytes)
+    Ok(ByHost) | Error(Nil) -> []
+  }
+  case head {
+    [#("type", "session_message"), ..] -> option.Some(Session)
+    [#("type", "topic_message"), #("topic_id", id), ..] ->
+      wire_string(id) |> result.map(Topic) |> option.from_result
+    _ -> option.None
+  }
+}
+
 /// Includes frames left over from before a reload.
 @internal
 pub fn pending(connector: Connector) -> List(BitArray) {
   connector.pending()
 }
 
-// bumped when a frame's shape changes
-@internal
-pub const protocol_version = 1
-
 /// Whether a frame whose send failed is held and sent later.
-@internal
-pub fn payload_target(
-  bytes: BitArray,
-  serialiser serialiser: Serialiser(model, message),
-) -> Result(SyncTarget, Nil) {
-  case serialiser {
-    Open(..) -> Error(Nil)
-    Auto(..) ->
-      // the stand-in payload never leaves this function
-      case decode_conformed(bytes, serialiser, fn(_) { Ok(ReflectedNil) }) {
-        Ok(SessionMessage(..)) -> Ok(Session)
-        Ok(TopicMessage(topic_id:, ..)) -> Ok(Topic(topic_id))
-        _ -> Error(Nil)
-      }
-  }
-}
-
 @internal
 pub fn queues(connector: Connector) -> Bool {
   connector.queues
@@ -701,8 +812,11 @@ pub fn resolve_for_page(
   serialiser: Serialiser(model, message),
 ) -> Serialiser(model, message) {
   case serialiser {
-    Auto(format:, max_decode_depth:) ->
-      Auto(format: format_for_host(format, page_hostname()), max_decode_depth:)
+    Automatic(format:, max_decode_depth:) ->
+      Automatic(
+        format: format_for_host(format, page_hostname()),
+        max_decode_depth:,
+      )
     Open(..) -> serialiser
   }
 }
@@ -719,7 +833,7 @@ pub fn run_connector(
 @internal
 pub fn server_format(serialiser: Serialiser(model, message)) -> Format {
   case serialiser {
-    Auto(format:, ..) -> format_for_host(format, "")
+    Automatic(format:, ..) -> format_for_host(format, "")
     Open(..) -> MessagePack
   }
 }
@@ -735,7 +849,7 @@ type Reader(model, message) {
     model: fn(String) -> Result(model, Nil),
     string: fn(String) -> Result(String, Nil),
     target: fn(String) -> Result(SyncTarget, Nil),
-    targets: fn(String) -> Result(List(SyncTarget), Nil),
+    cursors: fn(String) -> Result(List(Cursor), Nil),
   )
 }
 
@@ -746,7 +860,7 @@ type Writer(model, message, field) {
     model: fn(model) -> field,
     string: fn(String) -> field,
     target: fn(SyncTarget) -> field,
-    targets: fn(List(SyncTarget)) -> field,
+    cursors: fn(List(Cursor)) -> field,
   )
 }
 
@@ -754,12 +868,16 @@ type Writer(model, message, field) {
 // PRIVATE FUNCTIONS
 // =============================================================================
 
+// the queued frames' shape, a session or topic message, bumped only when
+// those change so a protocol bump keeps the edits a page left offline
+const queue_version = 1
+
 // failure value never read, only needs the decoder's type
-fn auto_decoder(
+fn automatic_decoder(
   max_depth: Int,
-  conform: fn(Reflected) -> Result(Reflected, Nil),
+  conform: Conformer,
 ) -> decode.Decoder(value) {
-  decode.new_primitive_decoder("Auto", fn(value) {
+  decode.new_primitive_decoder("Automatic", fn(value) {
     case codec.decode_json(value, max_depth, conform) {
       Ok(decoded) -> Ok(codec.passthrough(decoded))
       Error(_) -> Error(codec.passthrough(value))
@@ -770,73 +888,95 @@ fn auto_decoder(
 // shared by both formats so they agree on a frame's fields
 fn build(
   reader: Reader(model, message),
-) -> Result(Protocol(model, message), Nil) {
-  use tag <- result.try(reader.string("type"))
+  from_client: Bool,
+) -> Result(Protocol(model, message), DecodeFailure) {
+  use tag <- result.try(malformed(reader.string("type")))
+  // a server frame from a client would be dropped anyway, its payload unread,
+  // these are the tags a client sends
+  let client_tag =
+    list.contains(
+      ["resync", "session_message", "subscribe", "topic_message", "unsubscribe"],
+      tag,
+    )
+  use <- bool.guard(when: from_client && !client_tag, return: Error(Malformed))
   case tag {
     "acknowledge" -> {
-      use target <- result.try(reader.target("target"))
-      use sequence <- result.try(reader.int("sequence"))
+      use target <- result.try(malformed(reader.target("target")))
+      use sequence <- result.try(malformed(reader.int("sequence")))
       Ok(Acknowledge(target:, sequence:))
     }
     "connected" -> {
-      use client_id <- result.try(reader.string("client_id"))
+      use client_id <- result.try(malformed(reader.string("client_id")))
       Ok(Connected(client_id:))
     }
     "dropped" -> {
-      use target <- result.try(reader.target("target"))
+      use target <- result.try(malformed(reader.target("target")))
       Ok(Dropped(target:))
     }
     "rejected" -> {
-      use topic_id <- result.try(reader.string("topic_id"))
+      use topic_id <- result.try(malformed(reader.string("topic_id")))
       use reason <- result.try(
-        reader.string("reason") |> result.try(rejection_reason_from_wire),
+        reader.string("reason")
+        |> result.try(rejection_reason_from_wire)
+        |> malformed,
       )
       Ok(Rejected(topic_id:, reason:))
     }
     "resync" -> {
-      use cursors <- result.try(reader.targets("cursors"))
+      use cursors <- result.try(malformed(reader.cursors("cursors")))
       Ok(Resync(cursors:))
     }
     "session_message" -> {
-      use payload <- result.try(reader.message("payload"))
+      use payload <- result.try(
+        reader.message("payload")
+        |> result.replace_error(Nonconforming(target: Session)),
+      )
       Ok(SessionMessage(payload:))
     }
     "session_update" -> {
-      use sequence <- result.try(reader.int("sequence"))
-      use payload <- result.try(reader.message("payload"))
+      use sequence <- result.try(malformed(reader.int("sequence")))
+      use payload <- result.try(malformed(reader.message("payload")))
       Ok(SessionUpdate(sequence:, payload:))
     }
     "snapshot" -> {
-      use target <- result.try(reader.target("target"))
-      use sequence <- result.try(reader.int("sequence"))
-      use state <- result.try(reader.model("state"))
-      Ok(Snapshot(target:, sequence:, state:))
+      use target <- result.try(malformed(reader.target("target")))
+      use epoch <- result.try(malformed(reader.int("epoch")))
+      use sequence <- result.try(malformed(reader.int("sequence")))
+      use state <- result.try(malformed(reader.model("state")))
+      Ok(Snapshot(target:, epoch:, sequence:, state:))
     }
     "subscribe" -> {
-      use topic_id <- result.try(reader.string("topic_id"))
+      use topic_id <- result.try(malformed(reader.string("topic_id")))
       Ok(Subscribe(topic_id:))
     }
     "topic_message" -> {
-      use topic_id <- result.try(reader.string("topic_id"))
-      use payload <- result.try(reader.message("payload"))
+      use topic_id <- result.try(malformed(reader.string("topic_id")))
+      use payload <- result.try(
+        reader.message("payload")
+        |> result.replace_error(Nonconforming(target: Topic(topic_id))),
+      )
       Ok(TopicMessage(topic_id:, payload:))
     }
     "topic_update" -> {
-      use topic_id <- result.try(reader.string("topic_id"))
-      use sequence <- result.try(reader.int("sequence"))
-      use payload <- result.try(reader.message("payload"))
+      use topic_id <- result.try(malformed(reader.string("topic_id")))
+      use sequence <- result.try(malformed(reader.int("sequence")))
+      use payload <- result.try(malformed(reader.message("payload")))
       Ok(TopicUpdate(topic_id:, sequence:, payload:))
     }
+    "unchanged" -> {
+      use target <- result.try(malformed(reader.target("target")))
+      Ok(Unchanged(target:))
+    }
     "unsubscribe" -> {
-      use topic_id <- result.try(reader.string("topic_id"))
+      use topic_id <- result.try(malformed(reader.string("topic_id")))
       Ok(Unsubscribe(topic_id:))
     }
     "version" -> {
-      use hash <- result.try(reader.string("hash"))
-      use protocol <- result.try(reader.int("protocol"))
+      use hash <- result.try(malformed(reader.string("hash")))
+      use protocol <- result.try(malformed(reader.int("protocol")))
       Ok(Version(hash:, protocol:))
     }
-    _ -> Error(Nil)
+    _ -> Error(Malformed)
   }
 }
 
@@ -906,45 +1046,107 @@ fn conform_fields(
   }
 }
 
-// `conform` checks message payloads only
+// a target with an epoch and a sequence when the client knows both, one
+// without the other isn't a cursor
+fn cursor_decoder() -> decode.Decoder(Cursor) {
+  use target <- decode.then(target_decoder())
+  let number = decode.map(decode.int, option.Some)
+  use epoch <- decode.optional_field("epoch", option.None, number)
+  use sequence <- decode.optional_field("sequence", option.None, number)
+  case epoch, sequence {
+    option.Some(epoch), option.Some(sequence) ->
+      decode.success(Known(target:, epoch:, sequence:))
+    option.None, option.None -> decode.success(Unknown(target:))
+    option.Some(_), option.None | option.None, option.Some(_) ->
+      decode.failure(Unknown(target:), "Cursor")
+  }
+}
+
+// `conform` checks message payloads only, a serialiser of your own decides
+// for itself what a client may send, and only the automatic one has a format
 fn decode_conformed(
   bytes: BitArray,
   serialiser: Serialiser(model, message),
-  conform: fn(Reflected) -> Result(Reflected, Nil),
-) -> Result(Protocol(model, message), Nil) {
+  conform: Conformer,
+  from_client: Bool,
+) -> Result(#(Protocol(model, message), Option(Format)), DecodeFailure) {
+  let found = fn(decoded, format) {
+    result.map(decoded, pair.new(_, option.Some(format)))
+  }
   case serialiser {
-    Auto(max_decode_depth:, ..) ->
+    Automatic(max_decode_depth:, ..) ->
       case detect_format(bytes) {
-        Ok(Json) -> decode_json(bytes, max_decode_depth, conform)
-        Ok(MessagePack) -> decode_message_pack(bytes, max_decode_depth, conform)
-        Ok(ByHost) | Error(Nil) -> Error(Nil)
+        Ok(Json) ->
+          decode_json(bytes, max_decode_depth, conform, from_client)
+          |> found(Json)
+        Ok(MessagePack) ->
+          decode_message_pack(bytes, max_decode_depth, conform, from_client)
+          |> found(MessagePack)
+        Ok(ByHost) | Error(Nil) -> Error(Malformed)
       }
-    Open(decode:, ..) -> decode(bytes)
+    Open(decode:, ..) ->
+      malformed(decode(bytes)) |> result.map(pair.new(_, option.None))
+  }
+}
+
+fn decode_cursor_message_pack(value: MessagePackValue) -> Result(Cursor, Nil) {
+  use target <- result.try(decode_target_message_pack(value))
+  let number = fn(key) {
+    case value {
+      ValueMap(entries) ->
+        case codec.lookup_string_key(entries, key) {
+          Ok(ValueInteger(number)) -> Ok(option.Some(number))
+          Ok(_) -> Error(Nil)
+          Error(Nil) -> Ok(option.None)
+        }
+      _ -> Error(Nil)
+    }
+  }
+  use epoch <- result.try(number("epoch"))
+  use sequence <- result.try(number("sequence"))
+  case epoch, sequence {
+    option.Some(epoch), option.Some(sequence) ->
+      Ok(Known(target:, epoch:, sequence:)) |> result.try(wire_cursor)
+    option.None, option.None -> Ok(Unknown(target:))
+    option.Some(_), option.None | option.None, option.Some(_) -> Error(Nil)
   }
 }
 
 fn decode_json(
   bytes: BitArray,
   max_depth: Int,
-  conform: fn(Reflected) -> Result(Reflected, Nil),
-) -> Result(Protocol(model, message), Nil) {
-  use text <- result.try(bit_array.to_string(bytes))
-  use value <- result.try(
-    json.parse(from: text, using: decode.dynamic)
-    |> result.replace_error(Nil),
-  )
-  build(json_reader(value, max_depth, conform))
+  conform: Conformer,
+  from_client: Bool,
+) -> Result(Protocol(model, message), DecodeFailure) {
+  // a payload the platform parser refuses, `1e400` on Erlang say, is still a
+  // message whose head says which edit to roll back
+  let parsed =
+    bit_array.to_string(bytes)
+    |> result.try(fn(text) {
+      json.parse(from: text, using: decode.dynamic)
+      |> result.replace_error(Nil)
+    })
+  case parsed {
+    Ok(value) -> build(json_reader(value, max_depth, conform), from_client)
+    Error(Nil) ->
+      case peek_target(bytes) {
+        option.Some(target) -> Error(Nonconforming(target:))
+        option.None -> Error(Malformed)
+      }
+  }
 }
 
 fn decode_message_pack(
   bytes: BitArray,
   max_depth: Int,
-  conform: fn(Reflected) -> Result(Reflected, Nil),
-) -> Result(Protocol(model, message), Nil) {
-  use #(top_value, _) <- result.try(codec.decode_bounded(bytes, max_depth))
+  conform: Conformer,
+  from_client: Bool,
+) -> Result(Protocol(model, message), DecodeFailure) {
+  use top_value <- result.try(malformed(codec.decode_whole(bytes, max_depth)))
   case top_value {
-    ValueMap(entries) -> build(message_pack_reader(entries, max_depth, conform))
-    _ -> Error(Nil)
+    ValueMap(entries) ->
+      build(message_pack_reader(entries, max_depth, conform), from_client)
+    _ -> Error(Malformed)
   }
 }
 
@@ -958,7 +1160,8 @@ fn decode_target_message_pack(
         codec.lookup_string_key(entries, "id")
       {
         Ok(ValueString("session")), _ -> Ok(Session)
-        Ok(ValueString("topic")), Ok(ValueString(id)) -> Ok(Topic(id:))
+        Ok(ValueString("topic")), Ok(ValueString(id)) ->
+          wire_string(id) |> result.map(Topic)
         _, _ -> Error(Nil)
       }
     _ -> Error(Nil)
@@ -986,6 +1189,33 @@ fn detect_json_format(bytes: BitArray) -> Result(Format, Nil) {
   }
 }
 
+fn encode_cursor_json(cursor: Cursor) -> Json {
+  case cursor {
+    Unknown(target:) -> encode_target_json(target)
+    Known(target:, epoch:, sequence:) ->
+      json.object(
+        list.append(target_fields_json(target), [
+          #("epoch", codec.json_int(epoch)),
+          #("sequence", codec.json_int(sequence)),
+        ]),
+      )
+  }
+}
+
+fn encode_cursor_message_pack(cursor: Cursor) -> BitArray {
+  let encode_string = codec.encode_string
+  case cursor {
+    Unknown(target:) -> encode_target_message_pack(target)
+    Known(target:, epoch:, sequence:) ->
+      codec.encode_map(
+        list.append(target_fields_message_pack(target), [
+          #(encode_string("epoch"), codec.encode_int(epoch)),
+          #(encode_string("sequence"), codec.encode_int(sequence)),
+        ]),
+      )
+  }
+}
+
 fn encode_in(protocol: Protocol(model, message), format: Format) -> BitArray {
   case format {
     Json -> encode_json(protocol)
@@ -997,12 +1227,12 @@ fn encode_in(protocol: Protocol(model, message), format: Format) -> BitArray {
 fn encode_json(protocol: Protocol(model, message)) -> BitArray {
   let writer =
     Writer(
-      int: json.int,
+      int: codec.json_int,
       message: codec.encode_json,
       model: codec.encode_json,
       string: json.string,
       target: encode_target_json,
-      targets: json.array(_, encode_target_json),
+      cursors: json.array(_, encode_cursor_json),
     )
   let #(tag, fields) = frame_fields(protocol, writer)
   json.object([#("type", json.string(tag)), ..fields])
@@ -1019,8 +1249,8 @@ fn encode_message_pack(protocol: Protocol(model, message)) -> BitArray {
       model: payload_bin,
       string: encode_string,
       target: encode_target_message_pack,
-      targets: fn(targets) {
-        codec.encode_array(list.map(targets, encode_target_message_pack))
+      cursors: fn(cursors) {
+        codec.encode_array(list.map(cursors, encode_cursor_message_pack))
       },
     )
   let #(tag, fields) = frame_fields(protocol, writer)
@@ -1030,27 +1260,11 @@ fn encode_message_pack(protocol: Protocol(model, message)) -> BitArray {
 }
 
 fn encode_target_json(target: SyncTarget) -> Json {
-  case target {
-    Session -> json.object([#("kind", json.string("session"))])
-    Topic(id:) ->
-      json.object([
-        #("kind", json.string("topic")),
-        #("id", json.string(id)),
-      ])
-  }
+  json.object(target_fields_json(target))
 }
 
 fn encode_target_message_pack(target: SyncTarget) -> BitArray {
-  let encode_string = codec.encode_string
-  case target {
-    Session ->
-      codec.encode_map([#(encode_string("kind"), encode_string("session"))])
-    Topic(id:) ->
-      codec.encode_map([
-        #(encode_string("kind"), encode_string("topic")),
-        #(encode_string("id"), encode_string(id)),
-      ])
-  }
+  codec.encode_map(target_fields_message_pack(target))
 }
 
 // field order is part of the wire format
@@ -1071,7 +1285,7 @@ fn frame_fields(
       #("topic_id", writer.string(topic_id)),
       #("reason", writer.string(rejection_reason_to_wire(reason))),
     ])
-    Resync(cursors:) -> #("resync", [#("cursors", writer.targets(cursors))])
+    Resync(cursors:) -> #("resync", [#("cursors", writer.cursors(cursors))])
     SessionMessage(payload:) -> #("session_message", [
       #("payload", writer.message(payload)),
     ])
@@ -1079,8 +1293,9 @@ fn frame_fields(
       #("sequence", writer.int(sequence)),
       #("payload", writer.message(payload)),
     ])
-    Snapshot(target:, sequence:, state:) -> #("snapshot", [
+    Snapshot(target:, epoch:, sequence:, state:) -> #("snapshot", [
       #("target", writer.target(target)),
+      #("epoch", writer.int(epoch)),
       #("sequence", writer.int(sequence)),
       #("state", writer.model(state)),
     ])
@@ -1096,6 +1311,7 @@ fn frame_fields(
       #("sequence", writer.int(sequence)),
       #("payload", writer.message(payload)),
     ])
+    Unchanged(target:) -> #("unchanged", [#("target", writer.target(target))])
     Unsubscribe(topic_id:) -> #("unsubscribe", [
       #("topic_id", writer.string(topic_id)),
     ])
@@ -1106,8 +1322,35 @@ fn frame_fields(
   }
 }
 
+// for a serialiser of your own, the automatic one checks the tag first
+fn is_client_frame(protocol: Protocol(model, message)) -> Bool {
+  case protocol {
+    Resync(..)
+    | SessionMessage(..)
+    | Subscribe(..)
+    | TopicMessage(..)
+    | Unsubscribe(..) -> True
+    Acknowledge(..)
+    | Connected(..)
+    | Dropped(..)
+    | Rejected(..)
+    | SessionUpdate(..)
+    | Snapshot(..)
+    | TopicUpdate(..)
+    | Unchanged(..)
+    | Version(..) -> False
+  }
+}
+
 fn is_local_host(hostname: String) -> Bool {
-  hostname == "localhost" || hostname == "127.0.0.1"
+  hostname == "localhost" || hostname == "127.0.0.1" || hostname == "[::1]"
+}
+
+fn json_expect(bytes: BitArray, byte: Int) -> Result(BitArray, Nil) {
+  case bytes {
+    <<found, rest:bytes>> if found == byte -> Ok(rest)
+    _ -> Error(Nil)
+  }
 }
 
 fn json_field(
@@ -1119,25 +1362,98 @@ fn json_field(
   |> result.replace_error(Nil)
 }
 
+// a JSON string at the front, unescaped by the JSON parser, bounded so a
+// hostile frame can't make the scan long
+fn json_head_string(bytes: BitArray) -> Result(#(String, BitArray), Nil) {
+  use rest <- result.try(json_expect(bytes, 0x22))
+  use length <- result.try(json_string_length(rest, 0))
+  use raw <- result.try(bit_array.slice(rest, 0, length))
+  use after <- result.try(bit_array.slice(
+    rest,
+    length + 1,
+    bit_array.byte_size(rest) - length - 1,
+  ))
+  use text <- result.try(bit_array.to_string(raw))
+  use value <- result.try(
+    json.parse(from: "\"" <> text <> "\"", using: decode.string)
+    |> result.replace_error(Nil),
+  )
+  use value <- result.map(wire_string(value))
+  #(value, after)
+}
+
+// the first two string pairs of a JSON object, read by hand from the front
+// so nothing after them is parsed
+fn json_leading_strings(bytes: BitArray) -> List(#(String, String)) {
+  let pair = fn(bytes, opener) {
+    use rest <- result.try(json_expect(json_skip_space(bytes), opener))
+    use #(key, rest) <- result.try(json_head_string(json_skip_space(rest)))
+    use rest <- result.try(json_expect(json_skip_space(rest), 0x3A))
+    use #(value, rest) <- result.map(json_head_string(json_skip_space(rest)))
+    #(#(key, value), rest)
+  }
+  case pair(bytes, 0x7B) {
+    Error(Nil) -> []
+    Ok(#(first, rest)) ->
+      case pair(rest, 0x2C) {
+        Ok(#(second, _)) -> [first, second]
+        Error(Nil) -> [first]
+      }
+  }
+}
+
 fn json_reader(
   value: Dynamic,
   max_depth: Int,
-  conform: fn(Reflected) -> Result(Reflected, Nil),
+  conform: Conformer,
 ) -> Reader(model, message) {
   Reader(
-    int: json_field(value, _, decode.int),
-    message: json_field(value, _, auto_decoder(max_depth, conform)),
-    model: json_field(value, _, auto_decoder(max_depth, Ok)),
-    string: json_field(value, _, decode.string),
-    target: json_field(value, _, target_decoder()),
-    targets: json_field(value, _, decode.list(target_decoder())),
+    int: fn(key) { json_field(value, key, decode.int) |> result.try(wire_int) },
+    message: json_field(value, _, automatic_decoder(max_depth, conform)),
+    model: json_field(value, _, automatic_decoder(max_depth, Ok)),
+    string: fn(key) {
+      json_field(value, key, decode.string) |> result.try(wire_string)
+    },
+    target: fn(key) {
+      json_field(value, key, target_decoder()) |> result.try(wire_target)
+    },
+    cursors: fn(key) {
+      json_field(value, key, decode.list(cursor_decoder()))
+      |> result.try(list.try_map(_, wire_cursor))
+    },
   )
+}
+
+// leading whitespace, as JSON allows it between tokens
+fn json_skip_space(bytes: BitArray) -> BitArray {
+  case bytes {
+    <<0x20, rest:bytes>>
+    | <<0x09, rest:bytes>>
+    | <<0x0A, rest:bytes>>
+    | <<0x0D, rest:bytes>> -> json_skip_space(rest)
+    _ -> bytes
+  }
+}
+
+// bytes before the closing quote, an escape skips the byte after it
+fn json_string_length(bytes: BitArray, length: Int) -> Result(Int, Nil) {
+  case bytes {
+    _ if length > 4096 -> Error(Nil)
+    <<0x22, _:bytes>> -> Ok(length)
+    <<0x5C, _, rest:bytes>> -> json_string_length(rest, length + 2)
+    <<_, rest:bytes>> -> json_string_length(rest, length + 1)
+    _ -> Error(Nil)
+  }
+}
+
+fn malformed(result: Result(value, Nil)) -> Result(value, DecodeFailure) {
+  result.replace_error(result, Malformed)
 }
 
 fn message_pack_payload(
   value: Result(MessagePackValue, Nil),
   max_depth: Int,
-  conform: fn(Reflected) -> Result(Reflected, Nil),
+  conform: Conformer,
 ) -> Result(payload, Nil) {
   case value {
     Ok(ValueBytes(bytes)) ->
@@ -1150,13 +1466,13 @@ fn message_pack_payload(
 fn message_pack_reader(
   entries: List(#(MessagePackValue, MessagePackValue)),
   max_depth: Int,
-  conform: fn(Reflected) -> Result(Reflected, Nil),
+  conform: Conformer,
 ) -> Reader(model, message) {
   let lookup = codec.lookup_string_key(entries, _)
   Reader(
     int: fn(key) {
       case lookup(key) {
-        Ok(ValueInteger(value)) -> Ok(value)
+        Ok(ValueInteger(value)) -> wire_int(value)
         _ -> Error(Nil)
       }
     },
@@ -1164,14 +1480,14 @@ fn message_pack_reader(
     model: fn(key) { message_pack_payload(lookup(key), max_depth, Ok) },
     string: fn(key) {
       case lookup(key) {
-        Ok(ValueString(text)) -> Ok(text)
+        Ok(ValueString(text)) -> wire_string(text)
         _ -> Error(Nil)
       }
     },
     target: fn(key) { lookup(key) |> result.try(decode_target_message_pack) },
-    targets: fn(key) {
+    cursors: fn(key) {
       case lookup(key) {
-        Ok(ValueArray(items)) -> list.try_map(items, decode_target_message_pack)
+        Ok(ValueArray(items)) -> list.try_map(items, decode_cursor_message_pack)
         _ -> Error(Nil)
       }
     },
@@ -1242,6 +1558,61 @@ fn target_decoder() -> decode.Decoder(SyncTarget) {
   }
 }
 
+fn target_fields_json(target: SyncTarget) -> List(#(String, Json)) {
+  case target {
+    Session -> [#("kind", json.string("session"))]
+    Topic(id:) -> [#("kind", json.string("topic")), #("id", json.string(id))]
+  }
+}
+
+fn target_fields_message_pack(
+  target: SyncTarget,
+) -> List(#(BitArray, BitArray)) {
+  let encode_string = codec.encode_string
+  case target {
+    Session -> [#(encode_string("kind"), encode_string("session"))]
+    Topic(id:) -> [
+      #(encode_string("kind"), encode_string("topic")),
+      #(encode_string("id"), encode_string(id)),
+    ]
+  }
+}
+
+fn wire_cursor(cursor: Cursor) -> Result(Cursor, Nil) {
+  case cursor {
+    Unknown(target:) -> wire_target(target) |> result.map(Unknown)
+    Known(target:, epoch:, sequence:) -> {
+      use target <- result.try(wire_target(target))
+      use epoch <- result.try(wire_int(epoch))
+      use sequence <- result.try(wire_int(sequence))
+      Ok(Known(target:, epoch:, sequence:))
+    }
+  }
+}
+
+// a frame's sequence or protocol, inside what either target holds exactly
+fn wire_int(value: Int) -> Result(Int, Nil) {
+  case codec.int_in_range(value) {
+    True -> Ok(value)
+    False -> Error(Nil)
+  }
+}
+
+// refuses a lone surrogate, and copies so an id doesn't keep the frame alive
+fn wire_string(text: String) -> Result(String, Nil) {
+  case codec.is_well_formed(text) {
+    True -> Ok(codec.copy_string(text))
+    False -> Error(Nil)
+  }
+}
+
+fn wire_target(target: SyncTarget) -> Result(SyncTarget, Nil) {
+  case target {
+    Session -> Ok(Session)
+    Topic(id:) -> wire_string(id) |> result.map(Topic)
+  }
+}
+
 // =============================================================================
 // PRIVATE FFI
 // =============================================================================
@@ -1250,6 +1621,7 @@ fn target_decoder() -> decode.Decoder(SyncTarget) {
 fn ffi_offline_connect(
   _connect: fn(ConnectorHandler) -> Channel,
   _storage_key: String,
+  _protocol: Int,
   _handler: ConnectorHandler,
   _make_connector_handler: fn(fn(BitArray) -> Nil, fn() -> Nil, fn() -> Nil) ->
     ConnectorHandler,
@@ -1259,7 +1631,7 @@ fn ffi_offline_connect(
 }
 
 @external(javascript, "./transport.ffi.mjs", "offlinePending")
-fn ffi_offline_pending(_storage_key: String) -> List(BitArray) {
+fn ffi_offline_pending(_storage_key: String, _protocol: Int) -> List(BitArray) {
   []
 }
 
@@ -1280,3 +1652,8 @@ fn ffi_websocket_connect(
 fn page_hostname() -> String {
   ""
 }
+
+// actor's rescue, which can't be imported here since actor imports transport
+@external(erlang, "lily_actor_ffi", "rescue")
+@external(javascript, "./internal/actor.ffi.mjs", "rescue")
+fn rescue(operation: fn() -> value) -> Result(value, String)

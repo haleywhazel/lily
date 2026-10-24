@@ -23,12 +23,10 @@
 //// }
 //// ```
 ////
-//// // this should be in your client/frontend code
-////
 //// Within your client/frontend code, you can then add the following to
 //// initialise the store:
 ////
-//// ```
+//// ```gleam
 //// let store = store.new(init: Model(count: 0), update: update)
 //// ```
 ////
@@ -76,10 +74,16 @@
 //// ```
 ////
 //// The server runs `update` against its own copy of the model, one per
-//// connection and one per topic, and sends back only the slice that the
-//// `get` and `set` pair describes. Every copy starts from the initial model.
-//// A topic whose state lives somewhere else, like a database, can start from
-//// its own model with [`server.topic_init`](./server.html#topic_init).
+//// connection and one per topic, and the client keeps only the slice that
+//// the `get` and `set` pair describes. Every copy starts from the initial
+//// model. A topic whose state lives somewhere else, like a database, can
+//// start from its own model with
+//// [`server.topic_init`](./server.html#topic_init).
+////
+//// A snapshot carries the server's whole copy though, not just the slice, so
+//// every field of a session's model reaches that client and every field of a
+//// topic's model reaches every subscriber. Keep what one client mustn't see
+//// out of the copies the server holds for others.
 ////
 //// Keep `update` pure. A client replays its own unconfirmed messages through
 //// it on top of each fresh copy the server sends, which is how clients agree
@@ -90,8 +94,11 @@
 //// [`topics`](#topics) a family of them whose ids share a prefix. An exact id
 //// beats any prefix, and among families the longest matching prefix wins,
 //// meaning a prefix should end with a separator (e.g. a colon). The server
-//// will start a topic the first time someone subscribes to it or sends a
-//// message to it.
+//// will start a topic the first time someone subscribes to it or the server
+//// dispatches to it with
+//// [`server.dispatch_topic`](./server.html#dispatch_topic). A topic stopped
+//// with [`server.stop_topic`](./server.html#stop_topic) starts the same way,
+//// and the clients that held it are subscribed again when it does.
 ////
 //// Which topics a client subscribes/listens to is a function of its model
 //// under [`subscriptions`](#subscriptions). Lily compares it after every
@@ -111,6 +118,7 @@ import gleam/option.{type Option}
 import gleam/result
 import gleam/string
 
+import lily/internal/actor
 import lily/internal/codec
 import lily/transport.{type Serialiser, type SyncTarget}
 
@@ -124,6 +132,13 @@ import lily/transport.{type Serialiser, type SyncTarget}
 /// `Allow` gets the client id, the topic id and that client's session model,
 /// which holds whatever the server wrote into it. A client it refuses sees a
 /// [`SubscriptionRejected`](./client.html#ClientEvent).
+///
+/// A client can send any message routed to `Session`, so whatever `Allow`
+/// reads, identity above all, must be written by a message routed `Local`.
+/// The server drops a client's `Local` message but applies one it sends
+/// itself, through a seed on [`server.connect_as`](./server.html#connect_as)
+/// or [`server.open_as`](./server.html#open_as), or through
+/// [`server.dispatch_to`](./server.html#dispatch_to).
 pub type Access(model) {
   /// Anyone can subscribe
   Open
@@ -170,7 +185,9 @@ pub type Synced
 /// Embeds `model` in a server-rendered page as a `<script>` tag, letting
 /// [`client.start`](./client.html#start) start from it.
 ///
-/// It only carries the model, rendering the page's HTML is up to you.
+/// It only carries the model, rendering the page's HTML is up to you. A model
+/// that has no wire form, an `Int` past what JavaScript holds say, embeds
+/// nothing and logs why.
 ///
 /// ```gleam
 /// let body = "<!DOCTYPE html><html><body>"
@@ -183,17 +200,37 @@ pub fn initial_snapshot(
   model model: model,
 ) -> String {
   let frame =
-    transport.Snapshot(target: transport.Session, sequence: 0, state: model)
-  let serialiser = store.sync.serialiser
-  let bytes =
-    transport.encode_as(
-      frame,
-      serialiser:,
-      format: transport.server_format(serialiser),
+    // applied as it stands, never resynced against, so it names no epoch
+    transport.Snapshot(
+      target: transport.Session,
+      epoch: 0,
+      sequence: 0,
+      state: model,
     )
-  "<script type=\"application/octet-stream\" id=\"lily-snapshot\">"
-  <> bit_array.base64_encode(bytes, True)
-  <> "</script>"
+  let serialiser = store.sync.serialiser
+  let encoded =
+    actor.rescue(fn() {
+      transport.encode_as(
+        frame,
+        serialiser:,
+        format: transport.server_format(serialiser),
+      )
+    })
+  // a model with no wire form, an int out of range say, embeds nothing and the
+  // page starts from the store's model
+  case encoded {
+    Ok(bytes) ->
+      "<script type=\"application/octet-stream\" id=\"lily-snapshot\">"
+      <> bit_array.base64_encode(bytes, True)
+      <> "</script>"
+    Error(reason) -> {
+      actor.log(
+        transport.Failure,
+        "lily: initial_snapshot couldn't encode the model: " <> reason,
+      )
+      ""
+    }
+  }
 }
 
 /// Creates a store, with an `init` model (like Lustre's `init`) and a function
@@ -209,7 +246,7 @@ pub fn new(
   Store(
     model: init,
     update:,
-    // don't send anything for now until later pipe constructors
+    // local until `sync` sets a route
     sync: SyncSettings(
       route: fn(_) { Local },
       serialiser: transport.automatic(
@@ -439,8 +476,8 @@ pub fn has_slice(
   }
 }
 
-/// An exact id beats any prefix, then the longest prefix wins. Gives back the
-/// rest of the id after the prefix, empty for an exact id.
+/// An exact id beats any prefix, then the longest prefix in bytes wins. Gives
+/// back the rest of the id after the prefix, empty for an exact id.
 @internal
 pub fn match_topic(
   entries: List(entry),
@@ -457,7 +494,7 @@ pub fn match_topic(
           IdPrefix(prefix) -> {
             let longer = case best {
               Ok(#(_, incumbent)) ->
-                string.length(prefix) > string.length(incumbent)
+                string.byte_size(prefix) > string.byte_size(incumbent)
               Error(Nil) -> True
             }
             case longer && string.starts_with(id, prefix) {
@@ -467,8 +504,10 @@ pub fn match_topic(
           }
         }
       })
-      |> result.map(fn(found) {
-        #(found.0, string.drop_start(id, string.length(found.1)))
+      |> result.try(fn(found) {
+        let #(entry, prefix) = found
+        use rest <- result.map(drop_bytes(id, string.byte_size(prefix)))
+        #(entry, rest)
       })
   }
 }
@@ -579,6 +618,14 @@ fn add_topic(
     let others = list.filter(sync.topics, fn(other) { other.match != match })
     SyncSettings(..sync, topics: [TopicEntry(match:, access:, merge:), ..others])
   })
+}
+
+// matching is by bytes and so is the rest, by graphemes a combining mark after
+// the prefix would hand two ids the same rest
+fn drop_bytes(text: String, count: Int) -> Result(String, Nil) {
+  let bytes = bit_array.from_string(text)
+  bit_array.slice(bytes, count, bit_array.byte_size(bytes) - count)
+  |> result.try(bit_array.to_string)
 }
 
 fn entry_for(

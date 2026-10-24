@@ -277,3 +277,22 @@ pub fn store_match_topic_an_exact_id_has_an_empty_rest_test() {
   store.match_topic(entries, "chatter", fn(entry) { entry.0 })
   |> should.equal(Ok(#(#(store.IdPrefix("ch"), 1), "atter")))
 }
+
+// =============================================================================
+// TOPIC MATCHING
+// =============================================================================
+
+pub fn store_match_topic_takes_the_rest_by_bytes_test() {
+  let entries = [store.IdPrefix("room:")]
+
+  store.match_topic(entries, "room:\u{0301}x", fn(entry) { entry })
+  |> should.equal(Ok(#(store.IdPrefix("room:"), "\u{0301}x")))
+}
+
+pub fn store_match_topic_picks_the_longest_prefix_by_bytes_test() {
+  // one grapheme each, the second is three bytes to the first's one
+  let entries = [store.IdPrefix("e"), store.IdPrefix("e\u{0301}")]
+
+  store.match_topic(entries, "e\u{0301}x", fn(entry) { entry })
+  |> should.equal(Ok(#(store.IdPrefix("e\u{0301}"), "x")))
+}

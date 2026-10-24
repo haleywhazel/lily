@@ -58,6 +58,13 @@ pub type Reflected {
 @internal
 pub const default_max_depth = 128
 
+/// Copies a string sliced from a frame on Erlang, letting the frame be freed.
+@external(erlang, "lily_codec_ffi", "copy_string")
+@internal
+pub fn copy_string(text: String) -> String {
+  text
+}
+
 @internal
 pub fn decode_bounded(
   bytes: BitArray,
@@ -68,17 +75,33 @@ pub fn decode_bounded(
 
 @internal
 pub fn decode_data_message(encoded: String) -> Result(message, Nil) {
+  decode_data_message_with(encoded, Ok)
+}
+
+/// `conform` checks the reflected message before it's built, the schema's
+/// check for markup a page didn't write.
+@internal
+pub fn decode_data_message_with(
+  encoded: String,
+  conform: fn(Reflected) -> Result(Reflected, Nil),
+) -> Result(message, Nil) {
   case string.starts_with(encoded, data_message_prefix) {
     False -> Error(Nil)
     True -> {
-      let payload =
-        string.drop_start(encoded, string.length(data_message_prefix))
+      // by bytes, a combining mark after the prefix is part of the payload
+      let raw = bit_array.from_string(encoded)
+      let start = string.byte_size(data_message_prefix)
+      use payload <- result.try(
+        bit_array.slice(raw, start, bit_array.byte_size(raw) - start)
+        |> result.try(bit_array.to_string),
+      )
       use bytes <- result.try(bit_array.base64_decode(payload))
-      use #(value, _) <- result.try(decode_bounded(bytes, default_max_depth))
+      use value <- result.try(decode_whole(bytes, default_max_depth))
       use reflected <- result.try(message_pack_value_to_reflected(
         value,
         default_max_depth,
       ))
+      use reflected <- result.try(conform(reflected))
       use message <- result.try(construct_data_message(reflected))
       Ok(passthrough(message))
     }
@@ -102,13 +125,25 @@ pub fn decode_message_pack(
   max_depth: Int,
   conform: fn(Reflected) -> Result(Reflected, Nil),
 ) -> Result(Dynamic, Nil) {
-  use #(message_pack_value, _) <- result.try(decode_bounded(bytes, max_depth))
+  use message_pack_value <- result.try(decode_whole(bytes, max_depth))
   use reflected <- result.try(message_pack_value_to_reflected(
     message_pack_value,
     max_depth,
   ))
   use reflected <- result.try(conform(reflected))
   construct(reflected)
+}
+
+/// A whole MessagePack value, bytes left over after it are refused.
+@internal
+pub fn decode_whole(
+  bytes: BitArray,
+  max_depth: Int,
+) -> Result(MessagePackValue, Nil) {
+  case decode_at(bytes, 0, max_depth) {
+    Ok(#(value, <<>>)) -> Ok(value)
+    _ -> Error(Nil)
+  }
 }
 
 @internal
@@ -135,21 +170,14 @@ pub fn encode_data_message(message: a) -> String {
   data_message_prefix <> bit_array.base64_encode(bytes, False)
 }
 
+/// Raises for an int outside the wire range, one of the deliberate raises
+/// along with non-finite floats and lone surrogates, every encode site is
+/// rescued.
 @internal
 pub fn encode_int(value: Int) -> BitArray {
-  case value {
-    _ if value >= 0 && value <= 0x7f -> <<value>>
-    _ if value >= 0 && value <= 0xff -> <<0xcc, value>>
-    _ if value >= 0 && value <= 0xffff -> <<0xcd, value:16-big>>
-    _ if value >= 0 && value <= 0xffffffff -> <<0xce, value:32-big>>
-    _ if value >= 0 -> bit_array.concat([<<0xcf>>, unsigned_to_bytes(value, 8)])
-    // two's complement, adding 2^N then truncating to N bits
-    _ if value >= -32 -> <<{ 0x100 + value }:8>>
-    _ if value >= -128 -> <<0xd0, { 0x100 + value }:8>>
-    _ if value >= -32_768 -> <<0xd1, { 0x10000 + value }:16-big>>
-    _ if value >= -2_147_483_648 -> <<0xd2, { 0x100000000 + value }:32-big>>
-    // int arithmetic, the JS target narrows 64-bit segments to 52 bits
-    _ -> bit_array.concat([<<0xd3>>, signed_to_bytes(value, 8)])
+  case int_in_range(value) {
+    True -> encode_ranged_int(value)
+    False -> refuse_int(value)
   }
 }
 
@@ -172,8 +200,10 @@ pub fn encode_message_pack(value: a) -> BitArray {
   |> reflected_to_message_pack
 }
 
+/// Raises for a string with a lone surrogate, like [`encode_int`](#encode_int).
 @internal
 pub fn encode_string(value: String) -> BitArray {
+  use <- bool.lazy_guard(when: !is_well_formed(value), return: refuse_string)
   let bytes = bit_array.from_string(value)
   case bit_array.byte_size(bytes) {
     length if length <= 31 -> bit_array.concat([<<{ 0xa0 + length }:8>>, bytes])
@@ -181,6 +211,45 @@ pub fn encode_string(value: String) -> BitArray {
     length if length <= 0xffff ->
       bit_array.concat([<<0xda, length:16-big>>, bytes])
     length -> bit_array.concat([<<0xdb, length:32-big>>, bytes])
+  }
+}
+
+/// Within 2^53 - 1 either side of zero, what both targets hold exactly.
+@external(erlang, "lily_codec_ffi", "int_in_range")
+@external(javascript, "./codec.ffi.mjs", "intInRange")
+@internal
+pub fn int_in_range(value: Int) -> Bool
+
+/// `False` for a string with a lone surrogate, which only JavaScript can hold.
+@external(javascript, "./codec.ffi.mjs", "isWellFormed")
+@internal
+pub fn is_well_formed(text: String) -> Bool {
+  let _ = text
+  True
+}
+
+/// Raises like [`encode_int`](#encode_int).
+@internal
+pub fn json_int(value: Int) -> Json {
+  case int_in_range(value) {
+    True -> json.int(value)
+    False -> refuse_int(value)
+  }
+}
+
+/// The leading string pairs of a MessagePack map, at most `limit`, stopping at
+/// the first value that isn't a string. Reads nothing past them, so a frame's
+/// payload is never parsed.
+@internal
+pub fn leading_strings(bytes: BitArray, limit: Int) -> List(#(String, String)) {
+  case bytes {
+    <<marker, rest:bytes>> if marker >= 0x80 && marker <= 0x8f ->
+      leading_pairs(rest, int.min(marker - 0x80, limit), [])
+    <<0xde, count:16-big, rest:bytes>> ->
+      leading_pairs(rest, int.min(count, limit), [])
+    <<0xdf, count:32-big, rest:bytes>> ->
+      leading_pairs(rest, int.min(count, limit), [])
+    _ -> []
   }
 }
 
@@ -401,7 +470,7 @@ fn decode_string(
   // too few bytes fails the pattern and falls through to Error
   case bytes {
     <<taken:bytes-size(length), rest:bytes>> ->
-      case bit_array.to_string(taken) {
+      case utf8_to_string(taken) {
         Error(_) -> Error(Nil)
         Ok(text) -> Ok(#(ValueString(text), rest))
       }
@@ -454,31 +523,67 @@ fn encode_bool(value: Bool) -> BitArray {
   }
 }
 
+// raises like `encode_int`, a JavaScript float can be infinite or NaN
 fn encode_float(value: Float) -> BitArray {
-  <<0xcb, value:64-float-big>>
+  case is_finite(value) {
+    True -> <<0xcb, value:64-float-big>>
+    False -> refuse_float()
+  }
 }
 
 fn encode_nil() -> BitArray {
   <<0xc0>>
 }
 
-fn extract_constructor_name(
-  index: Dict(String, MessagePackValue),
-) -> Result(String, Nil) {
-  case dict.get(index, "_") {
-    Ok(ValueString(name)) -> Ok(name)
-    _ -> Error(Nil)
+fn encode_ranged_int(value: Int) -> BitArray {
+  case value {
+    _ if value >= 0 && value <= 0x7f -> <<value>>
+    _ if value >= 0 && value <= 0xff -> <<0xcc, value>>
+    _ if value >= 0 && value <= 0xffff -> <<0xcd, value:16-big>>
+    _ if value >= 0 && value <= 0xffffffff -> <<0xce, value:32-big>>
+    _ if value >= 0 -> bit_array.concat([<<0xcf>>, unsigned_to_bytes(value, 8)])
+    // two's complement, adding 2^N then truncating to N bits
+    _ if value >= -32 -> <<{ 0x100 + value }:8>>
+    _ if value >= -128 -> <<0xd0, { 0x100 + value }:8>>
+    _ if value >= -32_768 -> <<0xd1, { 0x10000 + value }:16-big>>
+    _ if value >= -2_147_483_648 -> <<0xd2, { 0x100000000 + value }:32-big>>
+    // int arithmetic, the JS target narrows 64-bit segments to 52 bits
+    _ -> bit_array.concat([<<0xd3>>, signed_to_bytes(value, 8)])
   }
 }
 
+// `Ok(None)` for no tag, a tuple, and an error for a tag that isn't a string
+fn extract_constructor_name(
+  index: Dict(String, MessagePackValue),
+) -> Result(option.Option(String), Nil) {
+  case dict.get(index, "_") {
+    Ok(ValueString(name)) -> Ok(option.Some(name))
+    Ok(_) -> Error(Nil)
+    Error(Nil) -> Ok(option.None)
+  }
+}
+
+// infinity and NaN would poison shared state
+fn float_to_reflected(value: Float) -> Result(Reflected, Nil) {
+  case is_finite(value) {
+    True -> Ok(ReflectedFloat(value))
+    False -> Error(Nil)
+  }
+}
+
+// dict once, O(1) lookups instead of rescanning per field, and a repeated
+// key is refused, which copy wins would differ between decoders
 fn index_entries(
   entries: List(#(MessagePackValue, MessagePackValue)),
-) -> Dict(String, MessagePackValue) {
-  // dict once, O(1) lookups instead of rescanning per field
-  list.fold(entries, dict.new(), fn(index, entry) {
+) -> Result(Dict(String, MessagePackValue), Nil) {
+  list.try_fold(entries, dict.new(), fn(index, entry) {
     case entry {
-      #(ValueString(key), value) -> dict.insert(index, key, value)
-      _ -> index
+      #(ValueString(key), value) ->
+        case dict.has_key(index, key) {
+          True -> Error(Nil)
+          False -> Ok(dict.insert(index, key, value))
+        }
+      _ -> Ok(index)
     }
   })
 }
@@ -551,13 +656,20 @@ fn json_scalar_to_reflected(value: Dynamic) -> Result(Reflected, Nil) {
     Ok(bool_value) -> Ok(ReflectedBool(bool_value))
     Error(_) ->
       case run_decoder(value, decode.string) {
-        Ok(string_value) -> Ok(ReflectedString(string_value))
+        Ok(string_value) -> string_to_reflected(string_value)
         Error(_) ->
           case run_decoder(value, decode.int) {
-            Ok(int_value) -> Ok(ReflectedInteger(int_value))
+            // JSON writes a large whole float as an int, kept as a float
+            Ok(int_value) ->
+              case int_in_range(int_value) {
+                True -> Ok(ReflectedInteger(int_value))
+                False ->
+                  int_to_finite_float(int_value)
+                  |> result.try(float_to_reflected)
+              }
             Error(_) ->
               case run_decoder(value, decode.float) {
-                Ok(float_value) -> Ok(ReflectedFloat(float_value))
+                Ok(float_value) -> float_to_reflected(float_value)
                 Error(_) ->
                   // only a bare JSON null is left
                   case run_decoder(value, decode.optional(decode.bool)) {
@@ -600,6 +712,37 @@ fn json_to_reflected(value: Dynamic, remaining: Int) -> Result(Reflected, Nil) {
   }
 }
 
+fn leading_pairs(
+  bytes: BitArray,
+  remaining: Int,
+  pairs: List(#(String, String)),
+) -> List(#(String, String)) {
+  let pair = {
+    use #(key, rest) <- result.try(leading_string(bytes))
+    use #(value, rest) <- result.map(leading_string(rest))
+    #(#(key, value), rest)
+  }
+  case remaining, pair {
+    0, _ | _, Error(Nil) -> list.reverse(pairs)
+    _, Ok(#(pair, rest)) -> leading_pairs(rest, remaining - 1, [pair, ..pairs])
+  }
+}
+
+fn leading_string(bytes: BitArray) -> Result(#(String, BitArray), Nil) {
+  let read = case bytes {
+    <<byte, rest:bytes>> if byte >= 0xa0 && byte <= 0xbf ->
+      decode_string(rest, byte - 0xa0)
+    <<0xd9, length, rest:bytes>> -> decode_string(rest, length)
+    <<0xda, length:16-big, rest:bytes>> -> decode_string(rest, length)
+    <<0xdb, length:32-big, rest:bytes>> -> decode_string(rest, length)
+    _ -> Error(Nil)
+  }
+  case read {
+    Ok(#(ValueString(text), rest)) -> Ok(#(text, rest))
+    _ -> Error(Nil)
+  }
+}
+
 fn map_header(length: Int) -> BitArray {
   case length {
     length if length <= 15 -> <<{ 0x80 + length }:8>>
@@ -613,22 +756,24 @@ fn map_to_reflected(
   max_depth: Int,
 ) -> Result(Reflected, Nil) {
   // `_`-tagged custom type, tag-less tuple, or `$dict`/`$set` sentinel
-  let index = index_entries(entries)
+  use index <- result.try(index_entries(entries))
   let fields = fn() {
     collect_indexed(index, 0, [], fn(value) {
       message_pack_value_to_reflected(value, max_depth)
     })
   }
   case extract_constructor_name(index) {
-    Ok("$dict") -> dict_to_reflected(entries, max_depth)
-    Ok("$set") -> set_to_reflected(entries, max_depth)
-    Ok(name) -> result.map(fields(), ReflectedConstructor(name:, fields: _))
+    Ok(option.Some("$dict")) -> dict_to_reflected(entries, max_depth)
+    Ok(option.Some("$set")) -> set_to_reflected(entries, max_depth)
+    Ok(option.Some(name)) ->
+      result.map(fields(), ReflectedConstructor(name:, fields: _))
     // no `_` tag, a raw tuple
-    Error(_) ->
+    Ok(option.None) ->
       case fields() {
         Ok([]) | Error(_) -> Error(Nil)
         Ok(fields) -> Ok(ReflectedTuple(fields:))
       }
+    Error(Nil) -> Error(Nil)
   }
 }
 
@@ -639,9 +784,13 @@ fn message_pack_value_to_reflected(
   case value {
     ValueNil -> Ok(ReflectedNil)
     ValueBool(value) -> Ok(ReflectedBool(value))
-    ValueInteger(value) -> Ok(ReflectedInteger(value))
-    ValueFloat(value) -> Ok(ReflectedFloat(value))
-    ValueString(value) -> Ok(ReflectedString(value))
+    ValueInteger(value) ->
+      case int_in_range(value) {
+        True -> Ok(ReflectedInteger(value))
+        False -> Error(Nil)
+      }
+    ValueFloat(value) -> float_to_reflected(value)
+    ValueString(value) -> string_to_reflected(value)
     // never emitted, and a nested bin would reset the depth budget
     ValueBytes(_) -> Error(Nil)
     ValueArray(items) -> {
@@ -660,9 +809,17 @@ fn reflected_to_json(reflected: Reflected) -> Json {
   case reflected {
     ReflectedNil -> json.null()
     ReflectedBool(value) -> json.bool(value)
-    ReflectedInteger(value) -> json.int(value)
-    ReflectedFloat(value) -> json.float(value)
-    ReflectedString(value) -> json.string(value)
+    ReflectedInteger(value) -> json_int(value)
+    ReflectedFloat(value) ->
+      case is_finite(value) {
+        True -> json.float(value)
+        False -> refuse_float()
+      }
+    ReflectedString(value) ->
+      case is_well_formed(value) {
+        True -> json.string(value)
+        False -> refuse_string()
+      }
     ReflectedList(items) ->
       json.preprocessed_array(list.map(items, reflected_to_json))
     ReflectedTuple(fields:) -> json.object(indexed_fields_json(fields))
@@ -773,6 +930,13 @@ fn signed_to_bytes(value: Int, count: Int) -> BitArray {
   }
 }
 
+fn string_to_reflected(value: String) -> Result(Reflected, Nil) {
+  case is_well_formed(value) {
+    True -> Ok(ReflectedString(value))
+    False -> Error(Nil)
+  }
+}
+
 // byte by byte so no intermediate exceeds a byte
 fn twos_complement(bytes: BitArray) -> BitArray {
   let inverted_low_first =
@@ -826,6 +990,17 @@ fn construct(reflected: Reflected) -> Result(Dynamic, Nil)
 @external(javascript, "./codec.ffi.mjs", "constructDataMessage")
 fn construct_data_message(reflected: Reflected) -> Result(Dynamic, Nil)
 
+@external(erlang, "lily_codec_ffi", "int_to_finite_float")
+@external(javascript, "./codec.ffi.mjs", "intToFiniteFloat")
+fn int_to_finite_float(value: Int) -> Result(Float, Nil)
+
+// a float on Erlang never holds infinity or NaN
+@external(javascript, "./codec.ffi.mjs", "isFiniteFloat")
+fn is_finite(value: Float) -> Bool {
+  let _ = value
+  True
+}
+
 @external(erlang, "lily_codec_ffi", "reflect")
 @external(javascript, "./codec.ffi.mjs", "reflect")
 fn reflect(value: a) -> Reflected
@@ -834,3 +1009,21 @@ fn reflect(value: a) -> Reflected
 @external(erlang, "lily_codec_ffi", "reflect")
 @external(javascript, "./codec.ffi.mjs", "reflectDataMessage")
 fn reflect_data_message(value: a) -> Reflected
+
+@external(erlang, "lily_codec_ffi", "refuse_float")
+@external(javascript, "./codec.ffi.mjs", "refuseFloat")
+fn refuse_float() -> anything
+
+@external(erlang, "lily_codec_ffi", "refuse_int")
+@external(javascript, "./codec.ffi.mjs", "refuseInt")
+fn refuse_int(value: Int) -> anything
+
+@external(erlang, "lily_codec_ffi", "refuse_string")
+@external(javascript, "./codec.ffi.mjs", "refuseString")
+fn refuse_string() -> anything
+
+// Erlang's own check, JavaScript's keeps a leading byte-order mark
+@external(javascript, "./codec.ffi.mjs", "utf8ToString")
+fn utf8_to_string(bytes: BitArray) -> Result(String, Nil) {
+  bit_array.to_string(bytes)
+}

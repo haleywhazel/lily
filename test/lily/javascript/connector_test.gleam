@@ -330,7 +330,10 @@ pub fn connect_sends_the_resync_ahead_of_edits_queued_offline_test() {
   |> list.reverse
   |> decode_all
   |> should.equal([
-    transport.Resync(cursors: [transport.Session, transport.Topic("chat")]),
+    transport.Resync(cursors: [
+      transport.Unknown(transport.Session),
+      transport.Unknown(transport.Topic("chat")),
+    ]),
     transport.TopicMessage(topic_id: "chat", payload: test_support.Increment),
     transport.TopicMessage(topic_id: "chat", payload: test_support.Increment),
   ])
@@ -364,7 +367,10 @@ pub fn connect_sends_the_resync_ahead_of_a_reloaded_queue_test() {
   |> list.reverse
   |> decode_all
   |> should.equal([
-    transport.Resync(cursors: [transport.Session, transport.Topic("chat")]),
+    transport.Resync(cursors: [
+      transport.Unknown(transport.Session),
+      transport.Unknown(transport.Topic("chat")),
+    ]),
     transport.TopicMessage(topic_id: "chat", payload: test_support.Increment),
   ])
 }
@@ -397,6 +403,7 @@ pub fn connect_keeps_a_reloaded_edit_on_top_of_the_snapshot_test() {
   handler.received(
     encode(transport.Snapshot(
       target: transport.Topic("chat"),
+      epoch: 0,
       sequence: 0,
       state: test_support.initial_model(),
     )),
@@ -408,6 +415,7 @@ pub fn connect_keeps_a_reloaded_edit_on_top_of_the_snapshot_test() {
   handler.received(
     encode(transport.Snapshot(
       target: transport.Topic("chat"),
+      epoch: 0,
       sequence: 1,
       state: test_support.Model(..test_support.initial_model(), count: 1),
     )),

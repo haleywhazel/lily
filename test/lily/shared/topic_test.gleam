@@ -24,9 +24,9 @@ import lily/wire_support
 // =============================================================================
 
 // `room:1` up to `room:count`
-fn room_cursors(count: Int) -> List(transport.SyncTarget) {
+fn room_cursors(count: Int) -> List(transport.Cursor) {
   int.range(from: 1, to: count + 1, with: [], run: fn(cursors, n) {
-    [transport.Topic("room:" <> int.to_string(n)), ..cursors]
+    [transport.Unknown(transport.Topic("room:" <> int.to_string(n))), ..cursors]
   })
   |> list.reverse
 }
@@ -43,6 +43,25 @@ fn joined(
   wire_support.subscribe(connection, "chat")
   let _ = frames()
   #(connection, frames)
+}
+
+// `chat` started by a subscriber and dispatched to once, its epoch read off
+// that subscriber's snapshot
+fn chat_epoch_after_one_dispatch(
+  app: server.Server(test_support.Model, test_support.Message),
+) -> Int {
+  let #(c1, raw) = wire_support.open_raw(app, "c1", [])
+  wire_support.subscribe(c1, "chat")
+  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  let epochs =
+    list.filter_map(raw(), fn(bytes) {
+      case wire_support.decode_exact(bytes) {
+        transport.Snapshot(epoch:, ..) -> Ok(epoch)
+        _ -> Error(Nil)
+      }
+    })
+  let assert [epoch] = epochs
+  epoch
 }
 
 fn is_diagnostic(event: server.ServerEvent(model, message)) -> Bool {
@@ -291,7 +310,14 @@ pub fn topic_applies_the_full_update_to_its_own_model_test() {
   wire_support.subscribe(c1, "chat")
 
   case frames() {
-    [transport.Snapshot(target: transport.Topic("chat"), sequence: 2, state:)] ->
+    [
+      transport.Snapshot(
+        target: transport.Topic("chat"),
+        epoch: 0,
+        sequence: 2,
+        state:,
+      ),
+    ] ->
       state.count
       |> should.equal(2)
     _ -> should.fail()
@@ -349,6 +375,7 @@ pub fn topic_subscribe_sends_snapshot_to_new_subscriber_test() {
   |> should.equal([
     transport.Snapshot(
       target: transport.Topic("chat"),
+      epoch: 0,
       sequence: 0,
       state: test_support.initial_model(),
     ),
@@ -383,7 +410,7 @@ pub fn topic_subscribe_to_unknown_topic_sends_rejected_test() {
   |> should.equal(-1)
 }
 
-pub fn topic_subscribing_twice_sends_a_second_snapshot_test() {
+pub fn topic_subscribing_twice_sends_one_snapshot_test() {
   let app = test_support.new_topic_server()
   let #(c1, frames) = wire_support.open(app, "c1")
 
@@ -393,7 +420,7 @@ pub fn topic_subscribing_twice_sends_a_second_snapshot_test() {
   frames()
   |> list.filter(wire_support.is_snapshot)
   |> list.length
-  |> should.equal(2)
+  |> should.equal(1)
   test_support.subscriber_count(app, "chat")
   |> should.equal(1)
 }
@@ -429,6 +456,7 @@ pub fn topic_allow_true_admits_test() {
   |> should.equal([
     transport.Snapshot(
       target: transport.Topic("chat"),
+      epoch: 0,
       sequence: 0,
       state: test_support.initial_model(),
     ),
@@ -713,7 +741,7 @@ pub fn topic_subscription_cap_rejects_until_one_is_left_test() {
   |> should.equal(1)
 }
 
-pub fn topic_subscription_cap_allows_a_repeat_subscribe_test() {
+pub fn topic_subscription_cap_ignores_a_repeat_subscribe_test() {
   let app =
     test_support.start_server(
       test_support.topic_builder()
@@ -721,19 +749,21 @@ pub fn topic_subscription_cap_allows_a_repeat_subscribe_test() {
     )
   let #(c1, frames) = wire_support.open(app, "c1")
   wire_support.subscribe(c1, "chat")
+  let _ = frames()
 
   wire_support.subscribe(c1, "chat")
 
   frames()
-  |> list.all(wire_support.is_snapshot)
-  |> should.be_true
+  |> should.equal([])
+  test_support.subscriber_count(app, "chat")
+  |> should.equal(1)
 }
 
 pub fn topic_id_over_the_length_cap_is_rejected_test() {
   let app =
     test_support.start_server(
       test_support.topic_builder()
-      |> server.max_topic_id_length(bytes: 8),
+      |> server.max_topic_id_bytes(bytes: 8),
     )
   let #(c1, frames) = wire_support.open(app, "c1")
 
@@ -741,7 +771,7 @@ pub fn topic_id_over_the_length_cap_is_rejected_test() {
 
   frames()
   |> should.equal([
-    transport.Rejected(topic_id: "room:1234", reason: transport.OverLimit),
+    transport.Rejected(topic_id: "room:123", reason: transport.OverLimit),
   ])
   test_support.subscriber_count(app, "room:1234")
   |> should.equal(-1)
@@ -761,23 +791,23 @@ pub fn topic_id_length_cap_defaults_to_256_bytes_test() {
   |> should.equal(1)
   list.contains(
     received,
-    transport.Rejected(topic_id: too_long, reason: transport.OverLimit),
+    transport.Rejected(topic_id: longest, reason: transport.OverLimit),
   )
   |> should.be_true
 }
 
-pub fn topic_subscription_cap_defaults_to_1000_test() {
+pub fn topic_subscription_cap_defaults_to_100_test() {
   let app = test_support.new_topic_server()
   let #(c1, frames) = wire_support.open(app, "c1")
 
-  wire_support.send(c1, transport.Resync(cursors: room_cursors(1001)))
+  wire_support.send(c1, transport.Resync(cursors: room_cursors(101)))
 
   let received = frames()
   list.count(received, wire_support.is_snapshot)
-  |> should.equal(1000)
+  |> should.equal(100)
   list.contains(
     received,
-    transport.Rejected(topic_id: "room:1001", reason: transport.OverLimit),
+    transport.Rejected(topic_id: "room:101", reason: transport.OverLimit),
   )
   |> should.be_true
 }
@@ -844,6 +874,7 @@ pub fn topic_resync_joins_an_allowing_topic_test() {
   |> should.equal([
     transport.Snapshot(
       target: transport.Topic("chat"),
+      epoch: 0,
       sequence: 0,
       state: test_support.initial_model(),
     ),
@@ -889,6 +920,7 @@ pub fn topic_a_resyncing_client_resubscribes_after_reconnecting_test() {
   |> should.equal([
     transport.Snapshot(
       target: transport.Topic("chat"),
+      epoch: 0,
       sequence: 0,
       state: test_support.initial_model(),
     ),
@@ -918,6 +950,7 @@ pub fn topic_message_right_behind_a_resync_is_applied_test() {
   |> should.equal([
     transport.Snapshot(
       target: transport.Topic("chat"),
+      epoch: 0,
       sequence: 0,
       state: test_support.initial_model(),
     ),
@@ -930,7 +963,7 @@ pub fn topic_message_right_behind_a_resync_is_applied_test() {
 }
 
 pub fn topic_message_ahead_of_its_resync_is_dropped_test() {
-  // the order the old offline queue used, the edit was lost
+  // an edit flushed ahead of the resync that would join the topic
   let app = test_support.new_topic_server()
   let #(c1, frames) = wire_support.open(app, "c1")
 
@@ -942,9 +975,90 @@ pub fn topic_message_ahead_of_its_resync_is_dropped_test() {
     transport.Dropped(target: transport.Topic("chat")),
     transport.Snapshot(
       target: transport.Topic("chat"),
+      epoch: 0,
       sequence: 0,
       state: test_support.initial_model(),
     ),
+  ])
+}
+
+pub fn topic_resync_naming_the_current_state_is_answered_unchanged_test() {
+  let app = test_support.new_topic_server()
+  let epoch = chat_epoch_after_one_dispatch(app)
+  // a reconnect, a new registration whose client already holds sequence 1
+  let #(c2, frames) = wire_support.open(app, "c2")
+
+  wire_support.send(
+    c2,
+    transport.Resync([
+      transport.Known(target: transport.Topic("chat"), epoch:, sequence: 1),
+    ]),
+  )
+
+  frames()
+  |> should.equal([transport.Unchanged(transport.Topic("chat"))])
+  // joined all the same
+  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  frames()
+  |> should.equal([
+    transport.TopicUpdate(topic_id: "chat", sequence: 2, payload: Increment),
+  ])
+}
+
+pub fn topic_resync_naming_an_older_sequence_gets_the_snapshot_test() {
+  let app = test_support.new_topic_server()
+  let epoch = chat_epoch_after_one_dispatch(app)
+  let #(c2, frames) = wire_support.open(app, "c2")
+
+  wire_support.send(
+    c2,
+    transport.Resync([
+      transport.Known(target: transport.Topic("chat"), epoch:, sequence: 0),
+    ]),
+  )
+
+  frames()
+  |> list.count(wire_support.is_snapshot)
+  |> should.equal(1)
+}
+
+pub fn topic_resync_naming_a_stopped_topics_epoch_gets_the_snapshot_test() {
+  // the same sequence in a later life of the topic is another state
+  let app = test_support.new_topic_server()
+  let epoch = chat_epoch_after_one_dispatch(app)
+  wire_support.stop_topic(app, "chat")
+  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  let #(c2, frames) = wire_support.open(app, "c2")
+
+  wire_support.send(
+    c2,
+    transport.Resync([
+      transport.Known(target: transport.Topic("chat"), epoch:, sequence: 1),
+    ]),
+  )
+
+  frames()
+  |> list.count(wire_support.is_snapshot)
+  |> should.equal(1)
+}
+
+pub fn topic_resync_naming_the_current_state_still_checks_access_test() {
+  let allowed = test_support.new_shared(True)
+  let app = switched_server(allowed)
+  let epoch = chat_epoch_after_one_dispatch(app)
+  test_support.set_shared(allowed, False)
+  let #(c2, frames) = wire_support.open(app, "c2")
+
+  wire_support.send(
+    c2,
+    transport.Resync([
+      transport.Known(target: transport.Topic("chat"), epoch:, sequence: 1),
+    ]),
+  )
+
+  frames()
+  |> should.equal([
+    transport.Rejected(topic_id: "chat", reason: transport.AccessDenied),
   ])
 }
 
@@ -1053,10 +1167,113 @@ pub fn topic_stop_tells_subscribers_with_a_final_acknowledge_test() {
 
   wire_support.stop_topic(app, "chat")
 
+  // the last answer, then word that the topic is gone
   frames()
   |> should.equal([
     transport.Acknowledge(target: transport.Topic("chat"), sequence: 1),
+    transport.Rejected(topic_id: "chat", reason: transport.NotFound),
   ])
+}
+
+pub fn topic_a_stopped_topic_rejoins_its_subscribers_when_dispatched_test() {
+  let app = test_support.new_topic_server()
+  let #(c1, frames) = joined(app, "c1")
+  wire_support.stop_topic(app, "chat")
+  let _ = frames()
+
+  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+
+  frames()
+  |> should.equal([
+    transport.Snapshot(
+      target: transport.Topic("chat"),
+      epoch: 0,
+      sequence: 0,
+      state: test_support.initial_model(),
+    ),
+    transport.TopicUpdate(topic_id: "chat", sequence: 1, payload: Increment),
+  ])
+  // joined again, its own edits land
+  wire_support.topic_message(c1, "chat", Increment)
+  frames()
+  |> should.equal([
+    transport.Acknowledge(target: transport.Topic("chat"), sequence: 2),
+  ])
+}
+
+pub fn topic_a_stopped_topic_rejoins_its_subscribers_when_another_client_subscribes_test() {
+  let #(builder, events) = wire_support.observed(test_support.topic_builder())
+  let app = test_support.start_server(builder)
+  let #(_c1, frames1) = joined(app, "c1")
+  wire_support.stop_topic(app, "chat")
+  let _ = frames1()
+  let _ = events(app)
+  let #(c2, _frames2) = wire_support.open(app, "c2")
+
+  wire_support.subscribe(c2, "chat")
+
+  frames1()
+  |> should.equal([
+    transport.Snapshot(
+      target: transport.Topic("chat"),
+      epoch: 0,
+      sequence: 0,
+      state: test_support.initial_model(),
+    ),
+  ])
+  events(app)
+  |> list.filter(is_subscribed)
+  |> list.length
+  |> should.equal(2)
+}
+
+pub fn topic_a_stopped_topic_rechecks_access_on_rejoin_test() {
+  let allowed = test_support.new_shared(True)
+  let app = switched_server(allowed)
+  let #(_c1, frames) = joined(app, "c1")
+  wire_support.stop_topic(app, "chat")
+  let _ = frames()
+  test_support.set_shared(allowed, False)
+
+  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+
+  // already told it's gone, nothing more
+  frames()
+  |> should.equal([])
+  test_support.subscriber_count(app, "chat")
+  |> should.equal(0)
+}
+
+pub fn topic_a_stopped_topic_lapsed_entry_counts_toward_the_cap_test() {
+  let app =
+    test_support.start_server(
+      test_support.topic_builder() |> server.max_subscriptions(per_client: 1),
+    )
+  let #(c1, frames) = joined(app, "c1")
+  wire_support.stop_topic(app, "chat")
+  let _ = frames()
+
+  wire_support.subscribe(c1, "room:1")
+
+  frames()
+  |> should.equal([
+    transport.Rejected(topic_id: "room:1", reason: transport.OverLimit),
+  ])
+}
+
+pub fn topic_a_stopped_topic_unsubscribe_while_lapsed_is_not_rejoined_test() {
+  let app = test_support.new_topic_server()
+  let #(c1, frames) = joined(app, "c1")
+  wire_support.stop_topic(app, "chat")
+  wire_support.unsubscribe(c1, "chat")
+  let _ = frames()
+
+  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+
+  frames()
+  |> should.equal([])
+  test_support.subscriber_count(app, "chat")
+  |> should.equal(0)
 }
 
 pub fn topic_message_after_stop_is_dropped_test() {
@@ -1084,6 +1301,7 @@ pub fn topic_subscribing_after_stop_starts_the_topic_afresh_test() {
   |> should.equal([
     transport.Snapshot(
       target: transport.Topic("chat"),
+      epoch: 0,
       sequence: 0,
       state: test_support.initial_model(),
     ),
@@ -1092,11 +1310,14 @@ pub fn topic_subscribing_after_stop_starts_the_topic_afresh_test() {
 
 pub fn topic_stop_of_an_unknown_id_is_a_no_op_test() {
   let app = test_support.new_topic_server()
+  let #(_c1, frames) = joined(app, "c1")
 
   server.stop_topic(app, topic_id: "never-started")
 
-  test_support.client_count(app)
-  |> should.equal(0)
+  frames()
+  |> should.equal([])
+  test_support.subscriber_count(app, "chat")
+  |> should.equal(1)
 }
 
 // =============================================================================

@@ -8,6 +8,7 @@
 @target(erlang)
 import gleam/dict.{type Dict}
 import gleam/erlang/process.{type Pid}
+import gleam/int
 @target(javascript)
 import gleam/list
 import gleam/option.{type Option}
@@ -76,6 +77,15 @@ pub opaque type Supervisor {
 pub opaque type Supervisor {
   NoSupervisor
 }
+
+@target(erlang)
+@internal
+pub type Timer =
+  process.Timer
+
+@target(javascript)
+@internal
+pub type Timer
 
 /// Events sent to `cell` during `initial` are reduced first.
 @internal
@@ -150,9 +160,48 @@ pub fn call(
   }
 }
 
+@target(erlang)
+@internal
+pub fn cancel_timer(timer: Timer) -> Nil {
+  let _ = process.cancel_timer(timer)
+  Nil
+}
+
+@target(javascript)
+@external(javascript, "./actor.ffi.mjs", "cancelLater")
+@internal
+pub fn cancel_timer(timer: Timer) -> Nil
+
 @internal
 pub fn log(level: DiagnosticLevel, message: String) -> Nil {
   do_log(level, message)
+}
+
+/// At most one line per `key` every ten seconds in this process, the next one
+/// noting how many were held back, so something a client can repeat can't
+/// fill the log.
+@internal
+pub fn log_limited(
+  key: String,
+  level: DiagnosticLevel,
+  message: String,
+) -> Nil {
+  log_limited_with(key, message, do_log(level, _))
+}
+
+/// Like [`log_limited`](#log_limited), handing the line to `sink` instead.
+@internal
+pub fn log_limited_with(
+  key: String,
+  message: String,
+  sink: fn(String) -> Nil,
+) -> Nil {
+  case log_allowance(key) {
+    Ok(0) -> sink(message)
+    Ok(held) ->
+      sink(message <> " (" <> int.to_string(held) <> " similar since)")
+    Error(Nil) -> Nil
+  }
 }
 
 @target(erlang)
@@ -177,7 +226,11 @@ pub fn rescue_or(
   case rescue(operation) {
     Ok(value) -> value
     Error(reason) -> {
-      log(transport.Failure, "lily: " <> label <> " crashed: " <> reason)
+      log_limited(
+        label,
+        transport.Failure,
+        "lily: " <> label <> " crashed: " <> reason,
+      )
       default
     }
   }
@@ -194,7 +247,11 @@ pub fn rescue_send(
   case rescue(fn() { send(frame) }) {
     Ok(Nil) -> True
     Error(reason) -> {
-      log(transport.Failure, "lily: " <> label <> " send crashed: " <> reason)
+      log_limited(
+        label <> " send",
+        transport.Failure,
+        "lily: " <> label <> " send crashed: " <> reason,
+      )
       False
     }
   }
@@ -224,9 +281,8 @@ pub fn send_after(
   cell: Cell(state, event, reply),
   milliseconds: Int,
   event: event,
-) -> Nil {
-  let _ = process.send_after(cell.subject, milliseconds, Cast(event:))
-  Nil
+) -> Timer {
+  process.send_after(cell.subject, milliseconds, Cast(event:))
 }
 
 @target(javascript)
@@ -235,7 +291,7 @@ pub fn send_after(
   cell: Cell(state, event, reply),
   milliseconds: Int,
   event: event,
-) -> Nil {
+) -> Timer {
   later(milliseconds, fn() { send(cell, event) })
 }
 
@@ -709,7 +765,13 @@ fn ffi_log(level: String, message: String) -> Nil
 
 @target(javascript)
 @external(javascript, "./actor.ffi.mjs", "later")
-fn later(milliseconds: Int, run: fn() -> Nil) -> Nil
+fn later(milliseconds: Int, run: fn() -> Nil) -> Timer
+
+// `Ok` with the count held back since `key` last went out, at most once every
+// ten seconds in this process, `Error` to hold this one back
+@external(erlang, "lily_actor_ffi", "log_allowance")
+@external(javascript, "./actor.ffi.mjs", "logAllowance")
+fn log_allowance(key: String) -> Result(Int, Nil)
 
 @target(javascript)
 @external(javascript, "./actor.ffi.mjs", "protect")

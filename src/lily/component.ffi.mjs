@@ -26,11 +26,14 @@ import {
   Static,
 } from "./component.mjs";
 import {
+  OWNER_ATTRIBUTE,
   createEvents,
   dropListeners,
   installMessageClicks,
-  reobserveOwner,
+  isMade,
+  markMade,
   registerListener,
+  reobserveOwner,
   setDispatch,
 } from "./event.ffi.mjs";
 import { log } from "./internal/actor.ffi.mjs";
@@ -62,11 +65,11 @@ export function renderTree(
       `lily: nothing was rendered, no element matches the mount selector ` +
         `"${rootSelector}"`,
     );
-    return null;
+    return;
   }
 
   const context = contextFor(runtime.handle);
-  setDispatch(context.events, dispatch);
+  setDispatch(context.events, dispatch, decodeMessage);
 
   const start = context.counter;
   const [html, owned] = collectOwners(context, () =>
@@ -84,7 +87,6 @@ export function renderTree(
   runRange(context, start, end, model);
 
   installMessageClicks(root, decodeMessage, dispatch);
-  return null;
 }
 
 // =============================================================================
@@ -98,16 +100,13 @@ function addClasses(element, classes) {
 }
 
 function addOwnerId(element, id) {
-  element.setAttribute(
-    "data-lily-component",
-    [...ownerIds(element), id].join(" "),
-  );
+  setOwnerIds(element, [...ownerIds(element), id]);
 }
 
 function afterRows(context, node) {
   let next = node.nextSibling;
   if (node.tagName !== "TEMPLATE") return next;
-  const id = node.getAttribute("data-lily-component");
+  const id = node.getAttribute(OWNER_ATTRIBUTE);
   while (next && context.rows.get(next)?.list === id) next = next.nextSibling;
   return next;
 }
@@ -129,34 +128,44 @@ function alignStart(start, end) {
 }
 
 // rows patch their own root
+function applyPatch(rootElement, patch, matchRoot) {
+  const element =
+    patch.target === "" || (matchRoot && rootElement.matches(patch.target))
+      ? rootElement
+      : rootElement.querySelector(patch.target);
+
+  if (!element) return;
+
+  if (patch instanceof SetText) {
+    element.textContent = patch.value;
+  } else if (patch instanceof SetAttribute) {
+    if (isUnsafeAttribute(element, patch.name, patch.value)) {
+      log(
+        "warn",
+        `lily: refused unsafe attribute "${patch.name}" in a live patch`,
+      );
+    } else if (element.getAttribute(patch.name) !== patch.value) {
+      setAttribute(element, patch.name, patch.value);
+    }
+  } else if (patch instanceof SetStyle) {
+    element.style.setProperty(patch.property, patch.value);
+  } else if (patch instanceof RemoveAttribute) {
+    const lower = patch.name.toLowerCase();
+    if (isRuntimeAttribute(lower) || GUARD_ATTRIBUTES.has(lower)) {
+      log("warn", `lily: refused to remove "${patch.name}" in a live patch`);
+    } else {
+      removeAttribute(element, patch.name);
+    }
+  }
+}
+
+// one bad patch doesn't stop the rest
 function applyPatches(rootElement, patches, matchRoot = false) {
   for (const patch of patches) {
-    const element =
-      patch.target === "" || (matchRoot && rootElement.matches(patch.target))
-        ? rootElement
-        : rootElement.querySelector(patch.target);
-
-    if (!element) continue;
-
-    if (patch instanceof SetText) {
-      element.textContent = patch.value;
-    } else if (patch instanceof SetAttribute) {
-      if (isUnsafeAttribute(patch.name, patch.value)) {
-        log(
-          "warn",
-          `lily: refused unsafe attribute "${patch.name}" in a live patch`,
-        );
-      } else if (element.getAttribute(patch.name) !== patch.value) {
-        setAttribute(element, patch.name, patch.value);
-      }
-    } else if (patch instanceof SetStyle) {
-      element.style.setProperty(patch.property, patch.value);
-    } else if (patch instanceof RemoveAttribute) {
-      if (isRuntimeAttribute(patch.name)) {
-        log("warn", `lily: refused to remove "${patch.name}" in a live patch`);
-      } else {
-        removeAttribute(element, patch.name);
-      }
+    try {
+      applyPatch(rootElement, patch, matchRoot);
+    } catch (error) {
+      log("warn", `lily: a live patch failed: ${error?.stack ?? error}`);
     }
   }
 }
@@ -175,7 +184,7 @@ function cancelExit(context, node) {
 function carryOwnerAttributes(from, to, id) {
   const ids = ownerIds(from);
   const kept = ids.slice(Math.max(0, ids.indexOf(id)));
-  to.setAttribute("data-lily-component", [...ownerIds(to), ...kept].join(" "));
+  setOwnerIds(to, [...ownerIds(to), ...kept]);
   for (const name of ["data-lily-exiting", "data-lily-key"]) {
     const value = from.getAttribute(name);
     if (value !== null) to.setAttribute(name, value);
@@ -214,8 +223,11 @@ function contextFor(runtime) {
   let context = contexts.get(runtime);
   if (context) return context;
   const wrappers = new WeakSet();
+  // random, so markup from data can't name a real component or row
+  const nonce = randomNonce();
   context = {
-    prefix: `r${runtimeCount++}`,
+    prefix: `r${runtimeCount++}_${nonce}_`,
+    rowSeparator: `${ROW_SEPARATOR} ${nonce}`,
     // component ids, source of every render range
     counter: 0,
     // listener-only owner ids, never in a range
@@ -238,11 +250,14 @@ function contextFor(runtime) {
     // divs the renderer made, not the app's markup
     wrappers,
     events: createEvents(wrappers),
+    // ids whose handler threw, logged once until unregistered
+    crashed: new Set(),
   };
   contexts.set(runtime, context);
   const registry = context.registry;
   runtime.addRenderer((model) => {
-    for (const handler of registry.values()) handler(model);
+    for (const [id, handler] of registry)
+      runHandler(context, id, handler, model);
   });
   return context;
 }
@@ -296,10 +311,7 @@ function delay(milliseconds, signal) {
 // the shared child exits, `next` takes the outer ids
 function departChild(context, child, next, id) {
   const ids = ownerIds(child);
-  child.setAttribute(
-    "data-lily-component",
-    ids.slice(0, ids.indexOf(id)).join(" "),
-  );
+  setOwnerIds(child, ids.slice(0, ids.indexOf(id)));
   child.before(next);
   moveTracking(context, child, next);
   for (const owner of ownerIds(next)) reobserveOwner(context.events, owner);
@@ -385,6 +397,7 @@ function eachHandler(context, marker, id, component, toHtml, toPlaceholder) {
     renders.forEach((entry, index) => {
       const root = roots[index];
       root.setAttribute("data-lily-key", entry.keyString);
+      markMade(root);
       const element = entry.row.element
         ? updateRow(context, entry.row.element, root)
         : root;
@@ -464,12 +477,20 @@ function finiteAnimations(element) {
   );
 }
 
-function isOwned(node) {
+// this runtime's own marks only, markup from data can carry the attributes
+// marked by the renderer, or a list's own marker, never markup from data
+function isOwned(context, node) {
+  if (node.nodeType !== 1) return false;
+  if (context.rows.has(node) || isMade(node)) return true;
   return (
-    node.nodeType === 1 &&
-    (node.hasAttribute("data-lily-component") ||
-      node.hasAttribute("data-lily-key"))
+    node.tagName === "TEMPLATE" &&
+    ownerIds(node).some((id) => id.startsWith(context.prefix))
   );
+}
+
+// a nested component's root the renderer made
+function isOwnedComponent(node) {
+  return isMade(node) && node.hasAttribute(OWNER_ATTRIBUTE);
 }
 
 // owner marks and data-lily-message, a patch could hijack either
@@ -479,17 +500,36 @@ function isRuntimeAttribute(name) {
 
 /**
  * Patch values may be other clients' input. Strips control chars and
- * whitespace before the scheme check, as browsers do.
+ * whitespace before the scheme check, as browsers do. A data URL is only
+ * allowed where it can't carry a document, an image or media source.
  */
-function isUnsafeAttribute(name, value) {
+function isUnsafeAttribute(element, name, value) {
   const lower = name.toLowerCase();
   if (lower.startsWith("on") || lower === "srcdoc") return true;
   if (isRuntimeAttribute(lower)) return true;
+  // what an embedded document may do, set or loosened
+  if (GUARD_ATTRIBUTES.has(lower)) return true;
+  const tag = element.tagName.toUpperCase();
+  // a base or stylesheet link redirects every relative URL or styles the page
+  if (lower === "href" && (tag === "BASE" || tag === "LINK")) return true;
+  // a meta refresh navigates, an SVG animation can write a link attribute
+  if (tag === "META" && (lower === "content" || lower === "http-equiv")) {
+    return true;
+  }
+  if (SVG_ANIMATIONS.has(tag) && SVG_ANIMATION_ATTRIBUTES.has(lower)) {
+    return true;
+  }
   if (URL_ATTRIBUTES.has(lower)) {
     const scheme = String(value)
       .replace(/[\u0000- ]+/g, "")
       .toLowerCase();
     if (UNSAFE_URL_SCHEME.test(scheme)) return true;
+    if (
+      scheme.startsWith("data:") &&
+      !(MEDIA_SOURCE_ATTRIBUTES.has(lower) && MEDIA_TAGS.has(element.tagName))
+    ) {
+      return true;
+    }
   }
   return false;
 }
@@ -508,8 +548,8 @@ function morph(context, live, next) {
       continue;
     }
 
-    const liveOwned = isOwned(liveNode);
-    const nextOwned = isOwned(nextNode);
+    const liveOwned = isOwned(context, liveNode);
+    const nextOwned = isOwned(context, nextNode);
 
     if (liveOwned && nextOwned) {
       // both runtime-owned, keep the live one, cancel any pending exit
@@ -538,8 +578,10 @@ function morph(context, live, next) {
       liveNode = liveNode.nextSibling;
       nextNode = nextAfter;
     } else {
+      // whatever components the old node held go with it
       const replaced = liveNode;
       liveNode = liveNode.nextSibling;
+      unregisterSubtree(context, replaced);
       live.replaceChild(nextNode, replaced);
       nextNode = nextAfter;
     }
@@ -600,19 +642,31 @@ function ownableRoot(nodes) {
 
 // innermost first, a nest-only component shares its child's element
 function ownerIds(element) {
-  const ids = element.getAttribute("data-lily-component") ?? "";
+  const ids = element.getAttribute(OWNER_ATTRIBUTE) ?? "";
   return ids.split(" ").filter((id) => id !== "");
 }
 
+function ownerSelector(id) {
+  return `[${OWNER_ATTRIBUTE}~="${id}"]`;
+}
+
+// one parse for every row, or one each when a row's markup, an unclosed
+// comment say, swallowed the separators
 function parseRows(context, htmls) {
   if (htmls.length === 0) return [];
+  const together = parseRowsTogether(context, htmls);
+  if (together.length === htmls.length) return together;
+  return htmls.map((html) => parseRowsTogether(context, [html])[0]);
+}
+
+function parseRowsTogether(context, htmls) {
   const template = document.createElement("template");
-  template.innerHTML = htmls.join(`<!--${ROW_SEPARATOR}-->`);
+  template.innerHTML = htmls.join(`<!--${context.rowSeparator}-->`);
   resolveMarks(context, template.content);
   const roots = [];
   let nodes = [];
   for (const node of Array.from(template.content.childNodes)) {
-    if (node.nodeType === 8 && node.data === ROW_SEPARATOR) {
+    if (node.nodeType === 8 && node.data === context.rowSeparator) {
       roots.push(rowRoot(context, nodes));
       nodes = [];
     } else {
@@ -634,16 +688,21 @@ function placeTransition(element, transition) {
   scheduleEnterClassRemoval(element, enter);
 }
 
+function randomNonce() {
+  const bytes = new Uint8Array(8);
+  globalThis.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
+}
+
 // nest-only again mid-exit, the child comes back
 function reclaimChild(context, host, child, id) {
   context.departed.delete(host);
   cancelExit(context, child);
   const ids = ownerIds(host);
   const kept = ids.slice(Math.max(0, ids.indexOf(id)));
-  child.setAttribute(
-    "data-lily-component",
-    [...ownerIds(child), ...kept].join(" "),
-  );
+  setOwnerIds(child, [...ownerIds(child), ...kept]);
   const key = host.getAttribute("data-lily-key");
   if (key !== null) child.setAttribute("data-lily-key", key);
   moveTracking(context, host, child);
@@ -655,14 +714,19 @@ function reclaimChild(context, host, child, id) {
 
 function registerComponent(context, makeHandler) {
   const id = nextId(context);
-  const selector = `[data-lily-component~="${id}"]`;
+  const selector = ownerSelector(id);
   let cached = null;
   // a departing child stays connected without its id
+  // the first the renderer made, an earlier copy from data isn't it, a list's
+  // marker is parsed from its html and found by its id alone
   const element = () =>
     (cached =
       cached?.isConnected && cached.matches(selector)
         ? cached
-        : document.querySelector(selector));
+        : (Array.from(document.querySelectorAll(selector)).find(
+            (candidate) =>
+              isMade(candidate) || candidate.tagName === "TEMPLATE",
+          ) ?? null));
   context.registry.set(id, makeHandler(element, id));
   return id;
 }
@@ -680,7 +744,7 @@ function removeClasses(element, classes) {
 
 function removeListRows(context, parent, marker) {
   if (marker.tagName !== "TEMPLATE") return;
-  const id = marker.getAttribute("data-lily-component");
+  const id = marker.getAttribute(OWNER_ATTRIBUTE);
   let node = marker.nextSibling;
   while (node && context.rows.get(node)?.list === id) {
     const row = node;
@@ -691,7 +755,7 @@ function removeListRows(context, parent, marker) {
 }
 
 function removeMorphChild(context, parent, node) {
-  if (isOwned(node)) {
+  if (isOwned(context, node)) {
     if (context.exits.has(node)) return;
     removeListRows(context, parent, node);
     if (findTransitionElement(context, node)) {
@@ -701,6 +765,8 @@ function removeMorphChild(context, parent, node) {
       return;
     }
     unregisterSubtree(context, node);
+  } else if (node.nodeType === 1) {
+    unregisterDescendants(context, node);
   }
   if (node.parentNode === parent) parent.removeChild(node);
 }
@@ -745,7 +811,7 @@ function renderComponent(context, component, model, toHtml, toPlaceholder) {
       eachHandler(context, marker, listId, type, toHtml, toPlaceholder),
     );
     // rows follow as siblings, valid in lists and tables
-    html = `<template data-lily-component="${listId}"></template>`;
+    html = `<template ${OWNER_ATTRIBUTE}="${listId}"></template>`;
   } else if (type instanceof Live) {
     ({ html, id } = renderLive(context, type, model, toHtml, toPlaceholder));
   } else if (type instanceof Static) {
@@ -993,9 +1059,25 @@ function rowRoot(context, nodes) {
   return wrapNodes(context, nodes, null, true);
 }
 
+// one throwing component can't stop its siblings rendering
+function runHandler(context, id, handler, model) {
+  try {
+    handler(model);
+  } catch (error) {
+    if (context.crashed.has(id)) return;
+    context.crashed.add(id);
+    log(
+      "error",
+      `lily: component ${id} crashed rendering: ${error?.stack ?? error}`,
+    );
+  }
+}
+
 function runRange(context, start, end, model) {
   for (let number = start; number < end; number++) {
-    context.registry.get(context.prefix + "c" + number)?.(model);
+    const id = context.prefix + "c" + number;
+    const handler = context.registry.get(id);
+    if (handler) runHandler(context, id, handler, model);
   }
 }
 
@@ -1048,6 +1130,11 @@ function setExiting(element, exiting) {
   }
 }
 
+function setOwnerIds(element, ids) {
+  element.setAttribute(OWNER_ATTRIBUTE, ids.join(" "));
+  markMade(element);
+}
+
 function setOwners(context, key, owned) {
   const previous = context.owners.get(key);
   if (previous) {
@@ -1070,13 +1157,15 @@ function singleRoot(nodes) {
   return root;
 }
 
+// one pass over the subtree for every id in the range
 function sweepRange(context, element, start, end, model) {
+  const present = new Set(ownerIds(element));
+  for (const owned of element.querySelectorAll(`[${OWNER_ATTRIBUTE}]`)) {
+    if (isMade(owned)) for (const id of ownerIds(owned)) present.add(id);
+  }
   for (let number = start; number < end; number++) {
     const id = context.prefix + "c" + number;
-    const present =
-      ownerIds(element).includes(id) ||
-      element.querySelector(`[data-lily-component~="${id}"]`);
-    if (present) context.registry.get(id)?.(model);
+    if (present.has(id)) context.registry.get(id)?.(model);
     else unregister(context, id);
   }
 }
@@ -1098,6 +1187,7 @@ function syncProperty(element, name, value) {
 
 function unregister(context, id) {
   context.registry.delete(id);
+  context.crashed.delete(id);
   context.marks.delete(id);
   dropListeners(context.events, id);
   const owned = context.owners.get(id);
@@ -1107,8 +1197,10 @@ function unregister(context, id) {
   }
 }
 
+// only marks the renderer made, a pasted copy of an id isn't that component
 function unregisterDescendants(context, element) {
-  for (const owned of element.querySelectorAll("[data-lily-component]")) {
+  for (const owned of element.querySelectorAll(`[${OWNER_ATTRIBUTE}]`)) {
+    if (!isMade(owned)) continue;
     for (const id of ownerIds(owned)) unregister(context, id);
   }
   for (const row of element.querySelectorAll("[data-lily-key]")) {
@@ -1127,7 +1219,7 @@ function unregisterSubtree(context, element) {
 function updateHost(context, host, content, id) {
   const nodes = Array.from(content.childNodes);
   const root = ownableRoot(nodes);
-  const nested = root?.hasAttribute("data-lily-component") ?? false;
+  const nested = root ? isOwnedComponent(root) : false;
   const shared = ownerIds(host).indexOf(id) > 0;
   const wrapped = context.wrappers.has(host);
   // still nest-only, the child updates itself
@@ -1154,8 +1246,8 @@ function updateHost(context, host, content, id) {
 }
 
 function updateRow(context, old, root) {
-  const oldOwned = old.hasAttribute("data-lily-component");
-  const rootOwned = root.hasAttribute("data-lily-component");
+  const oldOwned = isOwnedComponent(old);
+  const rootOwned = isOwnedComponent(root);
   // a nested component root updates itself
   if (oldOwned && rootOwned) return old;
   if (!oldOwned && !rootOwned && old.tagName === root.tagName) {
@@ -1215,24 +1307,47 @@ function wrapNodes(context, nodes, before, contents) {
 // renderer state per runtime, the runtime is component-agnostic
 const contexts = new WeakMap();
 
-let runtimeCount = 0;
+// setting or removing one of these changes what an embedded document may do
+const GUARD_ATTRIBUTES = new Set(["allow", "csp", "sandbox"]);
 
 // comment marks around a component that needs an element
 const MARK = "lily-root";
+
+const MEDIA_SOURCE_ATTRIBUTES = new Set(["src", "srcset"]);
+
+const MEDIA_TAGS = new Set(["AUDIO", "IMG", "SOURCE", "TRACK", "VIDEO"]);
 
 // split is global regardless of the `g` flag
 const NEST_PATTERN = /<lily-nest[^>]*>\s*<\/lily-nest>/;
 
 const ROW_SEPARATOR = "lily-row";
 
+let runtimeCount = 0;
+
+const SVG_ANIMATION_ATTRIBUTES = new Set([
+  "attributename",
+  "by",
+  "from",
+  "to",
+  "values",
+]);
+
+// upper-cased, an SVG element's tagName keeps its own case
+const SVG_ANIMATIONS = new Set(["ANIMATE", "ANIMATEMOTION", "SET"]);
+
 const UNSAFE_URL_SCHEME = /^(?:javascript|vbscript):/;
 
-// data URLs allowed for inline images
 const URL_ATTRIBUTES = new Set([
   "action",
+  "background",
+  "cite",
   "data",
   "formaction",
   "href",
+  "longdesc",
+  "ping",
+  "poster",
   "src",
+  "srcset",
   "xlink:href",
 ]);

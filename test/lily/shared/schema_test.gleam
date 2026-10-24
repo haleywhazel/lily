@@ -222,7 +222,12 @@ pub fn schema_leaves_server_frames_unchecked_test() {
   let model = test_support.initial_model()
   let bytes =
     transport.encode(
-      transport.Snapshot(target: transport.Session, sequence: 1, state: model),
+      transport.Snapshot(
+        target: transport.Session,
+        epoch: 0,
+        sequence: 1,
+        state: model,
+      ),
       serialiser: test_support.automatic_serialiser(transport.Json),
     )
   transport.decode_checked(
@@ -231,7 +236,12 @@ pub fn schema_leaves_server_frames_unchecked_test() {
     schema: option.Some(rooted(IntType)),
   )
   |> should.equal(
-    Ok(transport.Snapshot(target: transport.Session, sequence: 1, state: model)),
+    Ok(transport.Snapshot(
+      target: transport.Session,
+      epoch: 0,
+      sequence: 1,
+      state: model,
+    )),
   )
 }
 
@@ -292,7 +302,7 @@ pub fn server_drops_a_topic_message_that_fails_the_schema_test() {
   |> should.equal([
     server.Diagnostic(
       level: transport.Warning,
-      message: "dropped a message from c1 that fails the schema",
+      message: "dropped a message from \"c1\" that fails the schema",
     ),
   ])
   test_support.subscriber_count(app, "chat")

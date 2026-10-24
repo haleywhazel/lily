@@ -85,17 +85,23 @@ fn every_frame() -> List(Protocol(Model, Message)) {
     Dropped(target: Session),
     Dropped(target: Topic(id: "chat")),
     Rejected(topic_id: "secret", reason: AccessDenied),
-    Resync(cursors: [Session, Topic(id: "chat")]),
+    Resync(cursors: [
+      transport.Unknown(Session),
+      transport.Unknown(Topic(id: "chat")),
+      transport.Known(target: Topic(id: "room"), epoch: 912_345, sequence: 7),
+    ]),
     SessionMessage(payload: SetName("Alice")),
     SessionUpdate(sequence: 4, payload: Increment),
     Snapshot(
       target: Session,
+      epoch: 912_345,
       sequence: 7,
       state: test_support.Model(..test_support.initial_model(), name: "Bob"),
     ),
     Subscribe(topic_id: "chat"),
     TopicMessage(topic_id: "chat", payload: Increment),
     TopicUpdate(topic_id: "chat", sequence: 3, payload: Increment),
+    transport.Unchanged(target: Topic(id: "chat")),
     Unsubscribe(topic_id: "chat"),
     Version(hash: "abc123", protocol: 1),
   ]
@@ -179,7 +185,7 @@ pub fn snapshot_rejected_test() {
 
 pub fn snapshot_resync_session_test() {
   assert_encoded(
-    Resync(cursors: [Session]),
+    Resync(cursors: [transport.Unknown(Session)]),
     "82A474797065A6726573796E63A7637572736F72739181A46B696E64A773657373696F6E",
   )
 }
@@ -196,7 +202,10 @@ pub fn snapshot_resync_empty_cursors_test() {
 
 pub fn snapshot_resync_session_topic_test() {
   assert_encoded(
-    Resync(cursors: [Session, Topic(id: "chat")]),
+    Resync(cursors: [
+      transport.Unknown(Session),
+      transport.Unknown(Topic(id: "chat")),
+    ]),
     "82A474797065A6726573796E63A7637572736F72739281A46B696E64A773657373696F6E82A46B696E64A5746F706963A26964A463686174",
   )
 }
@@ -226,6 +235,7 @@ pub fn snapshot_snapshot_session_test() {
   assert_encoded(
     Snapshot(
       target: Session,
+      epoch: 0,
       sequence: 7,
       state: test_support.Model(
         ..test_support.initial_model(),
@@ -234,7 +244,7 @@ pub fn snapshot_snapshot_session_test() {
         connected: True,
       ),
     ),
-    "84A474797065A8736E617073686F74A674617267657481A46B696E64A773657373696F6EA873657175656E636507A57374617465C42C87A13005A131A3426F62A132C3A13381A15FA454616241A13400A13581A15FA44E6F6E65A15FA54D6F64656C",
+    "85A474797065A8736E617073686F74A674617267657481A46B696E64A773657373696F6EA565706F636800A873657175656E636507A57374617465C42C87A13005A131A3426F62A132C3A13381A15FA454616241A13400A13581A15FA44E6F6E65A15FA54D6F64656C",
   )
 }
 
@@ -325,7 +335,12 @@ pub fn rejected_with_unknown_reason_fails_to_decode_test() {
 
 pub fn roundtrip_resync_session_topic_test() {
   test_support.register_fixtures()
-  assert_roundtrip(Resync(cursors: [Session, Topic(id: "chat")]))
+  assert_roundtrip(
+    Resync(cursors: [
+      transport.Unknown(Session),
+      transport.Unknown(Topic(id: "chat")),
+    ]),
+  )
 }
 
 pub fn roundtrip_session_message_set_name_test() {
@@ -397,7 +412,9 @@ pub fn initial_snapshot_round_trips_via_decode_test() {
   let embed = store.initial_snapshot(embed_store(serialiser), model:)
 
   transport.decode(embed_payload(embed), serialiser:)
-  |> should.equal(Ok(Snapshot(target: Session, sequence: 0, state: model)))
+  |> should.equal(
+    Ok(Snapshot(target: Session, epoch: 0, sequence: 0, state: model)),
+  )
 }
 
 pub fn initial_snapshot_round_trips_message_pack_test() {
@@ -412,7 +429,9 @@ pub fn initial_snapshot_round_trips_message_pack_test() {
   let embed = store.initial_snapshot(embed_store(serialiser), model:)
 
   transport.decode(embed_payload(embed), serialiser:)
-  |> should.equal(Ok(Snapshot(target: Session, sequence: 0, state: model)))
+  |> should.equal(
+    Ok(Snapshot(target: Session, epoch: 0, sequence: 0, state: model)),
+  )
 }
 
 pub fn initial_snapshot_by_host_is_written_in_message_pack_test() {
@@ -434,7 +453,9 @@ pub fn initial_snapshot_by_host_is_written_in_message_pack_test() {
     bytes,
     serialiser: test_support.automatic_serialiser(transport.Json),
   )
-  |> should.equal(Ok(Snapshot(target: Session, sequence: 0, state: model)))
+  |> should.equal(
+    Ok(Snapshot(target: Session, epoch: 0, sequence: 0, state: model)),
+  )
 }
 
 pub fn initial_snapshot_cannot_close_the_script_tag_test() {
@@ -458,13 +479,16 @@ pub fn initial_snapshot_cannot_close_the_script_tag_test() {
   |> list.length
   |> should.equal(2)
   transport.decode(embed_payload(embed), serialiser:)
-  |> should.equal(Ok(Snapshot(target: Session, sequence: 0, state: model)))
+  |> should.equal(
+    Ok(Snapshot(target: Session, epoch: 0, sequence: 0, state: model)),
+  )
 }
 
 pub fn roundtrip_snapshot_test() {
   test_support.register_fixtures()
   assert_roundtrip(Snapshot(
     target: Session,
+    epoch: 0,
     sequence: 7,
     state: test_support.Model(
       ..test_support.initial_model(),
@@ -509,8 +533,13 @@ pub fn roundtrip_unsubscribe_test() {
 /// the constructor can be reconstructed.
 pub fn snapshot_tuple_test() {
   assert_encoded_generic(
-    Snapshot(target: Session, sequence: 0, state: WithTuple(pair: #(1, "hi"))),
-    "84A474797065A8736E617073686F74A674617267657481A46B696E64A773657373696F6EA873657175656E636500A57374617465C41882A13082A13001A131A26869A15FA9576974685475706C65",
+    Snapshot(
+      target: Session,
+      epoch: 0,
+      sequence: 0,
+      state: WithTuple(pair: #(1, "hi")),
+    ),
+    "85A474797065A8736E617073686F74A674617267657481A46B696E64A773657373696F6EA565706F636800A873657175656E636500A57374617465C41882A13082A13001A131A26869A15FA9576974685475706C65",
   )
 }
 
@@ -518,6 +547,7 @@ pub fn roundtrip_tuple_test() {
   test_support.register_fixtures()
   assert_roundtrip_generic(Snapshot(
     target: Session,
+    epoch: 0,
     sequence: 1,
     state: WithTuple(pair: #(42, "answer")),
   ))
@@ -527,8 +557,13 @@ pub fn roundtrip_tuple_test() {
 /// MessagePack fixarray length 0.
 pub fn snapshot_empty_dict_test() {
   assert_encoded_generic(
-    Snapshot(target: Session, sequence: 0, state: WithDict(entries: dict.new())),
-    "84A474797065A8736E617073686F74A674617267657481A46B696E64A773657373696F6EA873657175656E636500A57374617465C41A82A13082A13090A15FA52464696374A15FA85769746844696374",
+    Snapshot(
+      target: Session,
+      epoch: 0,
+      sequence: 0,
+      state: WithDict(entries: dict.new()),
+    ),
+    "85A474797065A8736E617073686F74A674617267657481A46B696E64A773657373696F6EA565706F636800A873657175656E636500A57374617465C41A82A13082A13090A15FA52464696374A15FA85769746844696374",
   )
 }
 
@@ -538,6 +573,7 @@ pub fn roundtrip_dict_test() {
   let entries = dict.from_list([#("only", 1)])
   assert_roundtrip_generic(Snapshot(
     target: Session,
+    epoch: 0,
     sequence: 2,
     state: WithDict(entries:),
   ))
@@ -546,8 +582,13 @@ pub fn roundtrip_dict_test() {
 /// Empty Set encodes as `{"_":"$set","0":[]}`.
 pub fn snapshot_empty_set_test() {
   assert_encoded_generic(
-    Snapshot(target: Session, sequence: 0, state: WithSet(members: set.new())),
-    "84A474797065A8736E617073686F74A674617267657481A46B696E64A773657373696F6EA873657175656E636500A57374617465C41882A13082A13090A15FA424736574A15FA757697468536574",
+    Snapshot(
+      target: Session,
+      epoch: 0,
+      sequence: 0,
+      state: WithSet(members: set.new()),
+    ),
+    "85A474797065A8736E617073686F74A674617267657481A46B696E64A773657373696F6EA565706F636800A873657175656E636500A57374617465C41882A13082A13090A15FA424736574A15FA757697468536574",
   )
 }
 
@@ -556,6 +597,7 @@ pub fn roundtrip_set_test() {
   let members = set.from_list([7])
   assert_roundtrip_generic(Snapshot(
     target: Session,
+    epoch: 0,
     sequence: 3,
     state: WithSet(members:),
   ))

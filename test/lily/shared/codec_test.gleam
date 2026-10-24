@@ -10,10 +10,14 @@ import gleam/bit_array
 
 import gleeunit/should
 
+import lily/internal/actor
 import lily/internal/codec.{
   ValueArray, ValueBool, ValueBytes, ValueFloat, ValueInteger, ValueMap,
   ValueNil, ValueString,
 }
+@target(javascript)
+import lily/test_support
+import lily/transport
 
 // =============================================================================
 // HELPERS
@@ -47,6 +51,10 @@ fn nested_array(depth: Int) -> BitArray {
     0 -> codec.encode_message_pack(Nil)
     _ -> codec.encode_array([nested_array(depth - 1)])
   }
+}
+
+fn past_wire_range() -> Int {
+  9_007_199_254_740_991 + 1
 }
 
 // =============================================================================
@@ -393,3 +401,139 @@ pub fn auto_decode_rejects_a_nested_bin_test() {
   codec.decode_message_pack(codec.encode_bin(<<0xc0>>), 128, Ok)
   |> should.be_error
 }
+
+// =============================================================================
+// INPUT HYGIENE
+// =============================================================================
+
+pub fn auto_decode_refuses_a_non_finite_float_test() {
+  // MessagePack float64 infinity and NaN
+  let assert Ok(infinity) = bit_array.base16_decode("CB7FF0000000000000")
+  let assert Ok(nan) = bit_array.base16_decode("CB7FF8000000000000")
+
+  codec.decode_message_pack(infinity, 128, Ok)
+  |> should.be_error
+  codec.decode_message_pack(nan, 128, Ok)
+  |> should.be_error
+}
+
+pub fn auto_decode_refuses_a_json_float_past_the_float_range_test() {
+  let serialiser =
+    transport.automatic(
+      format: transport.Json,
+      max_decode_depth: 128,
+      modules: [],
+    )
+  let frame = <<"{\"type\":\"session_message\",\"payload\":1e400}">>
+
+  transport.decode(frame, serialiser:)
+  |> should.equal(Error(Nil))
+}
+
+pub fn auto_decode_refuses_an_int_past_the_wire_range_test() {
+  // uint64 2^64 - 1 is past the range on both targets
+  let assert Ok(bytes) = bit_array.base16_decode("CFFFFFFFFFFFFFFFFF")
+
+  codec.decode_message_pack(bytes, 128, Ok)
+  |> should.be_error
+}
+
+// past 2^53 on both targets, a JavaScript peer couldn't read it back
+pub fn auto_decode_refuses_an_int_past_the_safe_range_test() {
+  let assert Ok(bytes) = bit_array.base16_decode("CF0020000000000000")
+
+  codec.decode_message_pack(bytes, 128, Ok)
+  |> should.be_error
+}
+
+pub fn encode_int_refuses_an_int_past_the_wire_range_test() {
+  actor.rescue(fn() { codec.encode_int(past_wire_range()) })
+  |> should.be_error
+  actor.rescue(fn() { codec.encode_int(0 - past_wire_range()) })
+  |> should.be_error
+}
+
+// =============================================================================
+// ERLANG TUPLE TAGS
+// =============================================================================
+
+@target(javascript)
+pub fn auto_decode_reads_a_tagged_tuple_as_a_tuple_on_javascript_test() {
+  // Erlang writes `#(True, 1)` and `#(TabA, 1)` as if they were constructors
+  test_support.register_fixtures()
+  let tagged = fn(name) {
+    codec.encode_map([
+      #(codec.encode_string("0"), codec.encode_int(1)),
+      #(codec.encode_string("_"), codec.encode_string(name)),
+    ])
+  }
+
+  let assert Ok(boolean) = codec.decode_message_pack(tagged("True"), 128, Ok)
+  codec.passthrough(boolean) |> should.equal(#(True, 1))
+  let assert Ok(tab) = codec.decode_message_pack(tagged("TabA"), 128, Ok)
+  codec.passthrough(tab) |> should.equal(#(test_support.TabA, 1))
+}
+
+// =============================================================================
+// STRICT MESSAGEPACK
+// =============================================================================
+
+pub fn auto_decode_refuses_a_repeated_key_test() {
+  // which copy wins would differ between decoders
+  let repeated =
+    codec.encode_map([
+      #(codec.encode_string("0"), codec.encode_int(1)),
+      #(codec.encode_string("0"), codec.encode_int(2)),
+      #(codec.encode_string("_"), codec.encode_string("Ok")),
+    ])
+
+  codec.decode_message_pack(repeated, 128, Ok)
+  |> should.be_error
+}
+
+pub fn auto_decode_refuses_trailing_bytes_test() {
+  let bytes = bit_array.append(codec.encode_int(1), <<0xc0>>)
+
+  codec.decode_message_pack(bytes, 128, Ok)
+  |> should.be_error
+}
+
+pub fn auto_decode_refuses_a_tag_that_is_not_a_string_test() {
+  let tagged =
+    codec.encode_map([
+      #(codec.encode_string("0"), codec.encode_int(1)),
+      #(codec.encode_string("_"), codec.encode_int(5)),
+    ])
+
+  codec.decode_message_pack(tagged, 128, Ok)
+  |> should.be_error
+}
+
+@target(javascript)
+pub fn encode_refuses_a_non_finite_float_on_javascript_test() {
+  let infinite = 1.0e308 *. 10.0
+  actor.rescue(fn() { codec.encode_message_pack(infinite) })
+  |> should.be_error
+  actor.rescue(fn() { codec.encode_json(infinite) })
+  |> should.be_error
+}
+
+@target(javascript)
+pub fn encode_refuses_a_lone_surrogate_on_javascript_test() {
+  let lone = lone_surrogate()
+  actor.rescue(fn() { codec.encode_string(lone) })
+  |> should.be_error
+}
+
+@target(javascript)
+pub fn auto_decode_keeps_a_leading_byte_order_mark_test() {
+  // as Erlang does, the server and a JavaScript client read the same text
+  let marked = "\u{FEFF}room"
+  let assert Ok(decoded) =
+    codec.decode_message_pack(codec.encode_string(marked), 128, Ok)
+  codec.passthrough(decoded) |> should.equal(marked)
+}
+
+@target(javascript)
+@external(javascript, "../../lily/fixtures.ffi.mjs", "loneSurrogate")
+fn lone_surrogate() -> String

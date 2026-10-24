@@ -78,6 +78,7 @@ pub fn page_functions_do_nothing_test() {
   browser.navigate("/a") |> should.equal(Nil)
   browser.replace("/b") |> should.equal(Nil)
   browser.load("/c") |> should.equal(Nil)
+  browser.load_external("https://example.com") |> should.equal(Nil)
   browser.reload() |> should.equal(Nil)
   browser.clear_persisted() |> should.equal(Nil)
   browser.recover_after_reload(7) |> should.equal(7)

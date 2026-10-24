@@ -1,5 +1,5 @@
-// data-lily-message decoding on a client-only page, types the page encoded decode
-// without registration, frames still need it
+// data-lily-message decoding on a client-only page, types the page encoded
+// decode without registration, frames still need it
 
 // =============================================================================
 // IMPORTS
@@ -9,6 +9,8 @@
 import gleam/bit_array
 @target(javascript)
 import gleam/json
+@target(javascript)
+import gleam/string
 
 @target(javascript)
 import gleeunit/should
@@ -24,7 +26,7 @@ import lily/javascript/stamp_fixture.{Ink, Stamp}
 @target(javascript)
 import lily/store
 @target(javascript)
-import lily/test_support
+import lily/test_support.{Increment, SetName}
 @target(javascript)
 import lily/transport
 
@@ -89,4 +91,66 @@ pub fn data_message_encoded_types_never_reach_wire_decoding_test() {
       ),
     )
   decoded |> should.equal(Error(Nil))
+}
+
+@target(javascript)
+pub fn data_message_click_is_held_to_the_schema_test() {
+  // markup from data can carry any registered constructor, the schema says
+  // which a message may be
+  test_support.reset_dom()
+  let module = "lily/test_support"
+  let schema =
+    transport.schema(
+      message: transport.Custom(module:, name: "Message", parameters: []),
+      model: transport.Anything,
+      types: [
+        transport.custom(module:, name: "Message", constructors: [
+          transport.constructor(name: "Increment", fields: []),
+        ]),
+      ],
+    )
+  let runtime =
+    test_support.session_store() |> store.schema(schema) |> client.start
+  let html =
+    "<button id=\"ok\" data-lily-message=\""
+    <> event.encode_message(Increment)
+    <> "\">+</button><button id=\"bad\" data-lily-message=\""
+    <> event.encode_message(SetName("forged"))
+    <> "\">name</button>"
+  let _ =
+    component.mount(
+      runtime,
+      selector: "#app",
+      to_html: test_support.to_html,
+      to_placeholder: test_support.to_placeholder,
+      view: fn(_model) { component.static(fn(_nest) { html }) },
+    )
+
+  test_support.click("#bad")
+  test_support.click("#ok")
+
+  client.model(runtime).name |> should.equal("")
+  client.model(runtime).count |> should.equal(1)
+}
+
+@target(javascript)
+pub fn data_message_click_ignores_a_huge_attribute_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let html =
+    "<button id=\"huge\" data-lily-message=\""
+    <> event.encode_message(SetName(string.repeat("a", 20_000)))
+    <> "\">+</button>"
+  let _ =
+    component.mount(
+      runtime,
+      selector: "#app",
+      to_html: test_support.to_html,
+      to_placeholder: test_support.to_placeholder,
+      view: fn(_model) { component.static(fn(_nest) { html }) },
+    )
+
+  test_support.click("#huge")
+
+  client.model(runtime).name |> should.equal("")
 }

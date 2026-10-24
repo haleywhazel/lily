@@ -60,7 +60,7 @@ pub type Model {
   )
 }
 
-// auto-serialiser edge cases, as are the `With` types
+/// An automatic serialiser edge case, as are the `With` types.
 pub type Nested {
   Nested(inner: Model)
 }
@@ -98,6 +98,12 @@ pub type WithTuple {
 @target(javascript)
 @external(javascript, "./test_support.ffi.mjs", "activeElementId")
 pub fn active_element_id() -> String
+
+@target(javascript)
+@external(javascript, "./test_support.ffi.mjs", "addThrowingRenderer")
+pub fn add_throwing_renderer(
+  _runtime: client.Runtime(model, message, mode),
+) -> Nil
 
 @target(javascript)
 /// The first stubbed animation's playback rate under `selector`, 0 when none.
@@ -320,10 +326,6 @@ pub fn focus(_selector: String) -> Nil
 @external(javascript, "./test_support.ffi.mjs", "getRef")
 pub fn get(cell: Ref(value)) -> value
 
-@external(erlang, "lily_test_support_ffi", "get_shared")
-@external(javascript, "./test_support.ffi.mjs", "getRef")
-pub fn get_shared(cell: Shared(value)) -> value
-
 @target(javascript)
 @external(javascript, "./test_support.ffi.mjs", "getAttribute")
 pub fn get_attribute(_selector: String, _name: String) -> String
@@ -340,6 +342,10 @@ pub fn get_last_event_source() -> Dynamic
 @target(javascript)
 @external(javascript, "./test_support.ffi.mjs", "getLastWebSocket")
 pub fn get_last_websocket() -> Dynamic
+
+@external(erlang, "lily_test_support_ffi", "get_shared")
+@external(javascript, "./test_support.ffi.mjs", "getRef")
+pub fn get_shared(cell: Shared(value)) -> value
 
 @target(javascript)
 @external(javascript, "./test_support.ffi.mjs", "getText")
@@ -538,10 +544,6 @@ pub fn new_runtime() -> client.Runtime(Model, Message, store.Synced) {
   client.start(local_store())
 }
 
-@external(erlang, "lily_test_support_ffi", "new_shared")
-@external(javascript, "./test_support.ffi.mjs", "newRef")
-pub fn new_shared(value: value) -> Shared(value)
-
 pub fn new_server() -> server.Server(Model, Message) {
   new_server_with_origins(server.AnyOrigin)
 }
@@ -551,6 +553,10 @@ pub fn new_server_with_origins(
 ) -> server.Server(Model, Message) {
   start_server(server.new(session_store(), origins: origins))
 }
+
+@external(erlang, "lily_test_support_ffi", "new_shared")
+@external(javascript, "./test_support.ffi.mjs", "newRef")
+pub fn new_shared(value: value) -> Shared(value)
 
 @target(javascript)
 pub fn new_synced_runtime() -> client.Runtime(Model, Message, store.Synced) {
@@ -571,14 +577,10 @@ pub fn new_topic_server_with_access(
   ))
 }
 
-pub fn open_session_store() -> store.Store(Model, Message, store.Synced) {
-  store.new(init: initial_model(), update: update)
-  |> store.sync_with(
-    route: fn(_) { store.Session },
-    serialiser: custom_serialiser(),
-  )
-  |> store.session(get: fn(model) { model }, set: fn(_, model) { model })
-}
+@target(javascript)
+/// Tags of the connected elements a stubbed `kind` observer watches.
+@external(javascript, "./test_support.ffi.mjs", "observedTags")
+pub fn observed_tags(_kind: String) -> List(String)
 
 @target(javascript)
 /// Open before `connect` returns, drops everything sent.
@@ -590,6 +592,11 @@ pub fn opened_connector() -> transport.Connector {
 }
 
 @target(javascript)
+/// Window and document listeners for `name` added and not removed.
+@external(javascript, "./test_support.ffi.mjs", "pageListenerCount")
+pub fn page_listener_count(_name: String) -> Int
+
+@target(javascript)
 @external(javascript, "./test_support.ffi.mjs", "dispatchPointerDetail")
 pub fn pointer_detail(
   _selector: String,
@@ -597,16 +604,6 @@ pub fn pointer_detail(
   _button: Int,
   _pointer_type: String,
 ) -> Bool
-
-@target(javascript)
-/// Tags of the connected elements a stubbed `kind` observer watches.
-@external(javascript, "./test_support.ffi.mjs", "observedTags")
-pub fn observed_tags(_kind: String) -> List(String)
-
-@target(javascript)
-/// Window and document listeners for `name` added and not removed.
-@external(javascript, "./test_support.ffi.mjs", "pageListenerCount")
-pub fn page_listener_count(_name: String) -> Int
 
 @target(javascript)
 @external(javascript, "./test_support.ffi.mjs", "popstateTo")
@@ -646,6 +643,10 @@ pub fn reset_url() -> Nil
 pub fn resize_window(_width: Int, _height: Int) -> Nil
 
 @target(javascript)
+@external(javascript, "./test_support.ffi.mjs", "restoreChildren")
+pub fn restore_children(_selector: String) -> Nil
+
+@target(javascript)
 @external(javascript, "./test_support.ffi.mjs", "scrollTo")
 pub fn scroll_to(_selector: String, _top: Int, _left: Int) -> Nil
 
@@ -666,10 +667,6 @@ pub fn session_store() -> store.Store(Model, Message, store.Synced) {
 @external(javascript, "./test_support.ffi.mjs", "setRef")
 pub fn set(cell: Ref(value), value: value) -> Nil
 
-@external(erlang, "lily_test_support_ffi", "set_shared")
-@external(javascript, "./test_support.ffi.mjs", "setRef")
-pub fn set_shared(cell: Shared(value), value: value) -> Nil
-
 @target(javascript)
 @external(javascript, "./test_support.ffi.mjs", "setFiles")
 pub fn set_files(_selector: String, _names: List(String)) -> Nil
@@ -682,6 +679,10 @@ pub fn set_inner_html(_selector: String, _html: String) -> Nil
 @external(javascript, "./test_support.ffi.mjs", "setOnline")
 pub fn set_online(_online: Bool) -> Nil
 
+@external(erlang, "lily_test_support_ffi", "set_shared")
+@external(javascript, "./test_support.ffi.mjs", "setRef")
+pub fn set_shared(cell: Shared(value), value: value) -> Nil
+
 @target(javascript)
 @external(javascript, "./test_support.ffi.mjs", "setVisibility")
 pub fn set_visibility(_visible: Bool) -> Nil
@@ -692,6 +693,10 @@ pub fn start_server(
   let assert Ok(app) = server.start(builder)
   app
 }
+
+@target(javascript)
+@external(javascript, "./test_support.ffi.mjs", "stashChildren")
+pub fn stash_children(_selector: String) -> Nil
 
 @target(javascript)
 @external(javascript, "./test_support.ffi.mjs", "stubAnimations")
@@ -831,7 +836,7 @@ pub fn update(model: Model, message: Message) -> Model {
     RemoveTransitionItem(id) ->
       case model.transition_item {
         Some(current) if current == id -> Model(..model, transition_item: None)
-        _ -> model
+        Some(_) | None -> model
       }
     Claim(who) ->
       case model.name {
@@ -860,6 +865,31 @@ pub fn write_session_storage(_key: String, _value: String) -> Nil
 // =============================================================================
 // PRIVATE FUNCTIONS
 // =============================================================================
+
+fn cursor_decoder() -> Decoder(transport.Cursor) {
+  use target <- decode.field("target", target_decoder())
+  let number = decode.map(decode.int, option.Some)
+  use epoch <- decode.optional_field("epoch", option.None, number)
+  use sequence <- decode.optional_field("sequence", option.None, number)
+  case epoch, sequence {
+    option.Some(epoch), option.Some(sequence) ->
+      decode.success(transport.Known(target:, epoch:, sequence:))
+    _, _ -> decode.success(transport.Unknown(target:))
+  }
+}
+
+fn cursor_json(cursor: transport.Cursor) -> Json {
+  case cursor {
+    transport.Unknown(target:) ->
+      json.object([#("target", target_json(target))])
+    transport.Known(target:, epoch:, sequence:) ->
+      json.object([
+        #("target", target_json(target)),
+        #("epoch", json.int(epoch)),
+        #("sequence", json.int(sequence)),
+      ])
+  }
+}
 
 // session and every topic hold the whole model
 fn declare_topics(
@@ -915,7 +945,7 @@ fn frame_decoder(
       decode.success(transport.Rejected(topic_id:, reason:))
     }
     "resync" -> {
-      use cursors <- decode.field("cursors", decode.list(target_decoder()))
+      use cursors <- decode.field("cursors", decode.list(cursor_decoder()))
       decode.success(transport.Resync(cursors:))
     }
     "session_message" -> {
@@ -929,9 +959,10 @@ fn frame_decoder(
     }
     "snapshot" -> {
       use target <- decode.field("target", target_decoder())
+      use epoch <- decode.field("epoch", decode.int)
       use sequence <- decode.field("sequence", decode.int)
       use state <- decode.field("state", model_decoder)
-      decode.success(transport.Snapshot(target:, sequence:, state:))
+      decode.success(transport.Snapshot(target:, epoch:, sequence:, state:))
     }
     "subscribe" -> {
       use topic_id <- decode.field("topic_id", decode.string)
@@ -947,6 +978,10 @@ fn frame_decoder(
       use sequence <- decode.field("sequence", decode.int)
       use payload <- decode.field("payload", message_decoder)
       decode.success(transport.TopicUpdate(topic_id:, sequence:, payload:))
+    }
+    "unchanged" -> {
+      use target <- decode.field("target", target_decoder())
+      decode.success(transport.Unchanged(target:))
     }
     "unsubscribe" -> {
       use topic_id <- decode.field("topic_id", decode.string)
@@ -982,7 +1017,7 @@ fn frame_json(
         #("reason", reason_json(reason)),
       ])
     transport.Resync(cursors:) ->
-      tagged("resync", [#("cursors", json.array(cursors, target_json))])
+      tagged("resync", [#("cursors", json.array(cursors, cursor_json))])
     transport.SessionMessage(payload:) ->
       tagged("session_message", [#("payload", encode_message(payload))])
     transport.SessionUpdate(sequence:, payload:) ->
@@ -990,9 +1025,10 @@ fn frame_json(
         #("sequence", json.int(sequence)),
         #("payload", encode_message(payload)),
       ])
-    transport.Snapshot(target:, sequence:, state:) ->
+    transport.Snapshot(target:, epoch:, sequence:, state:) ->
       tagged("snapshot", [
         #("target", target_json(target)),
+        #("epoch", json.int(epoch)),
         #("sequence", json.int(sequence)),
         #("state", encode_model(state)),
       ])
@@ -1009,6 +1045,8 @@ fn frame_json(
         #("sequence", json.int(sequence)),
         #("payload", encode_message(payload)),
       ])
+    transport.Unchanged(target:) ->
+      tagged("unchanged", [#("target", target_json(target))])
     transport.Unsubscribe(topic_id:) ->
       tagged("unsubscribe", [#("topic_id", json.string(topic_id))])
     transport.Version(hash:, protocol:) ->
@@ -1016,20 +1054,6 @@ fn frame_json(
         #("hash", json.string(hash)),
         #("protocol", json.int(protocol)),
       ])
-  }
-}
-
-fn tab_from_string(name: String) -> Tab {
-  case name {
-    "TabB" -> TabB
-    _ -> TabA
-  }
-}
-
-fn tab_to_string(tab: Tab) -> String {
-  case tab {
-    TabA -> "TabA"
-    TabB -> "TabB"
   }
 }
 
@@ -1051,6 +1075,20 @@ fn reason_json(reason: transport.RejectionReason) -> Json {
   })
 }
 
+fn tab_from_string(name: String) -> Tab {
+  case name {
+    "TabB" -> TabB
+    _ -> TabA
+  }
+}
+
+fn tab_to_string(tab: Tab) -> String {
+  case tab {
+    TabA -> "TabA"
+    TabB -> "TabB"
+  }
+}
+
 fn tagged(kind: String, fields: List(#(String, Json))) -> Json {
   json.object([#("type", json.string(kind)), ..fields])
 }
@@ -1063,7 +1101,7 @@ fn target_decoder() -> Decoder(transport.SyncTarget) {
       use id <- decode.field("id", decode.string)
       decode.success(transport.Topic(id:))
     }
-    _ -> decode.failure(transport.Session, "Target")
+    _ -> decode.failure(transport.Session, "SyncTarget")
   }
 }
 

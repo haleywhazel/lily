@@ -39,6 +39,7 @@ fn snapshot(
 ) -> transport.Protocol(Model, Message) {
   transport.Snapshot(
     target: transport.Topic(topic_id),
+    epoch: 0,
     sequence: 0,
     state: model,
   )
@@ -53,6 +54,18 @@ pub fn topic_init_a_topic_starts_from_its_loaded_model_test() {
   |> server.topics_init(prefix: "room:", init: named)
   |> subscribe_and_drain("room:7")
   |> should.equal([snapshot("room:7", named("7"))])
+}
+
+pub fn topic_init_a_combining_mark_after_the_prefix_reaches_the_loader_test() {
+  // by graphemes both ids would hand the loader 'x'
+  let builder =
+    test_support.topic_builder()
+    |> server.topics_init(prefix: "room:", init: named)
+
+  subscribe_and_drain(builder, "room:\u{0301}x")
+  |> should.equal([snapshot("room:\u{0301}x", named("\u{0301}x"))])
+  subscribe_and_drain(builder, "room:x")
+  |> should.equal([snapshot("room:x", named("x"))])
 }
 
 pub fn topic_init_a_topic_without_a_loader_starts_from_the_initial_model_test() {

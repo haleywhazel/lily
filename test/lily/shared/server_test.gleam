@@ -8,6 +8,7 @@
 import gleam/bit_array
 import gleam/list
 import gleam/option
+import gleam/result
 import gleam/string
 
 import gleeunit/should
@@ -272,6 +273,7 @@ pub fn server_session_state_is_per_connection_test() {
   |> should.equal([
     transport.Snapshot(
       target: transport.Session,
+      epoch: 0,
       sequence: 0,
       state: test_support.initial_model(),
     ),
@@ -328,6 +330,7 @@ pub fn server_connect_with_empty_session_keeps_initial_model_test() {
   |> should.equal([
     transport.Snapshot(
       target: transport.Session,
+      epoch: 0,
       sequence: 0,
       state: test_support.initial_model(),
     ),
@@ -337,6 +340,57 @@ pub fn server_connect_with_empty_session_keeps_initial_model_test() {
 // =============================================================================
 // RESYNC
 // =============================================================================
+
+pub fn server_session_resync_naming_the_current_state_is_unchanged_test() {
+  let app = test_support.new_server()
+  let #(c1, raw) = wire_support.open_raw(app, "c1", [])
+  wire_support.session_message(c1, Increment)
+  wire_support.resync_session(c1)
+  let assert [#(epoch, sequence)] =
+    list.filter_map(raw(), fn(bytes) {
+      case wire_support.decode_exact(bytes) {
+        transport.Snapshot(epoch:, sequence:, ..) -> Ok(#(epoch, sequence))
+        _ -> Error(Nil)
+      }
+    })
+
+  wire_support.send(
+    c1,
+    transport.Resync([
+      transport.Known(target: transport.Session, epoch:, sequence:),
+    ]),
+  )
+
+  raw()
+  |> list.map(wire_support.decode)
+  |> should.equal([transport.Unchanged(transport.Session)])
+}
+
+pub fn server_session_resync_after_a_reconnect_is_a_snapshot_test() {
+  // a session's epoch is its registration, another one never matches it
+  let app = test_support.new_server()
+  let #(c1, raw) = wire_support.open_raw(app, "c1", [])
+  wire_support.resync_session(c1)
+  let assert [epoch] =
+    list.filter_map(raw(), fn(bytes) {
+      case wire_support.decode_exact(bytes) {
+        transport.Snapshot(epoch:, ..) -> Ok(epoch)
+        _ -> Error(Nil)
+      }
+    })
+  let #(c2, frames) = wire_support.open(app, "c1")
+
+  wire_support.send(
+    c2,
+    transport.Resync([
+      transport.Known(target: transport.Session, epoch:, sequence: 0),
+    ]),
+  )
+
+  frames()
+  |> list.count(wire_support.is_snapshot)
+  |> should.equal(1)
+}
 
 pub fn server_resync_sends_snapshot_test() {
   let app = test_support.new_server()
@@ -348,6 +402,7 @@ pub fn server_resync_sends_snapshot_test() {
   |> should.equal([
     transport.Snapshot(
       target: transport.Session,
+      epoch: 0,
       sequence: 0,
       state: test_support.initial_model(),
     ),
@@ -366,6 +421,7 @@ pub fn server_resync_after_session_messages_test() {
   |> should.equal([
     transport.Snapshot(
       target: transport.Session,
+      epoch: 0,
       sequence: 1,
       state: test_support.Model(..test_support.initial_model(), count: 1),
     ),
@@ -384,6 +440,7 @@ pub fn server_resync_reflects_own_session_only_test() {
   |> should.equal([
     transport.Snapshot(
       target: transport.Session,
+      epoch: 0,
       sequence: 0,
       state: test_support.initial_model(),
     ),
@@ -560,9 +617,13 @@ pub fn server_generate_client_id_is_unique_test() {
 }
 
 pub fn server_generate_client_id_returns_32_char_hex_test() {
-  server.generate_client_id()
-  |> string.length
+  let id = server.generate_client_id()
+
+  string.length(id)
   |> should.equal(32)
+  bit_array.base16_decode(string.uppercase(id))
+  |> result.is_ok
+  |> should.be_true
 }
 
 // =============================================================================

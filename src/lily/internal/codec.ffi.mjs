@@ -39,7 +39,10 @@ import GleamDict, {
   from as dictFrom,
   fold as dictFold,
 } from "../../../gleam_stdlib/dict.mjs";
-import { from_list as setFromList } from "../../../gleam_stdlib/gleam/set.mjs";
+import {
+  from_list as setFromList,
+  new$ as setNew,
+} from "../../../gleam_stdlib/gleam/set.mjs";
 
 // =============================================================================
 // EXPORT FUNCTIONS
@@ -56,6 +59,24 @@ export function constructDataMessage(reflected) {
   );
 }
 
+export function intInRange(value) {
+  return Number.isSafeInteger(value);
+}
+
+export function intToFiniteFloat(value) {
+  return Number.isFinite(value) ? new Ok(value) : new Error(undefined);
+}
+
+export function isFiniteFloat(value) {
+  return Number.isFinite(value);
+}
+
+export function isWellFormed(text) {
+  return typeof text.isWellFormed === "function"
+    ? text.isWellFormed()
+    : !LONE_SURROGATE.test(text);
+}
+
 export function passthrough(value) {
   return value;
 }
@@ -64,7 +85,7 @@ export function reflect(value) {
   return reflectInner(value, undefined);
 }
 
-// records every custom-type class in the tree for constructDataMessage
+/** Records every custom-type class in the tree for constructDataMessage. */
 export function reflectDataMessage(value) {
   return reflectInner(value, (constructor) =>
     dataMessageRegistry.set(
@@ -74,7 +95,21 @@ export function reflectDataMessage(value) {
   );
 }
 
-/** Called from the user's FFI shim before a transport connects. */
+export function refuseFloat() {
+  throw new globalThis.Error("lily: an infinite or NaN float has no wire form");
+}
+
+export function refuseInt(value) {
+  throw new globalThis.Error(`lily: int ${value} is outside the wire range`);
+}
+
+export function refuseString() {
+  throw new globalThis.Error(
+    "lily: a string with a lone surrogate has no wire form",
+  );
+}
+
+/** Registers every custom-type class a module exports, for `modules:`. */
 export function registerModule(moduleNamespace) {
   for (const key in moduleNamespace) {
     const value = moduleNamespace[key];
@@ -105,6 +140,15 @@ export function requestModule(packageName, path) {
     });
 }
 
+/** UTF-8 that keeps a leading byte-order mark, as Erlang does. */
+export function utf8ToString(bytes) {
+  try {
+    return new Ok(UTF8_DECODER.decode(bytes.rawBuffer));
+  } catch (_error) {
+    return new Error(undefined);
+  }
+}
+
 export function whenRegistered(thunk) {
   if (pendingModules === 0) thunk();
   else whenRegisteredQueue.push(thunk);
@@ -121,35 +165,52 @@ function constructInner(reflected, lookup) {
   if (reflected instanceof ReflectedFloat) return reflected[0];
   if (reflected instanceof ReflectedString) return reflected[0];
   if (reflected instanceof ReflectedList) {
-    return toList(reflected[0].toArray().map((item) => constructInner(item, lookup)));
+    return toList(
+      reflected[0].toArray().map((item) => constructInner(item, lookup)),
+    );
   }
   if (reflected instanceof ReflectedTuple) {
     // tuples are plain JS arrays
-    return reflected.fields.toArray().map((item) => constructInner(item, lookup));
+    return reflected.fields
+      .toArray()
+      .map((item) => constructInner(item, lookup));
   }
   if (reflected instanceof ReflectedDict) {
     // each entry is a `[key, value]` array
-    const entries = reflected.entries.toArray().map((entry) => [
-      constructInner(entry[0], lookup),
-      constructInner(entry[1], lookup),
-    ]);
+    const entries = reflected.entries
+      .toArray()
+      .map((entry) => [
+        constructInner(entry[0], lookup),
+        constructInner(entry[1], lookup),
+      ]);
     return dictFrom(entries);
   }
   if (reflected instanceof ReflectedSet) {
-    const members = reflected.members.toArray().map((item) => constructInner(item, lookup));
+    const members = reflected.members
+      .toArray()
+      .map((item) => constructInner(item, lookup));
     return setFromList(toList(members));
   }
   if (reflected instanceof ReflectedConstructor) {
-    const fields = reflected.fields.toArray().map((item) => constructInner(item, lookup));
+    const fields = reflected.fields
+      .toArray()
+      .map((item) => constructInner(item, lookup));
     const key = registryKey(reflected.name, fields.length);
     const constructor = lookup(key);
+    // Erlang writes `#(True, x)` as a tag, its head is a value we know
+    if (!constructor && fields.length > 0) {
+      const head = tupleHead(reflected.name, lookup);
+      if (head !== NO_HEAD) return [head, ...fields];
+    }
     if (!constructor) {
-      if (!reportedUnknown.has(key)) {
+      // names come from frames, so the set is bounded and the name cut
+      if (!reportedUnknown.has(key) && reportedUnknown.size < MAX_REPORTED) {
         reportedUnknown.add(key);
         log(
           "error",
-          `lily: unknown constructor ${key}, register its module with ` +
-            "registerModule so the decoder can rebuild it",
+          `lily: unknown constructor ${JSON.stringify(key.slice(0, 64))}, ` +
+            "name its module in modules: (transport.module) so the decoder " +
+            "can rebuild it",
         );
       }
       throw new globalThis.Error(`Unknown constructor: ${key}`);
@@ -177,8 +238,9 @@ function reflectInner(value, record) {
   if (value === undefined || value === null) return new ReflectedNil();
   if (typeof value === "boolean") return new ReflectedBool(value);
   if (typeof value === "string") return new ReflectedString(value);
+  // a whole number past the safe range can only be a float
   if (typeof value === "number") {
-    return Number.isInteger(value)
+    return Number.isSafeInteger(value)
       ? new ReflectedInteger(value)
       : new ReflectedFloat(value);
   }
@@ -214,13 +276,8 @@ function reflectInner(value, record) {
     return new ReflectedDict(toList(entries));
   }
 
-  // set, by class name plus an inner Dict
-  if (
-    value &&
-    value.constructor &&
-    value.constructor.name === "Set" &&
-    value.dict instanceof GleamDict
-  ) {
+  // set, by class identity, a user type named Set is a custom type
+  if (value instanceof GleamSet) {
     const members = [];
     dictFold(value.dict, undefined, (_accumulator, member, _token) => {
       members.push(reflectInner(member, record));
@@ -280,6 +337,15 @@ function runWaiting() {
   }
 }
 
+// a bare value Erlang uses as a tag, or NO_HEAD
+function tupleHead(name, lookup) {
+  if (name === "True") return true;
+  if (name === "False") return false;
+  if (name === "Nil") return undefined;
+  const zeroField = lookup(registryKey(name, 0));
+  return zeroField ? new zeroField() : NO_HEAD;
+}
+
 // =============================================================================
 // PRIVATE CONSTANTS
 // =============================================================================
@@ -292,11 +358,24 @@ const constructorRegistry = new Map();
 // classes seen by reflectDataMessage, only data messages decode from it
 const dataMessageRegistry = new Map();
 
+// the stdlib's opaque class, by identity, a user type named Set is another
+const GleamSet = setNew().constructor;
+
+const LONE_SURROGATE =
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+// unknown constructor names logged, beyond it they're dropped quietly
+const MAX_REPORTED = 256;
+
+const NO_HEAD = Symbol("no tuple head");
+
 let pendingModules = 0;
 
 const reportedUnknown = new Set();
 
 const requestedModules = new Set();
+
+const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 let whenRegisteredQueue = [];
 

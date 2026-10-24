@@ -167,6 +167,50 @@ pub fn browser_load_leaves_the_app_test() {
 }
 
 @target(javascript)
+pub fn browser_load_refuses_a_script_url_or_another_origin_test() {
+  test_support.reset_dom()
+  let before = test_support.navigation_count()
+
+  let logs =
+    test_support.capture_logs(fn() {
+      browser.load("javascript:alert(1)")
+      browser.load("data:text/html,<script>alert(1)</script>")
+      browser.load("//evil.example/phish")
+      browser.load("https://evil.example/phish")
+    })
+
+  test_support.navigation_count() |> should.equal(before)
+  list.length(logs) |> should.equal(4)
+}
+
+@target(javascript)
+pub fn browser_load_accepts_a_relative_path_test() {
+  test_support.reset_dom()
+  let before = test_support.navigation_count()
+
+  browser.load("settings?tab=2")
+  browser.load("http://localhost:8080/logout")
+
+  test_support.navigation_count() |> should.equal(before + 2)
+}
+
+@target(javascript)
+pub fn browser_load_external_accepts_https_and_refuses_a_script_url_test() {
+  test_support.reset_dom()
+  let before = test_support.navigation_count()
+
+  let logs =
+    test_support.capture_logs(fn() {
+      browser.load_external("https://pay.example.com/checkout")
+      browser.load_external("javascript:alert(1)")
+      browser.load_external("/relative")
+    })
+
+  test_support.navigation_count() |> should.equal(before + 1)
+  list.length(logs) |> should.equal(2)
+}
+
+@target(javascript)
 pub fn browser_reload_reloads_the_page_test() {
   test_support.reset_dom()
   let before = test_support.navigation_count()
@@ -649,6 +693,39 @@ fn send_mismatch(handler: transport.ConnectorHandler) -> Nil {
     transport.Version(hash: "v1", protocol: transport.protocol_version + 1),
     serialiser: test_support.custom_serialiser(),
   ))
+}
+
+@target(javascript)
+pub fn browser_reload_on_new_version_stops_a_server_flipping_builds_test() {
+  // two reloads in a window, then the page stays put
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let before = test_support.navigation_count()
+
+  list.each(["v2", "v3", "v4", "v5"], fn(hash) {
+    let runtime = test_support.new_runtime() |> browser.reload_on_new_version
+    let #(handler, _sent) = test_support.connect_capturing(runtime)
+    send_version(handler, "v1")
+    send_version(handler, hash)
+  })
+
+  test_support.navigation_count() |> should.equal(before + 2)
+}
+
+@target(javascript)
+pub fn browser_navigate_refuses_another_origin_or_scheme_test() {
+  test_support.reset_dom()
+  let before = test_support.history_length()
+
+  let logs =
+    test_support.capture_logs(fn() {
+      browser.navigate("javascript:alert(1)")
+      browser.navigate("//evil.example/x")
+      browser.replace("https://evil.example/x")
+    })
+
+  test_support.history_length() |> should.equal(before)
+  list.length(logs) |> should.equal(3)
 }
 
 @target(javascript)

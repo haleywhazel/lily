@@ -8,7 +8,7 @@
 // IMPORTS
 // =============================================================================
 
-import { Ok, toList } from "../gleam.mjs";
+import { Error, Ok, toList } from "../gleam.mjs";
 import { Some } from "../../gleam_stdlib/gleam/option.mjs";
 // circular with component.mjs, safe as these are only read inside functions
 import {
@@ -20,6 +20,14 @@ import {
   SkipAndPreventDefault,
 } from "./component.mjs";
 import { log } from "./internal/actor.ffi.mjs";
+import { decode_data_message } from "./internal/codec.mjs";
+
+// =============================================================================
+// EXPORT CONSTANTS
+// =============================================================================
+
+// holds a node's owner ids, innermost first
+export const OWNER_ATTRIBUTE = "data-lily-component";
 
 // =============================================================================
 // EXPORT FUNCTIONS
@@ -32,6 +40,8 @@ export function createEvents(wrappers) {
     roots: new Set(),
     byOwner: new Map(),
     bySelector: new Map(),
+    // component-bound bindings per event name, none means no ancestor walk
+    ownerBound: new Map(),
     sequence: 0,
   };
 }
@@ -49,6 +59,11 @@ export function dropListeners(state, ownerId) {
         const index = list.indexOf(binding);
         if (index !== -1) list.splice(index, 1);
       }
+    } else if (binding.name !== null) {
+      state.ownerBound.set(
+        binding.name,
+        state.ownerBound.get(binding.name) - 1,
+      );
     }
   }
 }
@@ -59,22 +74,32 @@ export function installMessageClicks(root, decodeMessage, dispatch) {
     root.removeEventListener("click", root.lilyMessageClick);
   }
   const listener = (event) => {
-    const element = event.target.closest?.("[data-lily-message]");
-    if (!element || !root.contains(element)) return;
-    const decoded = decodeMessage(element.getAttribute("data-lily-message"));
+    const decoded = readMessageWithin(event.target, root, decodeMessage);
     if (decoded instanceof Ok) dispatch(decoded[0]);
   };
   root.lilyMessageClick = listener;
   root.addEventListener("click", listener);
 }
 
+/** Whether Lily's renderer marked the element, not markup from data. */
+export function isMade(element) {
+  return MADE.has(element);
+}
+
+/** Recorded wherever the renderer sets `data-lily-component` or a row key. */
+export function markMade(element) {
+  MADE.add(element);
+}
+
 export function readChecked(event) {
   return event.target?.checked === true;
 }
 
+/** The closest message inside the bound element, decoded as the mount does. */
 export function readDataMessage(event) {
-  const element = event.target?.closest?.("[data-lily-message]");
-  return element?.getAttribute("data-lily-message") ?? "";
+  // the component's own element, a message from outside it isn't its to send
+  const decode = event.lilyDecodeMessage ?? decode_data_message;
+  return readMessageWithin(event.target, event.lilyOwner, decode);
 }
 
 export function readFiles(event) {
@@ -87,7 +112,15 @@ export function readFormFields(event) {
     target?.tagName === "FORM" ? target : (target?.closest?.("form") ?? null);
   const fields = [];
   if (form) {
-    for (const [name, value] of new FormData(form)) {
+    // the submitter's own name and value are part of what was sent
+    const submitter = event?.submitter ?? null;
+    let data;
+    try {
+      data = submitter ? new FormData(form, submitter) : new FormData(form);
+    } catch (_error) {
+      data = new FormData(form);
+    }
+    for (const [name, value] of data) {
       if (typeof value === "string") fields.push([name, value]);
     }
   }
@@ -177,17 +210,6 @@ export function readWheel(event) {
   ];
 }
 
-// the owner's element was replaced
-export function reobserveOwner(state, ownerId) {
-  for (const binding of state.byOwner.get(ownerId) ?? []) {
-    const watch = binding.runtime.watch;
-    if (!watch) continue;
-    binding.runtime.observer?.disconnect();
-    binding.runtime.observer = null;
-    observeOwner(state, binding, watch.kind, watch.toEvent);
-  }
-}
-
 export function registerListener(state, ownerId, listener) {
   const trigger = listener.trigger;
   const binding = {
@@ -224,12 +246,28 @@ export function registerListener(state, ownerId, listener) {
       state.bySelector.set(binding.name, []);
     }
     state.bySelector.get(binding.name).push(binding);
+  } else {
+    const count = state.ownerBound.get(binding.name) ?? 0;
+    state.ownerBound.set(binding.name, count + 1);
   }
   installRoot(state, binding);
 }
 
-export function setDispatch(state, dispatch) {
+// the owner's element was replaced
+export function reobserveOwner(state, ownerId) {
+  for (const binding of state.byOwner.get(ownerId) ?? []) {
+    const watch = binding.runtime.watch;
+    if (!watch) continue;
+    binding.runtime.observer?.disconnect();
+    binding.runtime.observer = null;
+    observeOwner(state, binding, watch.kind, watch.toEvent);
+  }
+}
+
+/** `decodeMessage` is the mount's, held to the store's schema. */
+export function setDispatch(state, dispatch, decodeMessage) {
   state.dispatch = dispatch;
+  state.decodeMessage = decodeMessage;
 }
 
 // Firefox starts no drag without data
@@ -250,19 +288,24 @@ function collect(state, name, event, onWindow) {
   const target = event.target;
   const nonBubbling = CAPTURE_EVENTS.has(name);
 
-  // ancestors deepest first, depth counts from the chain top not the document
+  // ancestors deepest first, depth counts from the chain top not the document,
+  // walked only when a component binds this event
   const chain = [];
-  if (!onWindow) {
+  if (!onWindow && state.ownerBound.get(name) > 0) {
     for (let element = target; element; element = element.parentElement) {
       if (element.nodeType === 1) chain.push(element);
     }
   }
-  const depthOf = (element) => chain.length - chain.indexOf(element);
+  const depthOf = (element) =>
+    chain.length > 0
+      ? chain.length - chain.indexOf(element)
+      : elementDepth(element);
 
   for (let index = 0; index < chain.length; index++) {
     const element = chain[index];
-    const owners = element.getAttribute("data-lily-component");
-    if (!owners) continue;
+    // marks the renderer made, markup from data can copy the attribute
+    const owners = element.getAttribute(OWNER_ATTRIBUTE);
+    if (!owners || !MADE.has(element)) continue;
     const bindings = owners
       .split(" ")
       .flatMap((owner) => state.byOwner.get(owner) ?? []);
@@ -276,7 +319,12 @@ function collect(state, name, event, onWindow) {
       ) {
         continue;
       }
-      found.push({ binding, matched: target, depth: chain.length - index });
+      found.push({
+        binding,
+        matched: target,
+        owner: element,
+        depth: chain.length - index,
+      });
     }
   }
 
@@ -308,14 +356,24 @@ function deliver(state, binding, message, matched) {
   if (binding.reset) matched?.closest?.("form")?.reset();
 }
 
+// the same count the chain gives, for an event no component binds
+function elementDepth(element) {
+  let depth = 0;
+  for (let node = element; node; node = node.parentElement) {
+    if (node.nodeType === 1) depth++;
+  }
+  return depth;
+}
+
 function fileFields(file) {
   return [file.name, file.size, file.type, file];
 }
 
 function handleEvent(state, name, event, onWindow) {
   if (!state.dispatch) return;
-  for (const { binding, matched } of collect(state, name, event, onWindow)) {
-    if (runBinding(state, binding, event, matched)) return;
+  for (const found of collect(state, name, event, onWindow)) {
+    event.lilyOwner = found.owner ?? null;
+    if (runBinding(state, found.binding, event, found.matched)) return;
   }
 }
 
@@ -338,9 +396,9 @@ function observeOwner(state, binding, kind, toEvent) {
   binding.runtime.watch = { kind, toEvent };
   queueMicrotask(() => {
     if (!state.byOwner.get(binding.owner)?.includes(binding)) return;
-    const owner = document.querySelector(
-      `[data-lily-component~="${binding.owner}"]`,
-    );
+    const owner = Array.from(
+      document.querySelectorAll(`[${OWNER_ATTRIBUTE}~="${binding.owner}"]`),
+    ).find((element) => MADE.has(element));
     const contents =
       state.wrappers.has(owner) && owner.style.display === "contents";
     const element = contents ? owner.firstElementChild : owner;
@@ -358,17 +416,43 @@ function optionValue(option) {
   return option instanceof Some ? option[0] : null;
 }
 
+// the closest message around `target` and inside `within` when there is one
+function readMessageWithin(target, within, decode) {
+  const element = target?.closest?.("[data-lily-message]");
+  if (!element || (within?.contains && !within.contains(element))) {
+    return new Error(undefined);
+  }
+  const encoded = element.getAttribute("data-lily-message") ?? "";
+  if (encoded.length > MAX_DATA_MESSAGE_LENGTH) return new Error(undefined);
+  return decode(encoded);
+}
+
 /** True when it stops propagation. */
 function runBinding(state, binding, event, matched) {
   event.lilyMatched = matched;
+  event.lilyDecodeMessage = state.decodeMessage;
 
   // a spent `once` still handles it, a form must not submit
   if (binding.once && binding.runtime.fired) {
     if (binding.prevent) event.preventDefault?.();
     return false;
   }
-  // payload read now, only the dispatch is debounced
-  const outcome = binding.run(event);
+  // payload read now, only the dispatch is debounced, a handler that throws
+  // still prevents the default so a form never submits natively
+  let outcome;
+  try {
+    outcome = binding.run(event);
+  } catch (error) {
+    if (binding.prevent) event.preventDefault?.();
+    if (!binding.runtime.crashed) {
+      binding.runtime.crashed = true;
+      log(
+        "error",
+        `lily: a "${binding.name}" handler crashed: ${error?.stack ?? error}`,
+      );
+    }
+    return false;
+  }
   if (outcome instanceof Dispatch) {
     if (binding.prevent) event.preventDefault?.();
     binding.runtime.fired = true;
@@ -390,13 +474,17 @@ function runBinding(state, binding, event, matched) {
     }
   } else if (outcome instanceof SkipAndPreventDefault) {
     if (binding.prevent) event.preventDefault?.();
-  } else if (outcome instanceof DecodeFailed && !binding.runtime.reported) {
-    binding.runtime.reported = true;
-    log(
-      "warn",
-      `lily: a "${binding.name}" binding skipped an event it could not ` +
-        `decode (${binding.selector ?? "its component"}): ${outcome.reason}`,
-    );
+  } else if (outcome instanceof DecodeFailed) {
+    // undecoded isn't unhandled, a form it guards still mustn't submit
+    if (binding.prevent) event.preventDefault?.();
+    if (!binding.runtime.reported) {
+      binding.runtime.reported = true;
+      log(
+        "warn",
+        `lily: a "${binding.name}" binding skipped an event it could not ` +
+          `decode (${binding.selector ?? "its component"}): ${outcome.reason}`,
+      );
+    }
   }
 
   if (binding.stop) {
@@ -445,3 +533,9 @@ const CAPTURE_EVENTS = new Set([
   "volumechange",
   "waiting",
 ]);
+
+// elements the renderer marked, across every runtime on the page
+const MADE = new WeakSet();
+
+// a message is small, markup from data could carry anything
+const MAX_DATA_MESSAGE_LENGTH = 16_384;

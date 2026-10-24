@@ -66,6 +66,13 @@ collect(Seen) ->
     end.
 
 %% logger handler callback
+log(#{level := Level, msg := {string, Chardata}}, #{config := #{pid := Pid}}) ->
+    Pid ! {lily_test_support_captured, Level, unicode:characters_to_binary(Chardata)},
+    ok;
+log(#{level := Level, msg := {report, Report}}, #{config := #{pid := Pid}}) ->
+    Text = unicode:characters_to_binary(io_lib:format("~p", [Report])),
+    Pid ! {lily_test_support_captured, Level, Text},
+    ok;
 log(#{level := Level, msg := {Format, Arguments}}, #{config := #{pid := Pid}}) ->
     Text = unicode:characters_to_binary(io_lib:format(Format, Arguments)),
     Pid ! {lily_test_support_captured, Level, Text},

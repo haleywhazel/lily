@@ -18,7 +18,14 @@ import { Empty, NonEmpty, toList } from "../gleam.mjs";
 
 /** Empty when nothing has focus. */
 export function activeElementId() {
-  return document.activeElement ? document.activeElement.id ?? "" : "";
+  return document.activeElement ? (document.activeElement.id ?? "") : "";
+}
+
+/** A renderer that always throws, next to the component layer's. */
+export function addThrowingRenderer(runtime) {
+  runtime.handle.addRenderer(() => {
+    throw new globalThis.Error("renderer blew up");
+  });
 }
 
 /** The stubbed finite animation's rate, 0 when there is none. */
@@ -265,7 +272,7 @@ export function focus(selector) {
 /** Empty when absent. */
 export function getAttribute(selector, name) {
   const element = document.querySelector(selector);
-  return element ? element.getAttribute(name) ?? "" : "";
+  return element ? (element.getAttribute(name) ?? "") : "";
 }
 
 /** False when absent. */
@@ -296,7 +303,7 @@ export function getRef(ref) {
 /** Empty when absent. */
 export function getText(selector) {
   const element = document.querySelector(selector);
-  return element ? element.textContent ?? "" : "";
+  return element ? (element.textContent ?? "") : "";
 }
 
 /** Empty when absent. */
@@ -406,6 +413,14 @@ export function resizeWindow(width, height) {
   dom.window.dispatchEvent(new Event("resize"));
 }
 
+/** Puts back what `stashChildren` took. */
+export function restoreChildren(selector) {
+  document
+    .querySelector(selector)
+    .replaceChildren(...(stashed.get(selector) ?? []));
+  stashed.delete(selector);
+}
+
 /** jsdom doesn't scroll, the offsets are set then `scroll` fired. */
 export function scrollTo(selector, top, left) {
   const element = document.querySelector(selector);
@@ -456,6 +471,13 @@ export function setVisibility(visible) {
     configurable: true,
   });
   document.dispatchEvent(new Event("visibilitychange"));
+}
+
+/** Takes an element's children off the page, kept for `restoreChildren`. */
+export function stashChildren(selector) {
+  const element = document.querySelector(selector);
+  stashed.set(selector, Array.from(element.childNodes));
+  element.replaceChildren();
 }
 
 /**
@@ -732,3 +754,6 @@ let lastWebSocket = null;
 let lastEventSource = null;
 
 let observers = [];
+
+// children `stashChildren` took off the page, by selector
+const stashed = new Map();

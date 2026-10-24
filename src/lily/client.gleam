@@ -139,6 +139,8 @@ pub type ClientEvent(model, message) {
   ProtocolMismatch(server: Int, client: Int)
   /// The server replaced a slice of the model, `previous` is the model before
   SnapshotApplied(target: transport.SyncTarget, previous: model)
+  /// A resync found the slice already current, nothing was replaced
+  SnapshotUnchanged(target: transport.SyncTarget)
   /// The server refused a subscription
   SubscriptionRejected(topic_id: String, reason: transport.RejectionReason)
   /// The server's build version, on every connect and reconnect
@@ -254,14 +256,7 @@ pub fn start(
   // waits for registration, a snapshot can't decode before its types exist
   case store.serialiser(store) {
     Error(Nil) -> initial_notify(handle)
-    Ok(serialiser) ->
-      codec.when_registered(fn() {
-        case embedded_snapshot(serialiser) {
-          Ok(state) -> set_model(handle, state)
-          Error(Nil) -> Nil
-        }
-        initial_notify(handle)
-      })
+    Ok(serialiser) -> hydrate(handle, serialiser)
   }
   Runtime(handle:, store:)
 }
@@ -283,8 +278,25 @@ pub fn update_model(
 }
 
 // =============================================================================
+// INTERNAL FUNCTIONS
+// =============================================================================
+
+@internal
+pub fn store_of(
+  runtime: Runtime(model, message, mode),
+) -> Store(model, message, mode) {
+  runtime.store
+}
+
+// =============================================================================
 // PRIVATE TYPES
 // =============================================================================
+
+// the server's state a slice was last confirmed at, sent back in a `Resync`
+@target(javascript)
+type Confirmed {
+  Confirmed(epoch: Int, sequence: Int)
+}
 
 @target(javascript)
 type PendingMessage(message) {
@@ -292,7 +304,26 @@ type PendingMessage(message) {
   PendingMessage(message: message, delivered: Bool)
 }
 
+// `front` oldest first then `back` newest first, pushes and pops stay cheap
+@target(javascript)
+type PendingQueue(message) {
+  PendingQueue(
+    front: List(PendingMessage(message)),
+    back: List(PendingMessage(message)),
+  )
+}
+
 type RuntimeHandle
+
+@target(javascript)
+type Sending {
+  // on the wire or in the channel's own queue
+  SentOrQueued
+  // the channel refused it, the offline queue holds it when there is one
+  Unsent
+  // it has no wire form, it went nowhere
+  Unencodable
+}
 
 @target(javascript)
 type SyncSession(model, message) {
@@ -300,19 +331,37 @@ type SyncSession(model, message) {
     runtime: Runtime(model, message, Synced),
     serialiser: transport.Serialiser(model, message),
     queues: Bool,
-    channel: Box(Option(transport.Channel)),
+    state: Box(SyncState(model, message)),
+  )
+}
+
+// changed only through `update_state`, a change never runs a callback
+@target(javascript)
+type SyncState(model, message) {
+  SyncState(
+    channel: Option(transport.Channel),
     // sent before the channel exists
-    waiting: Box(List(BitArray)),
-    open: Box(Bool),
-    replaying: Box(Bool),
-    subscribed: Box(List(String)),
-    // own unanswered messages per target, oldest first
-    pending: Box(Dict(transport.SyncTarget, List(PendingMessage(message)))),
+    waiting: List(BitArray),
+    open: Bool,
+    replaying: Bool,
+    subscribed: List(String),
+    // the model `subscribed` was worked out from
+    subscribed_for: Option(model),
+    // own unanswered messages per target, never an empty queue
+    pending: Dict(transport.SyncTarget, PendingQueue(message)),
     // targets that may be out of step
-    diverged: Box(Set(transport.SyncTarget)),
+    diverged: Set(transport.SyncTarget),
+    // what each slice holds of the server's state, only while that's exactly
+    // it plus the pending edits on top
+    confirmed: Dict(transport.SyncTarget, Confirmed),
+    // targets a `Resync` is out for, one at a time
+    resyncing: Set(transport.SyncTarget),
+    // topics the server refused, not asked again until they're wanted anew
+    // or the server rejoins us with a snapshot
+    rejected: Set(String),
     // another protocol, nothing is sent or read again
-    stopped: Box(Bool),
-    warned_no_session: Box(Bool),
+    stopped: Bool,
+    warned_no_session: Bool,
   )
 }
 
@@ -336,15 +385,39 @@ fn apply_remote(
   sync: SyncSession(model, message),
   target: transport.SyncTarget,
   message: message,
+  sequence: Int,
 ) -> Nil {
   let update = store.update_function(sync.runtime.store)
   run(sync.runtime.handle, fn(model) {
     // the server may order it before our unconfirmed edits
-    case pending_messages(sync, target) {
-      [] -> Nil
-      [_, ..] -> mark_diverged(sync, target)
+    case dict.has_key(sync_state(sync).pending, target) {
+      True -> mark_diverged(sync, target)
+      False -> confirm(sync, target, sequence)
     }
     #(update(model, message), MessageApplied(message:, origin: Received))
+  })
+}
+
+// a later step of the state a slice was confirmed at
+@target(javascript)
+fn confirm(
+  sync: SyncSession(model, message),
+  target: transport.SyncTarget,
+  sequence: Int,
+) -> Nil {
+  update_state(sync, fn(state) {
+    case dict.get(state.confirmed, target) {
+      Ok(Confirmed(epoch:, ..)) ->
+        SyncState(
+          ..state,
+          confirmed: dict.insert(
+            state.confirmed,
+            target,
+            Confirmed(epoch:, sequence:),
+          ),
+        )
+      Error(Nil) -> state
+    }
   })
 }
 
@@ -355,21 +428,34 @@ fn connect_with(
   connector: transport.Connector,
 ) -> Runtime(model, message, Synced) {
   let handle = runtime.handle
+  use <- bool.lazy_guard(when: mark_connected(handle), return: fn() {
+    actor.log(
+      transport.Warning,
+      "lily: client.connect was called twice on one runtime, the second is ignored",
+    )
+    runtime
+  })
   let sync =
     SyncSession(
       runtime:,
       // `ByHost` resolves once, decoding reads both
       serialiser: transport.resolve_for_page(serialiser),
       queues: transport.queues(connector),
-      channel: actor.box_new(None),
-      waiting: actor.box_new([]),
-      open: actor.box_new(False),
-      replaying: actor.box_new(False),
-      subscribed: actor.box_new([]),
-      pending: actor.box_new(dict.new()),
-      diverged: actor.box_new(set.new()),
-      stopped: actor.box_new(False),
-      warned_no_session: actor.box_new(False),
+      state: actor.box_new(SyncState(
+        channel: None,
+        waiting: [],
+        open: False,
+        replaying: False,
+        subscribed: [],
+        subscribed_for: None,
+        pending: dict.new(),
+        diverged: set.new(),
+        confirmed: dict.new(),
+        resyncing: set.new(),
+        rejected: set.new(),
+        stopped: False,
+        warned_no_session: False,
+      )),
     )
 
   // a plain observer, added before the connector so an instant open is heard
@@ -379,19 +465,16 @@ fn connect_with(
         send_message(sync, message)
       _ -> Nil
     }
-    case actor.box_get(sync.open) {
-      True -> sync_subscriptions(sync, model)
-      False -> Nil
-    }
+    sync_subscriptions(sync, model)
   })
 
   // replay an earlier page's offline queue, sent once the connection opens
   codec.when_registered(fn() {
-    actor.box_set(sync.replaying, True)
+    update_state(sync, fn(state) { SyncState(..state, replaying: True) })
     list.each(transport.pending(connector), fn(bytes) {
       replay(runtime, transport.decode(bytes, serialiser: sync.serialiser))
     })
-    actor.box_set(sync.replaying, False)
+    update_state(sync, fn(state) { SyncState(..state, replaying: False) })
   })
 
   let handler =
@@ -408,17 +491,18 @@ fn connect_with(
       closed: fn() { handle_closed(sync) },
     )
   let connected = transport.run_connector(connector, handler)
-  actor.box_set(sync.channel, Some(connected))
+  update_state(sync, fn(state) { SyncState(..state, channel: Some(connected)) })
   // a mismatch heard while connecting had no channel to close
-  case actor.box_get(sync.stopped) {
+  let state = sync_state(sync)
+  case state.stopped {
     True -> connected.close()
     False ->
-      list.each(list.reverse(actor.box_get(sync.waiting)), fn(bytes) {
+      list.each(list.reverse(state.waiting), fn(bytes) {
         let _ = connected.send(bytes)
         Nil
       })
   }
-  actor.box_set(sync.waiting, [])
+  update_state(sync, fn(state) { SyncState(..state, waiting: []) })
   runtime
 }
 
@@ -437,8 +521,7 @@ fn embedded_snapshot(
   use text <- result.try(read_embedded_snapshot())
   use bytes <- result.try(bit_array.base64_decode(string.trim(text)))
   case transport.decode(bytes, serialiser:) {
-    Ok(transport.Snapshot(target: transport.Session, sequence: _, state:)) ->
-      Ok(state)
+    Ok(transport.Snapshot(target: transport.Session, state:, ..)) -> Ok(state)
     Ok(_) | Error(Nil) -> Error(Nil)
   }
 }
@@ -450,8 +533,20 @@ fn emit(handle: RuntimeHandle, event: ClientEvent(model, message)) -> Nil {
 
 @target(javascript)
 fn handle_closed(sync: SyncSession(model, message)) -> Nil {
-  actor.box_set(sync.open, False)
-  // fate unknown, the reconnect snapshot decides
+  // an edit sent but unanswered may or may not have landed, so its slice no
+  // longer matches what was confirmed, and the reconnect snapshot decides
+  update_state(sync, fn(state) {
+    let unsure =
+      dict.filter(state.pending, fn(_target, queue) {
+        list.any(queue.front, fn(entry) { entry.delivered })
+        || list.any(queue.back, fn(entry) { entry.delivered })
+      })
+    SyncState(
+      ..state,
+      open: False,
+      confirmed: dict.drop(state.confirmed, dict.keys(unsure)),
+    )
+  })
   update_pending(sync, list.filter(_, fn(entry) { !entry.delivered }))
   emit(sync.runtime.handle, ConnectionClosed)
 }
@@ -461,12 +556,15 @@ fn handle_incoming(
   sync: SyncSession(model, message),
   frame: Result(transport.Protocol(model, message), Nil),
 ) -> Nil {
-  use <- bool.guard(when: actor.box_get(sync.stopped), return: Nil)
+  use <- bool.guard(when: sync_state(sync).stopped, return: Nil)
   let handle = sync.runtime.handle
   case frame {
     // in step order
-    Ok(transport.Acknowledge(target:, ..)) ->
-      run_effect(handle, fn() { settle(sync, target, dropped: False) })
+    Ok(transport.Acknowledge(target:, sequence:)) ->
+      run_effect(handle, fn() {
+        confirm(sync, target, sequence)
+        settle(sync, target, dropped: False)
+      })
 
     Ok(transport.Dropped(target:)) ->
       run_effect(handle, fn() { settle(sync, target, dropped: True) })
@@ -474,16 +572,54 @@ fn handle_incoming(
     Ok(transport.Connected(client_id:)) ->
       emit(handle, ClientIdAssigned(client_id:))
 
-    Ok(transport.TopicUpdate(topic_id:, payload:, ..)) ->
-      apply_remote(sync, transport.Topic(topic_id), payload)
+    // a late one for a topic left is ignored
+    Ok(transport.TopicUpdate(topic_id:, payload:, sequence:)) ->
+      case list.contains(sync_state(sync).subscribed, topic_id) {
+        True -> apply_remote(sync, transport.Topic(topic_id), payload, sequence)
+        False -> Nil
+      }
 
-    Ok(transport.SessionUpdate(payload:, ..)) ->
-      apply_remote(sync, transport.Session, payload)
+    Ok(transport.SessionUpdate(payload:, sequence:)) ->
+      apply_remote(sync, transport.Session, payload, sequence)
 
-    Ok(transport.Snapshot(target:, state:, ..)) -> rebase(sync, target, state)
+    Ok(transport.Unchanged(target:)) ->
+      run_effect(handle, fn() {
+        update_state(sync, fn(state) {
+          SyncState(..state, resyncing: set.delete(state.resyncing, target))
+        })
+        emit(handle, SnapshotUnchanged(target:))
+      })
 
-    Ok(transport.Rejected(topic_id:, reason:)) ->
+    Ok(transport.Snapshot(target:, epoch:, sequence:, state:)) ->
+      case target {
+        transport.Topic(topic_id) ->
+          case list.contains(sync_state(sync).subscribed, topic_id) {
+            True -> {
+              // a refused topic that came back has rejoined us
+              update_state(sync, fn(current) {
+                SyncState(
+                  ..current,
+                  rejected: set.delete(current.rejected, topic_id),
+                )
+              })
+              rebase(sync, target, state, Confirmed(epoch:, sequence:))
+            }
+            False -> Nil
+          }
+        transport.Session ->
+          rebase(sync, target, state, Confirmed(epoch:, sequence:))
+      }
+
+    Ok(transport.Rejected(topic_id:, reason:)) -> {
+      update_state(sync, fn(state) {
+        SyncState(
+          ..state,
+          rejected: set.insert(state.rejected, topic_id),
+          confirmed: dict.delete(state.confirmed, transport.Topic(topic_id)),
+        )
+      })
       emit(handle, SubscriptionRejected(topic_id:, reason:))
+    }
 
     Ok(transport.Version(hash:, protocol:)) ->
       case protocol == transport.protocol_version {
@@ -511,17 +647,36 @@ fn handle_incoming(
 
 @target(javascript)
 fn handle_opened(sync: SyncSession(model, message)) -> Nil {
-  use <- bool.guard(when: actor.box_get(sync.stopped), return: Nil)
-  actor.box_set(sync.open, True)
-  let wanted = wanted_topics(sync.runtime.store, get_model(sync.runtime.handle))
-  actor.box_set(sync.subscribed, wanted)
-  // first frame after an open, the offline queue flushes right behind it
+  use <- bool.guard(when: sync_state(sync).stopped, return: Nil)
+  let model = get_model(sync.runtime.handle)
+  let wanted = wanted_topics(sync.runtime.store, model)
+  // a reconnect asks again for refused topics and outstanding resyncs
+  update_state(sync, fn(state) {
+    SyncState(
+      ..state,
+      open: True,
+      subscribed: wanted,
+      subscribed_for: Some(model),
+      rejected: set.new(),
+      resyncing: set.new(),
+    )
+  })
+  // first frame after an open, the offline queue flushes right behind it, a
+  // slice still at its confirmed state may be answered `Unchanged`
+  let confirmed = sync_state(sync).confirmed
+  let cursor = fn(target) {
+    case dict.get(confirmed, target) {
+      Ok(Confirmed(epoch:, sequence:)) ->
+        transport.Known(target:, epoch:, sequence:)
+      Error(Nil) -> transport.Unknown(target:)
+    }
+  }
   let _ =
     send(
       sync,
       transport.Resync(cursors: [
-        transport.Session,
-        ..list.map(wanted, transport.Topic)
+        cursor(transport.Session),
+        ..list.map(wanted, fn(topic_id) { cursor(transport.Topic(topic_id)) })
       ]),
     )
   update_pending(
@@ -531,12 +686,51 @@ fn handle_opened(sync: SyncSession(model, message)) -> Nil {
   emit(sync.runtime.handle, ConnectionOpened)
 }
 
+// updates made meanwhile, a route or persisted field, wait and land on top of
+// the snapshot rather than under it
+@target(javascript)
+fn hydrate(
+  handle: RuntimeHandle,
+  serialiser: transport.Serialiser(model, message),
+) -> Nil {
+  hold_steps(handle)
+  codec.when_registered(fn() {
+    case embedded_snapshot(serialiser) {
+      Ok(state) -> set_model(handle, state)
+      Error(Nil) -> Nil
+    }
+    release_steps(handle)
+    initial_notify(handle)
+  })
+}
+
+@target(erlang)
+fn hydrate(
+  handle: RuntimeHandle,
+  serialiser: transport.Serialiser(model, message),
+) -> Nil {
+  codec.when_registered(fn() {
+    case embedded_snapshot(serialiser) {
+      Ok(state) -> set_model(handle, state)
+      Error(Nil) -> Nil
+    }
+    initial_notify(handle)
+  })
+}
+
+// out of step, so no longer what was confirmed either
 @target(javascript)
 fn mark_diverged(
   sync: SyncSession(model, message),
   target: transport.SyncTarget,
 ) -> Nil {
-  actor.box_set(sync.diverged, set.insert(actor.box_get(sync.diverged), target))
+  update_state(sync, fn(state) {
+    SyncState(
+      ..state,
+      diverged: set.insert(state.diverged, target),
+      confirmed: dict.delete(state.confirmed, target),
+    )
+  })
 }
 
 @target(javascript)
@@ -556,15 +750,23 @@ fn observing(
   runtime
 }
 
+// oldest first
 @target(javascript)
 fn pending_messages(
   sync: SyncSession(model, message),
   target: transport.SyncTarget,
 ) -> List(message) {
-  case dict.get(actor.box_get(sync.pending), target) {
-    Ok(entries) -> list.map(entries, fn(entry) { entry.message })
+  case dict.get(sync_state(sync).pending, target) {
+    Ok(PendingQueue(front:, back:)) ->
+      list.fold(back, [], fn(newer, entry) { [entry.message, ..newer] })
+      |> list.append(list.map(front, fn(entry) { entry.message }), _)
     Error(Nil) -> []
   }
+}
+
+@target(javascript)
+fn queue_is_empty(queue: PendingQueue(message)) -> Bool {
+  queue.front == [] && queue.back == []
 }
 
 // the server's slice with our unconfirmed edits replayed on top
@@ -573,23 +775,32 @@ fn rebase(
   sync: SyncSession(model, message),
   target: transport.SyncTarget,
   state: model,
+  confirmed: Confirmed,
 ) -> Nil {
   let app_store = sync.runtime.store
   let update = store.update_function(app_store)
   run(sync.runtime.handle, fn(current) {
+    // an edit that crashes on the new state is skipped, the rest still land
     let rebased = case store.has_slice(app_store, target) {
       True ->
         list.fold(
           pending_messages(sync, target),
           store.merge_snapshot(app_store, target, current, state),
-          update,
+          fn(model, message) {
+            actor.rescue(fn() { update(model, message) })
+            |> result.unwrap(model)
+          },
         )
       False -> current
     }
-    actor.box_set(
-      sync.diverged,
-      set.delete(actor.box_get(sync.diverged), target),
-    )
+    update_state(sync, fn(state) {
+      SyncState(
+        ..state,
+        diverged: set.delete(state.diverged, target),
+        resyncing: set.delete(state.resyncing, target),
+        confirmed: dict.insert(state.confirmed, target, confirmed),
+      )
+    })
     #(rebased, SnapshotApplied(target:, previous: current))
   })
 }
@@ -614,6 +825,7 @@ fn replay(
     | Ok(transport.Snapshot(..))
     | Ok(transport.Subscribe(..))
     | Ok(transport.TopicUpdate(..))
+    | Ok(transport.Unchanged(..))
     | Ok(transport.Unsubscribe(..))
     | Ok(transport.Version(..)) -> Nil
 
@@ -634,22 +846,37 @@ fn resync_if_settled(
   sync: SyncSession(model, message),
   target: transport.SyncTarget,
 ) -> Nil {
-  let diverged = actor.box_get(sync.diverged)
+  let state = sync_state(sync)
   case
-    pending_messages(sync, target),
-    set.contains(diverged, target),
-    actor.box_get(sync.open)
+    dict.has_key(state.pending, target),
+    set.contains(state.diverged, target),
+    state.open
   {
-    [], True, True -> {
-      actor.box_set(sync.diverged, set.delete(diverged, target))
-      // a resync of a topic not joined would join it
+    False, True, True -> {
+      // a resync of a topic not joined, or refused, would join it, and one
+      // already out covers this
       let joined = case target {
         transport.Session -> True
-        transport.Topic(id) -> list.contains(actor.box_get(sync.subscribed), id)
+        transport.Topic(id) ->
+          list.contains(state.subscribed, id)
+          && !set.contains(state.rejected, id)
       }
-      case joined {
+      let asking = joined && !set.contains(state.resyncing, target)
+      update_state(sync, fn(state) {
+        let resyncing = case asking {
+          True -> set.insert(state.resyncing, target)
+          False -> state.resyncing
+        }
+        SyncState(
+          ..state,
+          diverged: set.delete(state.diverged, target),
+          resyncing:,
+        )
+      })
+      case asking {
         True -> {
-          let _ = send(sync, transport.Resync(cursors: [target]))
+          let _ =
+            send(sync, transport.Resync(cursors: [transport.Unknown(target:)]))
           Nil
         }
         False -> Nil
@@ -665,14 +892,37 @@ fn send(
   sync: SyncSession(model, message),
   frame: transport.Protocol(model, message),
 ) -> Bool {
-  use <- bool.guard(when: actor.box_get(sync.stopped), return: False)
-  let bytes = transport.encode(frame, serialiser: sync.serialiser)
-  case actor.box_get(sync.channel) {
-    Some(channel) -> result.is_ok(channel.send(bytes))
-    None -> {
-      actor.box_set(sync.waiting, [bytes, ..actor.box_get(sync.waiting)])
-      True
+  send_frame(sync, frame) == SentOrQueued
+}
+
+@target(javascript)
+fn send_frame(
+  sync: SyncSession(model, message),
+  frame: transport.Protocol(model, message),
+) -> Sending {
+  use <- bool.guard(when: sync_state(sync).stopped, return: Unsent)
+  case
+    actor.rescue(fn() { transport.encode(frame, serialiser: sync.serialiser) })
+  {
+    Error(reason) -> {
+      actor.log(transport.Failure, "lily: a frame failed to encode: " <> reason)
+      Unencodable
     }
+    Ok(bytes) ->
+      case sync_state(sync).channel {
+        Some(channel) ->
+          // a custom channel's send can throw, that frame didn't go out
+          case actor.rescue(fn() { channel.send(bytes) }) {
+            Ok(Ok(Nil)) -> SentOrQueued
+            Ok(Error(Nil)) | Error(_) -> Unsent
+          }
+        None -> {
+          update_state(sync, fn(state) {
+            SyncState(..state, waiting: [bytes, ..state.waiting])
+          })
+          SentOrQueued
+        }
+      }
   }
 }
 
@@ -684,11 +934,11 @@ fn send_message(sync: SyncSession(model, message), message: message) -> Nil {
     store.Session -> Some(transport.Session)
     store.Topic(id) -> Some(transport.Topic(id))
   }
-  case target, actor.box_get(sync.replaying) {
+  let state = sync_state(sync)
+  case target, state.replaying {
     None, _ -> Nil
     // already in the connector's queue
-    Some(target), True ->
-      track(sync, target, message, delivered: actor.box_get(sync.open))
+    Some(target), True -> track(sync, target, message, delivered: state.open)
     Some(transport.Session), False -> {
       warn_if_no_session(sync)
       sent(sync, transport.Session, message, transport.SessionMessage(message))
@@ -705,11 +955,11 @@ fn sent(
   message: message,
   frame: transport.Protocol(model, message),
 ) -> Nil {
-  case send(sync, frame), sync.queues {
-    True, _ -> track(sync, target, message, delivered: True)
-    False, True -> track(sync, target, message, delivered: False)
-    // lost, needs a snapshot
-    False, False -> {
+  case send_frame(sync, frame), sync.queues {
+    SentOrQueued, _ -> track(sync, target, message, delivered: True)
+    Unsent, True -> track(sync, target, message, delivered: False)
+    // lost, never queued either, needs a snapshot
+    Unsent, False | Unencodable, _ -> {
       mark_diverged(sync, target)
       resync_if_settled(sync, target)
     }
@@ -723,10 +973,11 @@ fn settle(
   target: transport.SyncTarget,
   dropped dropped: Bool,
 ) -> Nil {
-  update_target(sync, target, fn(entries) {
-    case entries {
-      [_, ..rest] -> rest
-      [] -> []
+  update_target(sync, target, fn(queue) {
+    case queue.front {
+      [_, ..front] -> PendingQueue(..queue, front:)
+      [] ->
+        PendingQueue(front: list.drop(list.reverse(queue.back), 1), back: [])
     }
   })
   case dropped {
@@ -739,9 +990,10 @@ fn settle(
 // for good, the server may misread anything sent
 @target(javascript)
 fn stop(sync: SyncSession(model, message), server: Int) -> Nil {
-  actor.box_set(sync.stopped, True)
-  actor.box_set(sync.open, False)
-  case actor.box_get(sync.channel) {
+  update_state(sync, fn(state) {
+    SyncState(..state, stopped: True, open: False)
+  })
+  case sync_state(sync).channel {
     Some(channel) -> channel.close()
     None -> Nil
   }
@@ -758,29 +1010,63 @@ fn stop(sync: SyncSession(model, message), server: Int) -> Nil {
 }
 
 @target(javascript)
+fn sync_state(sync: SyncSession(model, message)) -> SyncState(model, message) {
+  actor.box_get(sync.state)
+}
+
+// subscriptions are worked out from the model, the same one wants the same
+@target(javascript)
 fn sync_subscriptions(sync: SyncSession(model, message), model: model) -> Nil {
+  let state = sync_state(sync)
+  let unchanged = case state.subscribed_for {
+    Some(seen) -> is_same(seen, model)
+    None -> False
+  }
+  use <- bool.guard(when: !state.open || unchanged, return: Nil)
   let wanted = wanted_topics(sync.runtime.store, model)
-  let before = actor.box_get(sync.subscribed)
-  use <- bool.guard(when: wanted == before, return: Nil)
-  list.each(wanted, fn(topic_id) {
-    case list.contains(before, topic_id) {
-      True -> Nil
-      False -> {
-        let _ = send(sync, transport.Subscribe(topic_id:))
-        Nil
-      }
+  let before = state.subscribed
+  let left = case wanted == before {
+    True -> []
+    False -> {
+      list.each(wanted, fn(topic_id) {
+        case list.contains(before, topic_id) {
+          True -> Nil
+          False -> {
+            let _ = send(sync, transport.Subscribe(topic_id:))
+            Nil
+          }
+        }
+      })
+      list.filter(before, fn(topic_id) {
+        case list.contains(wanted, topic_id) {
+          True -> False
+          // the server never held a refused one, and wanting it again asks
+          // afresh
+          False ->
+            case set.contains(state.rejected, topic_id) {
+              True -> True
+              False -> {
+                let _ = send(sync, transport.Unsubscribe(topic_id:))
+                False
+              }
+            }
+        }
+      })
     }
+  }
+  // a topic left gets no updates, what it held stops being current
+  let unwanted =
+    list.filter(before, fn(topic_id) { !list.contains(wanted, topic_id) })
+    |> list.map(transport.Topic)
+  update_state(sync, fn(state) {
+    SyncState(
+      ..state,
+      subscribed: wanted,
+      subscribed_for: Some(model),
+      rejected: set.drop(state.rejected, left),
+      confirmed: dict.drop(state.confirmed, unwanted),
+    )
   })
-  list.each(before, fn(topic_id) {
-    case list.contains(wanted, topic_id) {
-      True -> Nil
-      False -> {
-        let _ = send(sync, transport.Unsubscribe(topic_id:))
-        Nil
-      }
-    }
-  })
-  actor.box_set(sync.subscribed, wanted)
 }
 
 @target(javascript)
@@ -790,40 +1076,56 @@ fn track(
   message: message,
   delivered delivered: Bool,
 ) -> Nil {
-  update_target(
-    sync,
-    target,
-    list.append(_, [PendingMessage(message:, delivered:)]),
-  )
+  update_target(sync, target, fn(queue) {
+    PendingQueue(..queue, back: [
+      PendingMessage(message:, delivered:),
+      ..queue.back
+    ])
+  })
 }
 
+// `change` maps or filters, each half keeps its own order
 @target(javascript)
 fn update_pending(
   sync: SyncSession(model, message),
   change: fn(List(PendingMessage(message))) -> List(PendingMessage(message)),
 ) -> Nil {
-  actor.box_get(sync.pending)
-  |> dict.map_values(fn(_target, entries) { change(entries) })
-  |> dict.filter(fn(_target, entries) { entries != [] })
-  |> actor.box_set(sync.pending, _)
+  update_state(sync, fn(state) {
+    let pending =
+      state.pending
+      |> dict.map_values(fn(_target, queue) {
+        PendingQueue(front: change(queue.front), back: change(queue.back))
+      })
+      |> dict.filter(fn(_target, queue) { !queue_is_empty(queue) })
+    SyncState(..state, pending:)
+  })
+}
+
+@target(javascript)
+fn update_state(
+  sync: SyncSession(model, message),
+  change: fn(SyncState(model, message)) -> SyncState(model, message),
+) -> Nil {
+  actor.box_set(sync.state, change(actor.box_get(sync.state)))
 }
 
 @target(javascript)
 fn update_target(
   sync: SyncSession(model, message),
   target: transport.SyncTarget,
-  change: fn(List(PendingMessage(message))) -> List(PendingMessage(message)),
+  change: fn(PendingQueue(message)) -> PendingQueue(message),
 ) -> Nil {
-  let pending = actor.box_get(sync.pending)
-  let entries = case dict.get(pending, target) {
-    Ok(entries) -> change(entries)
-    Error(Nil) -> change([])
-  }
-  case entries {
-    [] -> actor.box_set(sync.pending, dict.delete(pending, target))
-    [_, ..] ->
-      actor.box_set(sync.pending, dict.insert(pending, target, entries))
-  }
+  update_state(sync, fn(state) {
+    let queue =
+      dict.get(state.pending, target)
+      |> result.unwrap(PendingQueue(front: [], back: []))
+      |> change
+    let pending = case queue_is_empty(queue) {
+      True -> dict.delete(state.pending, target)
+      False -> dict.insert(state.pending, target, queue)
+    }
+    SyncState(..state, pending:)
+  })
 }
 
 @target(javascript)
@@ -839,11 +1141,13 @@ fn wanted_topics(
 fn warn_if_no_session(sync: SyncSession(model, message)) -> Nil {
   case
     store.has_session(sync.runtime.store),
-    actor.box_get(sync.warned_no_session)
+    sync_state(sync).warned_no_session
   {
     True, _ | False, True -> Nil
     False, False -> {
-      actor.box_set(sync.warned_no_session, True)
+      update_state(sync, fn(state) {
+        SyncState(..state, warned_no_session: True)
+      })
       let message =
         "lily: a message was routed to store.Session but the store declares no "
         <> "store.session, meaning session snapshots from the server are "
@@ -874,15 +1178,34 @@ fn create_runtime(model: model) -> RuntimeHandle
 @external(javascript, "./client.ffi.mjs", "getModel")
 fn get_model(handle: RuntimeHandle) -> model
 
+// holds queued steps until `release_steps`
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "holdSteps")
+fn hold_steps(handle: RuntimeHandle) -> Nil
+
 @external(javascript, "./client.ffi.mjs", "initialNotify")
 fn initial_notify(_handle: RuntimeHandle) -> Nil {
   Nil
 }
 
+// by reference, a deep compare would walk an equal model
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "isSame")
+fn is_same(left: model, right: model) -> Bool
+
+// `True` when it was connected already
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "markConnected")
+fn mark_connected(handle: RuntimeHandle) -> Bool
+
 @external(javascript, "./client.ffi.mjs", "readEmbeddedSnapshot")
 fn read_embedded_snapshot() -> Result(String, Nil) {
   Error(Nil)
 }
+
+@target(javascript)
+@external(javascript, "./client.ffi.mjs", "releaseSteps")
+fn release_steps(handle: RuntimeHandle) -> Nil
 
 @external(javascript, "./client.ffi.mjs", "run")
 fn run(

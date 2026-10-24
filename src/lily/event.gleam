@@ -112,7 +112,9 @@ import gleam/option
 import gleam/string
 
 import lily/component.{type Component}
+import lily/internal/actor
 import lily/internal/codec
+import lily/transport
 
 // =============================================================================
 // PUBLIC TYPES
@@ -127,8 +129,12 @@ pub type DataTransfer {
 /// A file the user picked, pasted or dropped. `handle` is the browser's own
 /// `File`, for your FFI or a fetch library to read or upload.
 pub type File {
-  File(name: String, size: Int, mime_type: String, handle: Dynamic)
+  File(name: String, size: Int, mime_type: String, handle: FileHandle)
 }
+
+/// The browser's `File` object behind a [`File`](#File), passed as it is to
+/// an FFI function of yours.
+pub type FileHandle
 
 /// A key press. `key` is what the key types, such as `"Enter"` or `"a"`,
 /// `code` the physical key, such as `"KeyA"`, the same on every keyboard
@@ -233,7 +239,7 @@ pub fn debounce(
         ..listener,
         debounce_milliseconds: option.Some(milliseconds),
       )
-    _ -> listener
+    component.Transition(..) -> listener
   }
 }
 
@@ -241,7 +247,8 @@ pub fn debounce(
 /// `Error(Nil)` for any other string.
 ///
 /// You rarely need it, [`component.mount`](./component.html#mount) already
-/// does this for clicks.
+/// does this for clicks. This one doesn't check the store's
+/// [`schema`](./store.html#schema), the mount's decoding does.
 pub fn decode_message(encoded: String) -> Result(message, Nil) {
   codec.decode_data_message(encoded)
 }
@@ -257,7 +264,17 @@ pub fn decode_message(encoded: String) -> Result(message, Nil) {
 /// )
 /// ```
 pub fn encode_message(message: a) -> String {
-  codec.encode_data_message(message)
+  // a message with no wire form makes an attribute that dispatches nothing
+  case actor.rescue(fn() { codec.encode_data_message(message) }) {
+    Ok(encoded) -> encoded
+    Error(reason) -> {
+      actor.log(
+        transport.Failure,
+        "lily: encode_message couldn't encode a message: " <> reason,
+      )
+      ""
+    }
+  }
 }
 
 /// Reads the fields of the form around the element the binding matched, as
@@ -562,7 +579,9 @@ pub fn on_media(
 }
 
 /// Dispatches the message in the closest `data-lily-message` around the event's
-/// target, for an event other than a click.
+/// target, for an event other than a click. Only one inside the component,
+/// held to the store's [`schema`](./store.html#schema) and at most 16 KiB, the
+/// same as a click.
 ///
 /// ```gleam
 /// event.on_message(component, event: "focusin")
@@ -572,7 +591,7 @@ pub fn on_message(
   event event: String,
 ) -> Component(model, message, html) {
   listener(component, event, fn(native) {
-    decode_message(read_data_message(native)) |> from_result
+    read_data_message(native) |> from_result
   })
 }
 
@@ -640,8 +659,9 @@ pub fn on_pointer_up(
 
 /// Dispatches a message built from the component's width and height, once
 /// when it mounts and whenever its size changes, for charts and panes that
-/// lay themselves out. For the window's size see
-/// [`browser.viewport`](./browser.html#viewport).
+/// lay themselves out. It always watches the component's own element, a
+/// [`selector`](#selector) piped after it doesn't apply. For the window's
+/// size see [`browser.viewport`](./browser.html#viewport).
 pub fn on_resize(
   component: Component(model, message, html),
   handler handler: fn(#(Float, Float)) -> message,
@@ -683,7 +703,8 @@ pub fn on_submit(
 
 /// Dispatches a message built from whether the component is on screen, once
 /// when it mounts and whenever that changes, for loading the next page when a
-/// list's last row shows, lazy content or marking something as seen.
+/// list's last row shows, lazy content or marking something as seen. Like
+/// [`on_resize`](#on_resize) it watches the component's own element.
 ///
 /// ```gleam
 /// event.on_visible(component, handler: fn(visible) {
@@ -726,7 +747,7 @@ pub fn once(
   use listener <- component.update_listener(component)
   case listener {
     component.Listener(..) -> component.Listener(..listener, once: True)
-    _ -> listener
+    component.Transition(..) -> listener
   }
 }
 
@@ -746,7 +767,7 @@ pub fn prevent_default(
   case listener {
     component.Listener(..) ->
       component.Listener(..listener, prevent_default: True)
-    _ -> listener
+    component.Transition(..) -> listener
   }
 }
 
@@ -762,7 +783,7 @@ pub fn reset_form(
   use listener <- component.update_listener(component)
   case listener {
     component.Listener(..) -> component.Listener(..listener, reset_form: True)
-    _ -> listener
+    component.Transition(..) -> listener
   }
 }
 
@@ -782,7 +803,7 @@ pub fn selector(
   case listener {
     component.Listener(..) ->
       component.Listener(..listener, selector: option.Some(selector))
-    _ -> listener
+    component.Transition(..) -> listener
   }
 }
 
@@ -799,7 +820,7 @@ pub fn stop_propagation(
   case listener {
     component.Listener(..) ->
       component.Listener(..listener, stop_propagation: True)
-    _ -> listener
+    component.Transition(..) -> listener
   }
 }
 
@@ -821,7 +842,7 @@ pub fn throttle(
         ..listener,
         throttle_milliseconds: option.Some(milliseconds),
       )
-    _ -> listener
+    component.Transition(..) -> listener
   }
 }
 
@@ -935,7 +956,7 @@ fn read_wheel(native: Dynamic) -> WheelEvent {
   WheelEvent(delta_x:, delta_y:, ctrl:, shift:, alt:, meta:)
 }
 
-fn to_file(fields: #(String, Int, String, Dynamic)) -> File {
+fn to_file(fields: #(String, Int, String, FileHandle)) -> File {
   let #(name, size, mime_type, handle) = fields
   File(name:, size:, mime_type:, handle:)
 }
@@ -950,12 +971,12 @@ fn read_checked(_native: Dynamic) -> Bool {
 }
 
 @external(javascript, "./event.ffi.mjs", "readDataMessage")
-fn read_data_message(_native: Dynamic) -> String {
-  ""
+fn read_data_message(_native: Dynamic) -> Result(message, Nil) {
+  Error(Nil)
 }
 
 @external(javascript, "./event.ffi.mjs", "readFiles")
-fn read_files(_native: Dynamic) -> List(#(String, Int, String, Dynamic)) {
+fn read_files(_native: Dynamic) -> List(#(String, Int, String, FileHandle)) {
   []
 }
 
@@ -998,7 +1019,7 @@ fn read_size(_native: Dynamic) -> #(Float, Float) {
 @external(javascript, "./event.ffi.mjs", "readTransfer")
 fn read_transfer_ffi(
   _native: Dynamic,
-) -> #(String, String, List(#(String, Int, String, Dynamic))) {
+) -> #(String, String, List(#(String, Int, String, FileHandle))) {
   #("", "", [])
 }
 

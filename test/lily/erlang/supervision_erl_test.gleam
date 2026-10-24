@@ -37,11 +37,6 @@ import lily/wire_support
 // =============================================================================
 
 @target(erlang)
-fn chat_snapshot(model: Model) -> transport.Protocol(Model, Message) {
-  transport.Snapshot(target: transport.Topic("chat"), sequence: 0, state: model)
-}
-
-@target(erlang)
 fn count_disconnects(events: List(server.ServerEvent(Model, Message))) -> Int {
   list.filter(events, fn(event) {
     case event {
@@ -55,20 +50,10 @@ fn count_disconnects(events: List(server.ServerEvent(Model, Message))) -> Int {
 @target(erlang)
 /// Whether the server got down to `count` clients within a second.
 fn eventually_clients(app: server.Server(Model, Message), count: Int) -> Bool {
-  eventually(fn() { test_support.client_count(app) == count }, within: 1000)
-}
-
-@target(erlang)
-/// Poll `condition` for up to `within` ms, for changes with no message.
-fn eventually(condition: fn() -> Bool, within within: Int) -> Bool {
-  case condition() {
-    True -> True
-    False if within <= 0 -> False
-    False -> {
-      process.sleep(2)
-      eventually(condition, within: within - 2)
-    }
-  }
+  wire_support.eventually(
+    fn() { test_support.client_count(app) == count },
+    within: 1000,
+  )
 }
 
 @target(erlang)
@@ -85,7 +70,7 @@ fn kill_and_await_respawn(
 ) -> Nil {
   let first = topic_pid(app, topic_id)
   kill(first)
-  eventually(
+  wire_support.eventually(
     fn() {
       case test_support.topic_watched(app, topic_id) {
         option.Some(watched) -> actor.watched_pid(watched) != first
@@ -105,16 +90,11 @@ fn kill_and_await_forgotten(
   topic_id: String,
 ) -> Nil {
   kill(topic_pid(app, topic_id))
-  eventually(
+  wire_support.eventually(
     fn() { test_support.topic_watched(app, topic_id) == option.None },
     within: 1000,
   )
   |> should.be_true
-}
-
-@target(erlang)
-fn server_pid(app: server.Server(Model, Message)) -> process.Pid {
-  actor.watched_pid(test_support.inspect(app).watched)
 }
 
 @target(erlang)
@@ -345,7 +325,7 @@ pub fn supervision_a_dying_topic_leaves_the_server_alive_test() {
   let #(c2, frames2) = wire_support.open(app, "c2")
   wire_support.subscribe(c2, "chat")
   frames2()
-  |> should.equal([chat_snapshot(test_support.initial_model())])
+  |> should.equal([wire_support.chat_snapshot(test_support.initial_model())])
   test_support.subscriber_count(app, "chat")
   |> should.equal(1)
 }
@@ -368,6 +348,7 @@ pub fn supervision_a_dying_topic_is_respawned_test() {
   |> should.equal([
     transport.Snapshot(
       target: transport.Topic("room:1"),
+      epoch: 0,
       sequence: 0,
       state: test_support.initial_model(),
     ),
@@ -388,7 +369,7 @@ pub fn supervision_start_supervised_serves_and_owns_a_topic_supervisor_test() {
   wire_support.subscribe(c1, "chat")
 
   frames()
-  |> should.equal([chat_snapshot(test_support.initial_model())])
+  |> should.equal([wire_support.chat_snapshot(test_support.initial_model())])
   supervisor_children(app)
   |> should.equal(1)
 }
@@ -402,7 +383,7 @@ pub fn supervision_stopping_the_tree_stops_every_process_test() {
   let chat = topic_pid(app, "chat")
   let assert option.Some(supervisor) =
     actor.supervisor_pid(test_support.inspect(app).supervisor)
-  let server = server_pid(app)
+  let server = wire_support.server_pid(app)
 
   stop_tree(tree)
 
@@ -419,15 +400,16 @@ pub fn supervision_a_server_crash_restarts_the_tree_test() {
   wire_support.settle(first)
   let first_chat = topic_pid(first, "chat")
   // snapshot, the handle resolves the name and follows the restart
-  let first_pid = server_pid(first)
+  let first_pid = wire_support.server_pid(first)
 
   kill(first_pid)
 
   // the child started again, on a genuinely new server
   let assert Ok(second) = process.receive(ready, within: 2000)
-  { server_pid(second) == first_pid } |> should.be_false
+  { wire_support.server_pid(second) == first_pid } |> should.be_false
   // and the handle taken before the crash reaches the process that came back
-  { server_pid(first) == server_pid(second) } |> should.be_true
+  { wire_support.server_pid(first) == wire_support.server_pid(second) }
+  |> should.be_true
   // old topics died with the old server, the new one redeclares them
   wire_support.await_down(first_chat)
   server.dispatch_topic(second, topic_id: "chat", message: Increment)
@@ -442,7 +424,7 @@ pub fn supervision_a_handle_from_before_a_restart_still_serves_test() {
   let #(tree, ready) = start_tree()
   let assert Ok(first) = process.receive(ready, within: 2000)
 
-  kill(server_pid(first))
+  kill(wire_support.server_pid(first))
   let assert Ok(_second) = process.receive(ready, within: 2000)
 
   // transports keep the boot-time handle, reconnects depend on this
@@ -501,8 +483,10 @@ pub fn supervision_a_restarted_topic_reattaches_subscribers_test() {
   kill_and_await_respawn(app, "chat")
 
   // both subscribers get a replacing snapshot back at sequence 0
-  frames1() |> should.equal([chat_snapshot(test_support.initial_model())])
-  frames2() |> should.equal([chat_snapshot(test_support.initial_model())])
+  frames1()
+  |> should.equal([wire_support.chat_snapshot(test_support.initial_model())])
+  frames2()
+  |> should.equal([wire_support.chat_snapshot(test_support.initial_model())])
   // and the respawned topic serves both of them from sequence 1
   wire_support.topic_message(c1, "chat", Increment)
   frames2()
@@ -547,7 +531,7 @@ pub fn supervision_restarted_topic_starts_from_the_declared_initial_model_test()
   let #(c1, frames) = wire_support.open(app, "c1")
   wire_support.subscribe(c1, "chat")
   frames()
-  |> should.equal([chat_snapshot(test_support.initial_model())])
+  |> should.equal([wire_support.chat_snapshot(test_support.initial_model())])
 }
 
 @target(erlang)
@@ -573,6 +557,44 @@ pub fn supervision_restart_storms_are_bounded_test() {
     }
   })
   |> should.be_true
+}
+
+@target(erlang)
+pub fn supervision_a_forgotten_topic_rejoins_its_subscribers_when_it_starts_again_test() {
+  let app = test_support.new_topic_server()
+  let #(c1, frames) = wire_support.open(app, "c1")
+  wire_support.subscribe(c1, "chat")
+  wire_support.settle(app)
+  list.each([1, 2, 3, 4, 5], fn(_) { kill_and_await_respawn(app, "chat") })
+  kill_and_await_forgotten(app, "chat")
+  list.last(frames())
+  |> should.equal(
+    Ok(transport.Rejected(topic_id: "chat", reason: transport.NotFound)),
+  )
+
+  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+
+  frames()
+  |> should.equal([
+    wire_support.chat_snapshot(test_support.initial_model()),
+    transport.TopicUpdate(topic_id: "chat", sequence: 1, payload: Increment),
+  ])
+}
+
+@target(erlang)
+pub fn supervision_topic_restarts_sets_how_many_crashes_are_tolerated_test() {
+  let app =
+    test_support.start_server(
+      test_support.topic_builder()
+      |> server.topic_restarts(max: 1, within: 60_000),
+    )
+  let #(c1, _frames) = wire_support.open(app, "c1")
+  wire_support.subscribe(c1, "chat")
+  wire_support.settle(app)
+
+  // one respawn, then the next death is given up on
+  kill_and_await_respawn(app, "chat")
+  kill_and_await_forgotten(app, "chat")
 }
 
 @target(erlang)
@@ -612,17 +634,21 @@ pub fn supervision_a_restarted_topic_loads_its_model_again_test() {
   kill_and_await_respawn(app, "chat")
 
   frames()
-  |> should.equal([chat_snapshot(loaded)])
+  |> should.equal([wire_support.chat_snapshot(loaded)])
   loads()
   |> should.equal([Nil, Nil])
 }
 
 @target(erlang)
 pub fn supervision_a_slow_loader_holds_up_its_topic_and_not_the_server_test() {
+  // the loader waits until the test releases it
+  let gate = process.new_subject()
   let app =
     test_support.topic_builder()
     |> server.topic_init(id: "chat", init: fn() {
-      process.sleep(300)
+      let release = process.new_subject()
+      process.send(gate, release)
+      let _ = process.receive(release, within: 5000)
       test_support.initial_model()
     })
     |> test_support.start_server
@@ -662,9 +688,11 @@ pub fn supervision_a_slow_loader_holds_up_its_topic_and_not_the_server_test() {
   ])
   recorded1() |> should.equal([])
   // and the subscriber hears once it's loaded
+  let assert Ok(release) = process.receive(gate, within: 1000)
+  process.send(release, Nil)
   wire_support.settle(app)
   list.map(recorded1(), wire_support.decode)
-  |> should.equal([chat_snapshot(test_support.initial_model())])
+  |> should.equal([wire_support.chat_snapshot(test_support.initial_model())])
 }
 
 // =============================================================================

@@ -5,9 +5,18 @@
 
 -export([
     construct/1,
+    copy_string/1,
+    int_in_range/1,
+    int_to_finite_float/1,
     passthrough/1,
-    reflect/1
+    reflect/1,
+    refuse_float/0,
+    refuse_int/1,
+    refuse_string/0
 ]).
+
+%% the wire range on both targets, what a JavaScript peer holds exactly
+-define(MAX_WIRE_INT, 9007199254740991).
 
 %%% ============================================================================
 %%% EXPORTED FUNCTIONS
@@ -20,10 +29,25 @@ construct(Reflected) ->
         _:_ -> {error, nil}
     end.
 
+%% a sub-binary keeps the whole frame it was sliced from alive
+copy_string(Binary) ->
+    case binary:referenced_byte_size(Binary) > byte_size(Binary) of
+        true -> binary:copy(Binary);
+        false -> Binary
+    end.
+
+int_in_range(Value) ->
+    Value >= -?MAX_WIRE_INT andalso Value =< ?MAX_WIRE_INT.
+
+int_to_finite_float(Value) ->
+    try
+        {ok, float(Value)}
+    catch
+        _:_ -> {error, nil}
+    end.
+
 passthrough(Value) -> Value.
 
-reflect(undefined) ->
-    reflected_nil;
 reflect(nil) ->
     reflected_nil;
 reflect(Value) when is_boolean(Value) ->
@@ -65,12 +89,30 @@ reflect(Map) when is_map(Map) ->
      || {Key, EntryValue} <- maps:to_list(Map)
     ],
     {reflected_dict, Entries};
+%% a bitstring that isn't whole bytes has no wire form
+reflect(Value) when is_bitstring(Value) ->
+    erlang:error({lily_unencodable, bitstring});
 reflect(_) ->
     reflected_nil.
+
+refuse_float() ->
+    erlang:error(lily_float_not_finite).
+
+refuse_int(Value) ->
+    erlang:error({lily_int_out_of_range, Value}).
+
+refuse_string() ->
+    erlang:error(lily_string_not_well_formed).
 
 %%% ============================================================================
 %%% PRIVATE FUNCTIONS
 %%% ============================================================================
+
+collect_fields(_Value, Index, Size, Accumulator) when Index > Size ->
+    lists:reverse(Accumulator);
+collect_fields(Value, Index, Size, Accumulator) ->
+    Field = reflect(element(Index, Value)),
+    collect_fields(Value, Index + 1, Size, [Field | Accumulator]).
 
 construct_inner(reflected_nil) ->
     nil;
@@ -81,7 +123,7 @@ construct_inner({reflected_integer, Value}) ->
 construct_inner({reflected_float, Value}) ->
     Value;
 construct_inner({reflected_string, Value}) ->
-    Value;
+    copy_string(Value);
 construct_inner({reflected_list, Items}) ->
     [construct_inner(Item) || Item <- Items];
 construct_inner({reflected_tuple, Fields}) ->
@@ -106,12 +148,6 @@ construct_inner({reflected_constructor, Name, Fields}) ->
             FieldValues = [construct_inner(Field) || Field <- Fields],
             list_to_tuple([Tag | FieldValues])
     end.
-
-collect_fields(_Value, Index, Size, Accumulator) when Index > Size ->
-    lists:reverse(Accumulator);
-collect_fields(Value, Index, Size, Accumulator) ->
-    Field = reflect(element(Index, Value)),
-    collect_fields(Value, Index + 1, Size, [Field | Accumulator]).
 
 pascal_to_snake(<<>>) ->
     <<>>;

@@ -5,6 +5,7 @@
 // =============================================================================
 
 import gleam/list
+import gleam/string
 
 import gleeunit/should
 
@@ -243,14 +244,19 @@ pub fn observers_see_a_crashing_access_rule_rejected_as_denied_test() {
 
   wire_support.subscribe(connection, "private")
 
-  events()
-  |> should.equal([
-    server.SubscriptionRejected(
-      client_id: "c1",
-      topic_id: "private",
-      reason: transport.AccessDenied,
-    ),
-  ])
+  let assert [server.Diagnostic(level: transport.Failure, message:), rejected] =
+    events()
+  string.starts_with(
+    message,
+    "access to \"private\" crashed for \"c1\", refused: ",
+  )
+  |> should.be_true
+  rejected
+  |> should.equal(server.SubscriptionRejected(
+    client_id: "c1",
+    topic_id: "private",
+    reason: transport.AccessDenied,
+  ))
 }
 
 pub fn observers_see_a_resync_refused_on_the_access_recheck_test() {
@@ -288,7 +294,7 @@ pub fn observers_see_an_undecodable_frame_as_a_diagnostic_test() {
   |> should.equal([
     server.Diagnostic(
       level: transport.Warning,
-      message: "dropped a frame from c1 that failed to decode",
+      message: "dropped a frame from \"c1\" that failed to decode",
     ),
   ])
 }
