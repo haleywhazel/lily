@@ -768,7 +768,7 @@ pub fn browser_hot_reload_stashes_and_reloads_test() {
   let socket = test_support.get_last_websocket()
   test_support.trigger_websocket_message(socket, dev_reload_message(["shared"]))
 
-  test_support.read_session_storage("lily_dev_reload_state")
+  test_support.read_session_storage("lily_hot_reload_state")
   |> string.contains("\"count\":0")
   |> should.be_true
   test_support.navigation_count() |> should.equal(before + 1)
@@ -812,7 +812,7 @@ pub fn browser_hot_reload_installs_once_test() {
 pub fn browser_recover_after_reload_merges_matching_primitives_test() {
   test_support.reset_dom()
   test_support.write_session_storage(
-    "lily_dev_reload_state",
+    "lily_hot_reload_state",
     "{\"count\":99,\"name\":\"Stashed\",\"connected\":true,\"secondary_count\":7,\"active_tab\":{\"unexpected\":\"shape\"}}",
   )
 
@@ -828,11 +828,11 @@ pub fn browser_recover_after_reload_merges_matching_primitives_test() {
 @target(javascript)
 pub fn browser_recover_after_reload_clears_the_stash_test() {
   test_support.reset_dom()
-  test_support.write_session_storage("lily_dev_reload_state", "{\"count\":1}")
+  test_support.write_session_storage("lily_hot_reload_state", "{\"count\":1}")
 
   let _runtime = browser.recover_after_reload(test_support.initial_model())
 
-  test_support.read_session_storage("lily_dev_reload_state") |> should.equal("")
+  test_support.read_session_storage("lily_hot_reload_state") |> should.equal("")
 }
 
 @target(javascript)

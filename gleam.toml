@@ -14,7 +14,7 @@ pages = [
     { title = "01 Getting Started", path = "tutorials/01-intro.html", source = "./tutorials/01-intro.md" },
     { title = "02 Components", path = "tutorials/02-components.html", source = "./tutorials/02-components.md" },
     { title = "03 Text Inputs", path = "tutorials/03-inputs.html", source = "./tutorials/03-inputs.md" },
-    { title = "04 Forms", path = "tutorials/03-forms.html", source = "./tutorials/03-forms.md" },
+    { title = "04 Forms", path = "tutorials/04-forms.html", source = "./tutorials/04-forms.md" },
 ]
 
 [dependencies]

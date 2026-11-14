@@ -8,6 +8,7 @@
 import gleam/bit_array
 import gleam/dict
 import gleam/list
+import gleam/option
 import gleam/set
 import gleam/string
 
@@ -79,18 +80,22 @@ fn assert_roundtrip_generic(protocol: Protocol(model, message)) -> Nil {
 // every protocol variant
 fn every_frame() -> List(Protocol(Model, Message)) {
   [
-    Acknowledge(target: Session, sequence: 42),
-    Acknowledge(target: Topic(id: "chat"), sequence: 1),
-    Connected(client_id: "abc123"),
-    Dropped(target: Session),
-    Dropped(target: Topic(id: "chat")),
+    Acknowledge(target: Session, sequence: 42, id: 5),
+    Acknowledge(target: Topic(id: "chat"), sequence: 1, id: 300),
+    Connected(client_id: "abc123", resume: "r1", answered: 3),
+    Dropped(target: Session, id: 2),
+    Dropped(target: Topic(id: "chat"), id: 70_000),
     Rejected(topic_id: "secret", reason: AccessDenied),
-    Resync(cursors: [
-      transport.Unknown(Session),
-      transport.Unknown(Topic(id: "chat")),
-      transport.Known(target: Topic(id: "room"), epoch: 912_345, sequence: 7),
-    ]),
-    SessionMessage(payload: SetName("Alice")),
+    Resync(
+      cursors: [
+        transport.Unknown(Session),
+        transport.Unknown(Topic(id: "chat")),
+        transport.Known(target: Topic(id: "room"), epoch: 912_345, sequence: 7),
+      ],
+      resume: option.None,
+      delivered: 0,
+    ),
+    SessionMessage(id: 1, payload: SetName("Alice")),
     SessionUpdate(sequence: 4, payload: Increment),
     Snapshot(
       target: Session,
@@ -99,7 +104,7 @@ fn every_frame() -> List(Protocol(Model, Message)) {
       state: test_support.Model(..test_support.initial_model(), name: "Bob"),
     ),
     Subscribe(topic_id: "chat"),
-    TopicMessage(topic_id: "chat", payload: Increment),
+    TopicMessage(topic_id: "chat", id: 1, payload: Increment),
     TopicUpdate(topic_id: "chat", sequence: 3, payload: Increment),
     transport.Unchanged(target: Topic(id: "chat")),
     Unsubscribe(topic_id: "chat"),
@@ -143,36 +148,36 @@ fn embed_store(
 
 pub fn snapshot_acknowledge_session_test() {
   assert_encoded(
-    Acknowledge(target: Session, sequence: 42),
-    "83A474797065AB61636B6E6F776C65646765A674617267657481A46B696E64A773657373696F6EA873657175656E63652A",
+    Acknowledge(target: Session, sequence: 42, id: 5),
+    "84A474797065AB61636B6E6F776C65646765A674617267657481A46B696E64A773657373696F6EA873657175656E63652AA2696405",
   )
 }
 
 pub fn snapshot_acknowledge_topic_test() {
   assert_encoded(
-    Acknowledge(target: Topic(id: "chat"), sequence: 1),
-    "83A474797065AB61636B6E6F776C65646765A674617267657482A46B696E64A5746F706963A26964A463686174A873657175656E636501",
+    Acknowledge(target: Topic(id: "chat"), sequence: 1, id: 3),
+    "84A474797065AB61636B6E6F776C65646765A674617267657482A46B696E64A5746F706963A26964A463686174A873657175656E636501A2696403",
   )
 }
 
 pub fn snapshot_connected_test() {
   assert_encoded(
-    Connected(client_id: "abc123"),
-    "82A474797065A9636F6E6E6563746564A9636C69656E745F6964A6616263313233",
+    Connected(client_id: "abc123", resume: "r1", answered: 3),
+    "84A474797065A9636F6E6E6563746564A9636C69656E745F6964A6616263313233A6726573756D65A27231A8616E73776572656403",
   )
 }
 
 pub fn snapshot_dropped_session_test() {
   assert_encoded(
-    Dropped(target: Session),
-    "82A474797065A764726F70706564A674617267657481A46B696E64A773657373696F6E",
+    Dropped(target: Session, id: 2),
+    "83A474797065A764726F70706564A674617267657481A46B696E64A773657373696F6EA2696402",
   )
 }
 
 pub fn snapshot_dropped_topic_test() {
   assert_encoded(
-    Dropped(target: Topic(id: "chat")),
-    "82A474797065A764726F70706564A674617267657482A46B696E64A5746F706963A26964A463686174",
+    Dropped(target: Topic(id: "chat"), id: 9),
+    "83A474797065A764726F70706564A674617267657482A46B696E64A5746F706963A26964A463686174A2696409",
   )
 }
 
@@ -185,8 +190,12 @@ pub fn snapshot_rejected_test() {
 
 pub fn snapshot_resync_session_test() {
   assert_encoded(
-    Resync(cursors: [transport.Unknown(Session)]),
-    "82A474797065A6726573796E63A7637572736F72739181A46B696E64A773657373696F6E",
+    Resync(
+      cursors: [transport.Unknown(Session)],
+      resume: option.None,
+      delivered: 0,
+    ),
+    "83A474797065A6726573796E63A7637572736F72739181A46B696E64A773657373696F6EA964656C69766572656400",
   )
 }
 
@@ -195,32 +204,36 @@ pub fn snapshot_resync_session_test() {
 /// type `{"_":"Empty"}`.
 pub fn snapshot_resync_empty_cursors_test() {
   assert_encoded(
-    Resync(cursors: []),
-    "82A474797065A6726573796E63A7637572736F727390",
+    Resync(cursors: [], resume: option.None, delivered: 0),
+    "83A474797065A6726573796E63A7637572736F727390A964656C69766572656400",
   )
 }
 
 pub fn snapshot_resync_session_topic_test() {
   assert_encoded(
-    Resync(cursors: [
-      transport.Unknown(Session),
-      transport.Unknown(Topic(id: "chat")),
-    ]),
-    "82A474797065A6726573796E63A7637572736F72739281A46B696E64A773657373696F6E82A46B696E64A5746F706963A26964A463686174",
+    Resync(
+      cursors: [
+        transport.Unknown(Session),
+        transport.Unknown(Topic(id: "chat")),
+      ],
+      resume: option.Some("r1"),
+      delivered: 4,
+    ),
+    "84A474797065A6726573796E63A7637572736F72739281A46B696E64A773657373696F6E82A46B696E64A5746F706963A26964A463686174A6726573756D65A27231A964656C69766572656404",
   )
 }
 
 pub fn snapshot_session_message_increment_test() {
   assert_encoded(
-    SessionMessage(payload: Increment),
-    "82A474797065AF73657373696F6E5F6D657373616765A77061796C6F6164C40D81A15FA9496E6372656D656E74",
+    SessionMessage(id: 1, payload: Increment),
+    "83A474797065AF73657373696F6E5F6D657373616765A2696401A77061796C6F6164C40D81A15FA9496E6372656D656E74",
   )
 }
 
 pub fn snapshot_session_message_set_name_test() {
   assert_encoded(
-    SessionMessage(payload: SetName("Alice")),
-    "82A474797065AF73657373696F6E5F6D657373616765A77061796C6F6164C41382A130A5416C696365A15FA75365744E616D65",
+    SessionMessage(id: 200, payload: SetName("Alice")),
+    "83A474797065AF73657373696F6E5F6D657373616765A26964CCC8A77061796C6F6164C41382A130A5416C696365A15FA75365744E616D65",
   )
 }
 
@@ -257,8 +270,8 @@ pub fn snapshot_subscribe_test() {
 
 pub fn snapshot_topic_message_test() {
   assert_encoded(
-    TopicMessage(topic_id: "chat", payload: Increment),
-    "83A474797065AD746F7069635F6D657373616765A8746F7069635F6964A463686174A77061796C6F6164C40D81A15FA9496E6372656D656E74",
+    TopicMessage(topic_id: "chat", id: 70_000, payload: Increment),
+    "84A474797065AD746F7069635F6D657373616765A8746F7069635F6964A463686174A26964CE00011170A77061796C6F6164C40D81A15FA9496E6372656D656E74",
   )
 }
 
@@ -290,27 +303,27 @@ pub fn snapshot_version_test() {
 
 pub fn roundtrip_acknowledge_session_test() {
   test_support.register_fixtures()
-  assert_roundtrip(Acknowledge(target: Session, sequence: 42))
+  assert_roundtrip(Acknowledge(target: Session, sequence: 42, id: 0))
 }
 
 pub fn roundtrip_acknowledge_topic_test() {
   test_support.register_fixtures()
-  assert_roundtrip(Acknowledge(target: Topic(id: "chat"), sequence: 1))
+  assert_roundtrip(Acknowledge(target: Topic(id: "chat"), sequence: 1, id: 0))
 }
 
 pub fn roundtrip_connected_test() {
   test_support.register_fixtures()
-  assert_roundtrip(Connected(client_id: "abc123"))
+  assert_roundtrip(Connected(client_id: "abc123", resume: "", answered: 0))
 }
 
 pub fn roundtrip_dropped_session_test() {
   test_support.register_fixtures()
-  assert_roundtrip(Dropped(target: Session))
+  assert_roundtrip(Dropped(target: Session, id: 0))
 }
 
 pub fn roundtrip_dropped_topic_test() {
   test_support.register_fixtures()
-  assert_roundtrip(Dropped(target: Topic(id: "chat")))
+  assert_roundtrip(Dropped(target: Topic(id: "chat"), id: 0))
 }
 
 pub fn roundtrip_rejected_test() {
@@ -335,17 +348,19 @@ pub fn rejected_with_unknown_reason_fails_to_decode_test() {
 
 pub fn roundtrip_resync_session_topic_test() {
   test_support.register_fixtures()
-  assert_roundtrip(
-    Resync(cursors: [
+  assert_roundtrip(Resync(
+    cursors: [
       transport.Unknown(Session),
       transport.Unknown(Topic(id: "chat")),
-    ]),
-  )
+    ],
+    resume: option.None,
+    delivered: 0,
+  ))
 }
 
 pub fn roundtrip_session_message_set_name_test() {
   test_support.register_fixtures()
-  assert_roundtrip(SessionMessage(payload: SetName("Alice")))
+  assert_roundtrip(SessionMessage(id: 1, payload: SetName("Alice")))
 }
 
 pub fn roundtrip_session_update_test() {
@@ -506,7 +521,7 @@ pub fn roundtrip_subscribe_test() {
 
 pub fn roundtrip_topic_message_test() {
   test_support.register_fixtures()
-  assert_roundtrip(TopicMessage(topic_id: "chat", payload: Increment))
+  assert_roundtrip(TopicMessage(topic_id: "chat", id: 1, payload: Increment))
 }
 
 pub fn roundtrip_topic_update_test() {

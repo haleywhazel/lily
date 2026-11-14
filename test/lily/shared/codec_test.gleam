@@ -424,7 +424,7 @@ pub fn auto_decode_refuses_a_json_float_past_the_float_range_test() {
       max_decode_depth: 128,
       modules: [],
     )
-  let frame = <<"{\"type\":\"session_message\",\"payload\":1e400}">>
+  let frame = <<"{\"type\":\"session_message\",\"id\":1,\"payload\":1e400}">>
 
   transport.decode(frame, serialiser:)
   |> should.equal(Error(Nil))

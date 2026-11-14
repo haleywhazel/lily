@@ -82,7 +82,7 @@ pub fn data_message_encoded_types_never_reach_wire_decoding_test() {
   let decoded: Result(transport.Protocol(Nil, stamp_fixture.Stamp), Nil) =
     transport.decode(
       bit_array.from_string(
-        "{\"type\":\"session_message\",\"payload\":" <> payload <> "}",
+        "{\"type\":\"session_message\",\"id\":1,\"payload\":" <> payload <> "}",
       ),
       serialiser: transport.automatic(
         format: transport.Json,

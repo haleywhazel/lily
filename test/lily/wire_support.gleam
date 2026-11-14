@@ -95,20 +95,22 @@ pub fn chat_snapshot(model: Model) -> Frame {
   )
 }
 
-/// A snapshot's epoch is random per server, read as 0 so frames compare, see
+/// A snapshot's epoch and a `Connected` token are random per server, read as 0
+/// and empty, and the id an answer names is read as 0, so frames compare. See
 /// [`decode_exact`](#decode_exact).
 pub fn decode(bytes: BitArray) -> Frame {
-  without_epoch(decode_exact(bytes))
+  steady(decode_exact(bytes))
 }
 
-/// Automatic serialiser, reads either format, epochs read as 0.
+/// Automatic serialiser, reads either format, epochs and tokens read as
+/// [`decode`](#decode) reads them.
 pub fn decode_automatic(bytes: BitArray) -> Frame {
   let assert Ok(protocol) =
     transport.decode(
       bytes,
       serialiser: test_support.automatic_serialiser(transport.Json),
     )
-  without_epoch(protocol)
+  steady(protocol)
 }
 
 /// Keeps the epoch.
@@ -133,6 +135,12 @@ pub fn eventually(condition: fn() -> Bool, within within: Int) -> Bool {
       eventually(condition, within: within - 2)
     }
   }
+}
+
+/// The empty `Resync` a fresh client's first frame is, settling a
+/// registration that waits for it under a grace period.
+pub fn finalise(connection: Connection(Model, Message)) -> Nil {
+  send(connection, resync([]))
 }
 
 pub fn is_snapshot(frame: Frame) -> Bool {
@@ -256,21 +264,20 @@ pub fn recorder() -> #(fn(value) -> Nil, fn() -> List(value)) {
   )
 }
 
+/// A `Resync` from a page with nothing to resume and nothing sent yet.
+pub fn resync(cursors: List(transport.Cursor)) -> Frame {
+  transport.Resync(cursors:, resume: option.None, delivered: 0)
+}
+
 pub fn resync_session(connection: Connection(Model, Message)) -> Nil {
-  send(
-    connection,
-    transport.Resync(cursors: [transport.Unknown(transport.Session)]),
-  )
+  send(connection, resync([transport.Unknown(transport.Session)]))
 }
 
 pub fn resync_topic(
   connection: Connection(Model, Message),
   topic_id: String,
 ) -> Nil {
-  send(
-    connection,
-    transport.Resync(cursors: [transport.Unknown(transport.Topic(topic_id))]),
-  )
+  send(connection, resync([transport.Unknown(transport.Topic(topic_id))]))
 }
 
 pub fn send(connection: Connection(Model, Message), frame: Frame) -> Nil {
@@ -295,11 +302,12 @@ pub fn server_pid(app: Server(Model, Message)) -> process.Pid {
   actor.watched_pid(test_support.inspect(app).watched)
 }
 
+/// Numbered by [`unique_id`](#unique_id), so ids only grow, as a page's do.
 pub fn session_message(
   connection: Connection(Model, Message),
   payload: Message,
 ) -> Nil {
-  send(connection, transport.SessionMessage(payload:))
+  send(connection, transport.SessionMessage(id: unique_id(), payload:))
 }
 
 @target(erlang)
@@ -362,12 +370,19 @@ pub fn subscribe(
   send(connection, transport.Subscribe(topic_id:))
 }
 
+/// Numbered with [`session_message`](#session_message).
 pub fn topic_message(
   connection: Connection(Model, Message),
   topic_id: String,
   payload: Message,
 ) -> Nil {
-  send(connection, transport.TopicMessage(topic_id:, payload:))
+  send(connection, transport.TopicMessage(topic_id:, id: unique_id(), payload:))
+}
+
+/// An id no earlier frame in this test process used, for a frame built by
+/// hand.
+pub fn unique_id() -> Int {
+  next_message_id()
 }
 
 pub fn unsubscribe(
@@ -402,9 +417,12 @@ fn settle_round(app: Server(Model, Message)) -> Nil {
   }
 }
 
-fn without_epoch(frame: Frame) -> Frame {
+fn steady(frame: Frame) -> Frame {
   case frame {
     transport.Snapshot(..) -> transport.Snapshot(..frame, epoch: 0)
+    transport.Connected(..) -> transport.Connected(..frame, resume: "")
+    transport.Acknowledge(..) -> transport.Acknowledge(..frame, id: 0)
+    transport.Dropped(..) -> transport.Dropped(..frame, id: 0)
     _ -> frame
   }
 }
@@ -421,3 +439,7 @@ fn is_stopped(app: Server(Model, Message)) -> Bool
 @target(erlang)
 @external(erlang, "lily_test_support_ffi", "mark_stopped")
 fn mark_stopped(app: Server(Model, Message)) -> Nil
+
+@external(erlang, "lily_test_support_ffi", "next_message_id")
+@external(javascript, "./test_support.ffi.mjs", "nextMessageId")
+fn next_message_id() -> Int

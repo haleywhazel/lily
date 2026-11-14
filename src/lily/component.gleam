@@ -208,7 +208,6 @@ import gleam/string
 import lily/client.{type Runtime}
 import lily/internal/codec
 import lily/store
-import lily/transport
 
 // =============================================================================
 // PUBLIC TYPES
@@ -440,7 +439,7 @@ pub fn mount(
       // holds a click to what a client message may be
       codec.decode_data_message_with(
         _,
-        transport.message_conformer(store.schema_of(client.store_of(runtime))),
+        store.message_conformer(client.store_of(runtime)),
       ),
     )
   })

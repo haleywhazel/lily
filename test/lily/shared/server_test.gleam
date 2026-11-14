@@ -14,6 +14,7 @@ import gleam/string
 import gleeunit/should
 
 import lily/server
+import lily/store
 import lily/test_support.{Increment, SetName}
 import lily/transport
 import lily/wire_support
@@ -74,7 +75,12 @@ pub fn server_connect_sends_version_then_connected_test() {
     [transport.Version(hash:, protocol:), connected] -> {
       { hash != "" } |> should.be_true
       protocol |> should.equal(transport.protocol_version)
-      connected |> should.equal(transport.Connected(client_id: "c1"))
+      connected
+      |> should.equal(transport.Connected(
+        client_id: "c1",
+        resume: "",
+        answered: 0,
+      ))
     }
     _ -> should.fail()
   }
@@ -108,9 +114,11 @@ pub fn server_connect_announces_its_own_id_in_the_connected_frame_test() {
   case list.map(recorded(), wire_support.decode) {
     [_version, connected] ->
       connected
-      |> should.equal(
-        transport.Connected(client_id: server.client_id(connection)),
-      )
+      |> should.equal(transport.Connected(
+        client_id: server.client_id(connection),
+        resume: "",
+        answered: 0,
+      ))
     _ -> should.fail()
   }
 }
@@ -196,7 +204,7 @@ pub fn server_a_connection_handle_made_from_an_id_reaches_the_same_client_test()
 
   frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 1),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
   ])
 }
 
@@ -212,7 +220,7 @@ pub fn server_session_message_acknowledges_sender_test() {
 
   frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 1),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
   ])
 }
 
@@ -237,8 +245,8 @@ pub fn server_session_sequence_increments_test() {
 
   frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 1),
-    transport.Acknowledge(target: transport.Session, sequence: 2),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
+    transport.Acknowledge(target: transport.Session, sequence: 2, id: 0),
   ])
 }
 
@@ -253,11 +261,11 @@ pub fn server_session_sequence_is_per_connection_test() {
 
   frames1()
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 1),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
   ])
   frames2()
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 1),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
   ])
 }
 
@@ -356,9 +364,13 @@ pub fn server_session_resync_naming_the_current_state_is_unchanged_test() {
 
   wire_support.send(
     c1,
-    transport.Resync([
-      transport.Known(target: transport.Session, epoch:, sequence:),
-    ]),
+    transport.Resync(
+      cursors: [
+        transport.Known(target: transport.Session, epoch:, sequence:),
+      ],
+      resume: option.None,
+      delivered: 0,
+    ),
   )
 
   raw()
@@ -382,9 +394,13 @@ pub fn server_session_resync_after_a_reconnect_is_a_snapshot_test() {
 
   wire_support.send(
     c2,
-    transport.Resync([
-      transport.Known(target: transport.Session, epoch:, sequence: 0),
-    ]),
+    transport.Resync(
+      cursors: [
+        transport.Known(target: transport.Session, epoch:, sequence: 0),
+      ],
+      resume: option.None,
+      delivered: 0,
+    ),
   )
 
   frames()
@@ -443,6 +459,55 @@ pub fn server_resync_reflects_own_session_only_test() {
       epoch: 0,
       sequence: 0,
       state: test_support.initial_model(),
+    ),
+  ])
+}
+
+pub fn server_session_snapshot_carries_only_the_session_slice_test() {
+  let app =
+    test_support.start_server(server.new(
+      test_support.narrow_store(),
+      origins: server.AnyOrigin,
+    ))
+  let #(c1, frames) = wire_support.open(app, "c1")
+  server.dispatch_to(app, client_id: "c1", message: Increment)
+  let _ = frames()
+
+  wire_support.resync_session(c1)
+
+  frames()
+  |> should.equal([
+    transport.Snapshot(
+      target: transport.Session,
+      epoch: 0,
+      sequence: 1,
+      state: test_support.Model(..test_support.initial_model(), count: 1),
+    ),
+  ])
+}
+
+pub fn server_session_snapshot_with_a_crashing_set_carries_the_whole_copy_test() {
+  let crashing =
+    test_support.narrow_store_with(set: fn(_, _) { panic as "set blew up" })
+  let app =
+    test_support.start_server(server.new(crashing, origins: server.AnyOrigin))
+  let #(c1, frames) = wire_support.open(app, "c1")
+  server.dispatch_to(app, client_id: "c1", message: Increment)
+  let _ = frames()
+
+  wire_support.resync_session(c1)
+
+  frames()
+  |> should.equal([
+    transport.Snapshot(
+      target: transport.Session,
+      epoch: 0,
+      sequence: 1,
+      state: test_support.Model(
+        ..test_support.initial_model(),
+        count: 1,
+        secondary_count: 1,
+      ),
     ),
   ])
 }
@@ -521,7 +586,7 @@ pub fn server_session_message_routed_elsewhere_is_dropped_test() {
   wire_support.session_message(c1, Increment)
 
   frames()
-  |> should.equal([transport.Dropped(target: transport.Session)])
+  |> should.equal([transport.Dropped(target: transport.Session, id: 0)])
   wire_support.resync_session(c1)
   case frames() {
     [transport.Snapshot(state:, sequence: 0, ..)] ->
@@ -540,6 +605,99 @@ pub fn server_dispatch_to_ignores_the_route_test() {
 
   frames()
   |> should.equal([transport.SessionUpdate(sequence: 1, payload: Increment)])
+}
+
+// =============================================================================
+// AUTHORISE
+// =============================================================================
+
+pub fn server_session_message_the_rule_refuses_is_dropped_unapplied_test() {
+  let app =
+    test_support.session_store()
+    |> store.authorise(rule: fn(_sender, _target, message) {
+      message != test_support.Decrement
+    })
+    |> server.new(origins: server.AnyOrigin)
+    |> test_support.start_server
+  let #(c1, frames) = wire_support.open(app, "c1")
+
+  wire_support.session_message(c1, test_support.Decrement)
+  wire_support.session_message(c1, Increment)
+
+  frames()
+  |> should.equal([
+    transport.Dropped(target: transport.Session, id: 0),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
+  ])
+}
+
+pub fn server_session_rule_that_crashes_refuses_test() {
+  let app =
+    test_support.session_store()
+    |> store.authorise(rule: fn(_sender, _target, _message) {
+      panic as "rule blew up"
+    })
+    |> server.new(origins: server.AnyOrigin)
+    |> test_support.start_server
+  let #(c1, frames) = wire_support.open(app, "c1")
+
+  wire_support.session_message(c1, Increment)
+
+  frames()
+  |> should.equal([transport.Dropped(target: transport.Session, id: 0)])
+}
+
+pub fn server_dispatch_to_skips_the_rule_test() {
+  let app =
+    test_support.session_store()
+    |> store.authorise(rule: fn(_sender, _target, _message) { False })
+    |> server.new(origins: server.AnyOrigin)
+    |> test_support.start_server
+  let #(_c1, frames) = wire_support.open(app, "c1")
+
+  server.dispatch_to(app, client_id: "c1", message: Increment)
+
+  frames()
+  |> should.equal([transport.SessionUpdate(sequence: 1, payload: Increment)])
+}
+
+// =============================================================================
+// MESSAGE IDS
+// =============================================================================
+
+pub fn server_a_message_id_answered_already_is_dropped_unapplied_test() {
+  let app = test_support.new_server()
+  let #(c1, raw) = wire_support.open_raw(app, "c1", [])
+  let _ = raw()
+  let id = wire_support.unique_id()
+
+  wire_support.send(c1, transport.SessionMessage(id:, payload: Increment))
+  wire_support.send(c1, transport.SessionMessage(id:, payload: Increment))
+
+  list.map(raw(), wire_support.decode_exact)
+  |> should.equal([
+    transport.Acknowledge(target: transport.Session, sequence: 1, id:),
+    transport.Dropped(target: transport.Session, id:),
+  ])
+}
+
+pub fn server_a_fresh_session_drops_what_the_page_sent_before_test() {
+  let app = test_support.new_server()
+  let #(c1, raw) = wire_support.open_raw(app, "c1", [])
+  let _ = raw()
+  wire_support.send(
+    c1,
+    transport.Resync(cursors: [], resume: option.None, delivered: 7),
+  )
+
+  wire_support.send(c1, transport.SessionMessage(id: 7, payload: Increment))
+  wire_support.send(c1, transport.SessionMessage(id: 8, payload: Increment))
+
+  list.map(raw(), wire_support.decode_exact)
+  |> should.equal([
+    transport.Dropped(target: transport.Session, id: 7),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 8),
+  ])
 }
 
 // =============================================================================
@@ -593,8 +751,10 @@ pub fn server_incoming_payload_its_route_cannot_match_is_dropped_test() {
     server.incoming(c1, bytes: bit_array.from_string(text))
   }
 
-  send("{\"type\":\"session_message\",\"payload\":{\"_\":\"Ok\",\"0\":1}}")
-  send("{\"type\":\"session_message\",\"payload\":{\"_\":\"Noop\"}}")
+  send(
+    "{\"type\":\"session_message\",\"id\":1,\"payload\":{\"_\":\"Ok\",\"0\":1}}",
+  )
+  send("{\"type\":\"session_message\",\"id\":2,\"payload\":{\"_\":\"Noop\"}}")
 
   // the server is still there and answers the next message
   let assert Ok(last) = list.last(frames())
@@ -603,7 +763,7 @@ pub fn server_incoming_payload_its_route_cannot_match_is_dropped_test() {
     serialiser: test_support.automatic_serialiser(transport.Json),
   )
   |> should.equal(
-    Ok(transport.Acknowledge(target: transport.Session, sequence: 1)),
+    Ok(transport.Acknowledge(target: transport.Session, sequence: 1, id: 2)),
   )
 }
 
@@ -640,7 +800,7 @@ pub fn server_stop_sends_each_topic_subscriber_a_final_acknowledge_test() {
 
   frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Topic("chat"), sequence: 0),
+    transport.Acknowledge(target: transport.Topic("chat"), sequence: 0, id: 0),
   ])
 }
 

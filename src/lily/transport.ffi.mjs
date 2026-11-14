@@ -20,22 +20,18 @@ export { registerModule } from "./internal/codec.ffi.mjs";
 // =============================================================================
 
 /**
- * `makeConnectorHandler` and `makeChannel` are passed-in Gleam constructors.
- * The first frame sent after an open goes ahead of the queue, which flushes
- * right behind it. The runtime sends its `Resync` there, and never queues it,
- * the next open sends a fresh one. Frames queued under another queue
- * version, stored as `protocol`, are dropped, they'd be read as something
- * else.
+ * `queue` is from `offlineQueue`, and `makeConnectorHandler` and `makeChannel`
+ * are passed-in Gleam constructors. The first frame sent after an open goes
+ * ahead of the queue, which flushes right behind it. The runtime sends its
+ * `Resync` there, and never queues it, the next open sends a fresh one.
  */
 export function offlineConnect(
   connect,
-  storageKey,
-  protocol,
+  queue,
   handler,
   makeConnectorHandler,
   makeChannel,
 ) {
-  const queue = createOfflineQueue(storageKey, protocol);
   let channel = null;
   let leading = false;
   // between an open and its close, when a queued frame may go out early
@@ -99,9 +95,33 @@ export function offlineConnect(
   );
 }
 
+/** The `delivered` an earlier page stored with its requeued frames, else 0. */
+export function offlineDelivered(storageKey, protocol) {
+  return readStored(storageKey, protocol).delivered;
+}
+
 export function offlinePending(storageKey, protocol) {
   return toList(
     readQueue(storageKey, protocol).map((frame) => new BitArray(frame)),
+  );
+}
+
+/**
+ * Seeded from `sessionStorage`. Frames queued under another queue version,
+ * stored as `protocol`, are dropped, they'd be read as something else.
+ */
+export function offlineQueue(storageKey, protocol) {
+  return createOfflineQueue(storageKey, protocol);
+}
+
+/**
+ * Replaces everything held with `frames`, a Gleam list, in order, noting the
+ * highest message id already put on the wire among them.
+ */
+export function offlineRequeue(queue, frames, delivered) {
+  queue.replace(
+    frames.toArray().map((frame) => frame.rawBuffer),
+    delivered,
   );
 }
 
@@ -231,14 +251,18 @@ function base64ToFrame(text) {
 
 // seeded from storage, letting early frames join an earlier page's queue
 function createOfflineQueue(storageKey, protocol) {
-  let pending = readQueue(storageKey, protocol);
+  let { frames: pending, delivered } = readStored(storageKey, protocol);
   let persistScheduled = false;
 
   function persist() {
     try {
       sessionStorage.setItem(
         storageKey,
-        JSON.stringify({ protocol, frames: pending.map(frameToBase64) }),
+        JSON.stringify({
+          protocol,
+          frames: pending.map(frameToBase64),
+          delivered,
+        }),
       );
     } catch (_error) {
       // quota exceeded, frames stay in memory and a stale copy mustn't be
@@ -272,9 +296,23 @@ function createOfflineQueue(storageKey, protocol) {
         });
       }
     },
+    replace(frames, sent) {
+      pending = frames;
+      delivered = sent;
+      if (pending.length === 0) {
+        try {
+          sessionStorage.removeItem(storageKey);
+        } catch (_error) {
+          // storage unavailable, memory queue already empty
+        }
+      } else {
+        persist();
+      }
+    },
     drainSent(count) {
       if (count === pending.length) {
         pending = [];
+        delivered = 0;
         try {
           sessionStorage.removeItem(storageKey);
         } catch (_error) {
@@ -308,23 +346,30 @@ function queueOnly(queue, bytes) {
   return new GleamError(undefined);
 }
 
-// a bare array is a version 1 queue
 function readQueue(storageKey, protocol) {
+  return readStored(storageKey, protocol).frames;
+}
+
+// a bare array is a version 1 queue
+function readStored(storageKey, protocol) {
   try {
     const raw = sessionStorage.getItem(storageKey);
-    if (!raw) return [];
+    if (!raw) return { frames: [], delivered: 0 };
     const stored = JSON.parse(raw);
+    const current = !Array.isArray(stored) && stored?.protocol === protocol;
     const frames = Array.isArray(stored)
       ? protocol === 1
         ? stored
         : []
-      : stored?.protocol === protocol && Array.isArray(stored.frames)
+      : current && Array.isArray(stored.frames)
         ? stored.frames
         : [];
     if (frames.length === 0) sessionStorage.removeItem(storageKey);
-    return frames.map(base64ToFrame);
+    const delivered =
+      current && Number.isSafeInteger(stored.delivered) ? stored.delivered : 0;
+    return { frames: frames.map(base64ToFrame), delivered };
   } catch (_error) {
-    return [];
+    return { frames: [], delivered: 0 };
   }
 }
 

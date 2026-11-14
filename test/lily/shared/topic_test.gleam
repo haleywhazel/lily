@@ -87,7 +87,17 @@ fn assert_evicted(
   |> should.equal(0)
   wire_support.topic_message(connection, "chat", Increment)
   frames()
-  |> should.equal([transport.Dropped(target: transport.Topic("chat"))])
+  |> should.equal([transport.Dropped(target: transport.Topic("chat"), id: 0)])
+}
+
+// the topic store under an `authorise` rule
+fn rule_server(
+  rule: fn(test_support.Model, test_support.Model, test_support.Message) -> Bool,
+) -> server.Server(test_support.Model, test_support.Message) {
+  test_support.topic_store()
+  |> store.authorise(rule:)
+  |> server.new(origins: server.AnyOrigin)
+  |> test_support.start_server
 }
 
 fn denying_server() -> server.Server(test_support.Model, test_support.Message) {
@@ -227,7 +237,7 @@ pub fn topic_client_message_acknowledges_the_sender_and_updates_the_rest_test() 
   // sender gets only an Acknowledge, not its own update
   frames1()
   |> should.equal([
-    transport.Acknowledge(target: transport.Topic("chat"), sequence: 1),
+    transport.Acknowledge(target: transport.Topic("chat"), sequence: 1, id: 0),
   ])
   frames2()
   |> should.equal([
@@ -250,13 +260,13 @@ pub fn topic_two_clients_converge_in_the_order_the_topic_applied_test() {
   // each gets its own ack and the other's update
   frames1()
   |> should.equal([
-    transport.Acknowledge(target: transport.Topic("chat"), sequence: 1),
+    transport.Acknowledge(target: transport.Topic("chat"), sequence: 1, id: 0),
     transport.TopicUpdate(topic_id: "chat", sequence: 2, payload: Increment),
   ])
   frames2()
   |> should.equal([
     transport.TopicUpdate(topic_id: "chat", sequence: 1, payload: Increment),
-    transport.Acknowledge(target: transport.Topic("chat"), sequence: 2),
+    transport.Acknowledge(target: transport.Topic("chat"), sequence: 2, id: 0),
   ])
 }
 
@@ -326,23 +336,7 @@ pub fn topic_applies_the_full_update_to_its_own_model_test() {
 
 pub fn topic_crashing_update_drops_the_message_test() {
   // a crashing update must not take the topic down
-  let crashing =
-    store.new(init: test_support.initial_model(), update: fn(model, message) {
-      case message {
-        Decrement -> panic as "update blew up"
-        _ -> test_support.update(model, message)
-      }
-    })
-    |> store.sync_with(
-      route: test_support.topic_route,
-      serialiser: test_support.custom_serialiser(),
-    )
-    |> store.topic(
-      id: "chat",
-      get: fn(model) { model },
-      set: fn(_, model) { model },
-      access: store.Open,
-    )
+  let crashing = test_support.crashing_topic_store()
   let app =
     test_support.start_server(server.new(crashing, origins: server.AnyOrigin))
   let #(c1, frames) = wire_support.open(app, "c1")
@@ -423,6 +417,53 @@ pub fn topic_subscribing_twice_sends_one_snapshot_test() {
   |> should.equal(1)
   test_support.subscriber_count(app, "chat")
   |> should.equal(1)
+}
+
+pub fn topic_snapshot_carries_only_the_topic_slice_test() {
+  let app =
+    test_support.start_server(server.new(
+      test_support.narrow_store(),
+      origins: server.AnyOrigin,
+    ))
+  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  let #(c1, frames) = wire_support.open(app, "c1")
+
+  wire_support.subscribe(c1, "chat")
+
+  frames()
+  |> should.equal([
+    transport.Snapshot(
+      target: transport.Topic("chat"),
+      epoch: 0,
+      sequence: 1,
+      state: test_support.Model(..test_support.initial_model(), count: 1),
+    ),
+  ])
+}
+
+pub fn topic_snapshot_with_a_crashing_set_carries_the_whole_copy_test() {
+  let crashing =
+    test_support.narrow_store_with(set: fn(_, _) { panic as "set blew up" })
+  let app =
+    test_support.start_server(server.new(crashing, origins: server.AnyOrigin))
+  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  let #(c1, frames) = wire_support.open(app, "c1")
+
+  wire_support.subscribe(c1, "chat")
+
+  frames()
+  |> should.equal([
+    transport.Snapshot(
+      target: transport.Topic("chat"),
+      epoch: 0,
+      sequence: 1,
+      state: test_support.Model(
+        ..test_support.initial_model(),
+        count: 1,
+        secondary_count: 1,
+      ),
+    ),
+  ])
 }
 
 // =============================================================================
@@ -565,7 +606,7 @@ pub fn topic_message_from_non_subscriber_is_dropped_test() {
   frames1()
   |> should.equal([])
   frames2()
-  |> should.equal([transport.Dropped(target: transport.Topic("chat"))])
+  |> should.equal([transport.Dropped(target: transport.Topic("chat"), id: 0)])
   server.dispatch_topic(app, topic_id: "chat", message: Increment)
   frames1()
   |> should.equal([
@@ -596,7 +637,7 @@ pub fn topic_access_is_rechecked_after_a_session_message_test() {
 
   frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 1),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
     transport.Rejected(topic_id: "chat", reason: transport.AccessDenied),
   ])
   assert_evicted(app, c1, frames)
@@ -800,7 +841,14 @@ pub fn topic_subscription_cap_defaults_to_100_test() {
   let app = test_support.new_topic_server()
   let #(c1, frames) = wire_support.open(app, "c1")
 
-  wire_support.send(c1, transport.Resync(cursors: room_cursors(101)))
+  wire_support.send(
+    c1,
+    transport.Resync(
+      cursors: room_cursors(101),
+      resume: option.None,
+      delivered: 0,
+    ),
+  )
 
   let received = frames()
   list.count(received, wire_support.is_snapshot)
@@ -820,7 +868,14 @@ pub fn topic_resync_with_a_huge_cursor_list_is_bounded_test() {
     )
   let #(c1, frames) = wire_support.open(app, "c1")
 
-  wire_support.send(c1, transport.Resync(cursors: room_cursors(10_000)))
+  wire_support.send(
+    c1,
+    transport.Resync(
+      cursors: room_cursors(10_000),
+      resume: option.None,
+      delivered: 0,
+    ),
+  )
 
   let received = frames()
   list.count(received, wire_support.is_snapshot)
@@ -954,7 +1009,7 @@ pub fn topic_message_right_behind_a_resync_is_applied_test() {
       sequence: 0,
       state: test_support.initial_model(),
     ),
-    transport.Acknowledge(target: transport.Topic("chat"), sequence: 1),
+    transport.Acknowledge(target: transport.Topic("chat"), sequence: 1, id: 0),
   ])
   frames1()
   |> should.equal([
@@ -972,7 +1027,7 @@ pub fn topic_message_ahead_of_its_resync_is_dropped_test() {
 
   frames()
   |> should.equal([
-    transport.Dropped(target: transport.Topic("chat")),
+    transport.Dropped(target: transport.Topic("chat"), id: 0),
     transport.Snapshot(
       target: transport.Topic("chat"),
       epoch: 0,
@@ -990,9 +1045,13 @@ pub fn topic_resync_naming_the_current_state_is_answered_unchanged_test() {
 
   wire_support.send(
     c2,
-    transport.Resync([
-      transport.Known(target: transport.Topic("chat"), epoch:, sequence: 1),
-    ]),
+    transport.Resync(
+      cursors: [
+        transport.Known(target: transport.Topic("chat"), epoch:, sequence: 1),
+      ],
+      resume: option.None,
+      delivered: 0,
+    ),
   )
 
   frames()
@@ -1012,9 +1071,13 @@ pub fn topic_resync_naming_an_older_sequence_gets_the_snapshot_test() {
 
   wire_support.send(
     c2,
-    transport.Resync([
-      transport.Known(target: transport.Topic("chat"), epoch:, sequence: 0),
-    ]),
+    transport.Resync(
+      cursors: [
+        transport.Known(target: transport.Topic("chat"), epoch:, sequence: 0),
+      ],
+      resume: option.None,
+      delivered: 0,
+    ),
   )
 
   frames()
@@ -1032,9 +1095,13 @@ pub fn topic_resync_naming_a_stopped_topics_epoch_gets_the_snapshot_test() {
 
   wire_support.send(
     c2,
-    transport.Resync([
-      transport.Known(target: transport.Topic("chat"), epoch:, sequence: 1),
-    ]),
+    transport.Resync(
+      cursors: [
+        transport.Known(target: transport.Topic("chat"), epoch:, sequence: 1),
+      ],
+      resume: option.None,
+      delivered: 0,
+    ),
   )
 
   frames()
@@ -1051,9 +1118,13 @@ pub fn topic_resync_naming_the_current_state_still_checks_access_test() {
 
   wire_support.send(
     c2,
-    transport.Resync([
-      transport.Known(target: transport.Topic("chat"), epoch:, sequence: 1),
-    ]),
+    transport.Resync(
+      cursors: [
+        transport.Known(target: transport.Topic("chat"), epoch:, sequence: 1),
+      ],
+      resume: option.None,
+      delivered: 0,
+    ),
   )
 
   frames()
@@ -1170,7 +1241,7 @@ pub fn topic_stop_tells_subscribers_with_a_final_acknowledge_test() {
   // the last answer, then word that the topic is gone
   frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Topic("chat"), sequence: 1),
+    transport.Acknowledge(target: transport.Topic("chat"), sequence: 1, id: 0),
     transport.Rejected(topic_id: "chat", reason: transport.NotFound),
   ])
 }
@@ -1197,7 +1268,7 @@ pub fn topic_a_stopped_topic_rejoins_its_subscribers_when_dispatched_test() {
   wire_support.topic_message(c1, "chat", Increment)
   frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Topic("chat"), sequence: 2),
+    transport.Acknowledge(target: transport.Topic("chat"), sequence: 2, id: 0),
   ])
 }
 
@@ -1286,7 +1357,7 @@ pub fn topic_message_after_stop_is_dropped_test() {
   wire_support.topic_message(c1, "chat", Increment)
 
   frames()
-  |> should.equal([transport.Dropped(target: transport.Topic("chat"))])
+  |> should.equal([transport.Dropped(target: transport.Topic("chat"), id: 0)])
 }
 
 pub fn topic_subscribing_after_stop_starts_the_topic_afresh_test() {
@@ -1336,7 +1407,7 @@ pub fn topic_message_with_a_mismatching_id_is_dropped_test() {
   wire_support.topic_message(c1, "room:1", Increment)
 
   frames()
-  |> should.equal([transport.Dropped(target: transport.Topic("room:1"))])
+  |> should.equal([transport.Dropped(target: transport.Topic("room:1"), id: 0)])
   case events(app) {
     [server.Diagnostic(level: transport.Warning, ..)] -> Nil
     _ -> should.fail()
@@ -1354,10 +1425,11 @@ pub fn topic_message_with_a_matching_id_is_not_a_diagnostic_test() {
   let seen = events(app)
   list.contains(
     seen,
-    server.TopicMessageReceived(
-      client_id: "c1",
+    server.TopicMessageApplied(
+      client_id: option.Some("c1"),
       topic_id: "chat",
       message: Increment,
+      model: test_support.Model(..test_support.initial_model(), count: 1),
     ),
   )
   |> should.be_true
@@ -1375,7 +1447,7 @@ pub fn topic_session_message_routed_to_a_topic_is_dropped_test() {
   wire_support.session_message(c1, Increment)
 
   frames()
-  |> should.equal([transport.Dropped(target: transport.Session)])
+  |> should.equal([transport.Dropped(target: transport.Session, id: 0)])
   case events(app) {
     [server.Diagnostic(level: transport.Warning, ..)] -> Nil
     _ -> should.fail()
@@ -1389,7 +1461,7 @@ pub fn topic_local_message_sent_as_a_session_message_is_dropped_test() {
   wire_support.session_message(c1, test_support.Reset)
 
   frames()
-  |> should.equal([transport.Dropped(target: transport.Session)])
+  |> should.equal([transport.Dropped(target: transport.Session, id: 0)])
 }
 
 pub fn topic_session_message_routed_to_the_session_is_applied_test() {
@@ -1400,6 +1472,90 @@ pub fn topic_session_message_routed_to_the_session_is_applied_test() {
 
   frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 1),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
+  ])
+}
+
+// =============================================================================
+// AUTHORISE
+// =============================================================================
+
+pub fn topic_message_the_rule_refuses_is_dropped_test() {
+  let app = rule_server(fn(_sender, _target, message) { message != Decrement })
+  let #(c1, frames) = joined(app, "c1")
+
+  wire_support.topic_message(c1, "chat", Decrement)
+
+  frames()
+  |> should.equal([transport.Dropped(target: transport.Topic("chat"), id: 0)])
+}
+
+pub fn topic_message_the_rule_refuses_reaches_nobody_and_changes_nothing_test() {
+  let app = rule_server(fn(_sender, _target, message) { message != Decrement })
+  let #(c1, _c1_frames) = joined(app, "c1")
+  let #(_c2, c2_frames) = joined(app, "c2")
+
+  wire_support.topic_message(c1, "chat", Decrement)
+
+  c2_frames()
+  |> should.equal([])
+  let #(c3, c3_frames) = wire_support.open(app, "c3")
+  wire_support.subscribe(c3, "chat")
+  c3_frames()
+  |> should.equal([wire_support.chat_snapshot(test_support.initial_model())])
+}
+
+pub fn topic_rule_reads_the_sender_session_and_the_topic_test() {
+  // only whoever claimed the topic may decrement it
+  let app =
+    rule_server(fn(sender, target, message) {
+      case message {
+        Decrement -> target.name == sender.name
+        _ -> True
+      }
+    })
+  let #(alice, alice_frames) =
+    wire_support.open_seeded(app, "a", [SetName("alice")])
+  let #(bob, bob_frames) = wire_support.open_seeded(app, "b", [SetName("bob")])
+  wire_support.subscribe(alice, "chat")
+  wire_support.subscribe(bob, "chat")
+  wire_support.topic_message(alice, "chat", test_support.Claim("alice"))
+  let _ = alice_frames()
+  let _ = bob_frames()
+
+  wire_support.topic_message(bob, "chat", Decrement)
+  wire_support.topic_message(alice, "chat", Decrement)
+
+  bob_frames()
+  |> should.equal([
+    transport.Dropped(target: transport.Topic("chat"), id: 0),
+    transport.TopicUpdate(topic_id: "chat", sequence: 2, payload: Decrement),
+  ])
+  alice_frames()
+  |> should.equal([
+    transport.Acknowledge(target: transport.Topic("chat"), sequence: 2, id: 0),
+  ])
+}
+
+pub fn topic_rule_that_crashes_refuses_test() {
+  let app =
+    rule_server(fn(_sender, _target, _message) { panic as "rule blew up" })
+  let #(c1, frames) = joined(app, "c1")
+
+  wire_support.topic_message(c1, "chat", Increment)
+
+  frames()
+  |> should.equal([transport.Dropped(target: transport.Topic("chat"), id: 0)])
+}
+
+pub fn topic_dispatch_skips_the_rule_test() {
+  let app = rule_server(fn(_sender, _target, _message) { False })
+  let #(_c1, frames) = joined(app, "c1")
+
+  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+
+  frames()
+  |> should.equal([
+    transport.TopicUpdate(topic_id: "chat", sequence: 1, payload: Increment),
   ])
 }

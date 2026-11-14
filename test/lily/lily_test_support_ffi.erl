@@ -2,7 +2,8 @@
 
 -export([new_ref/1, get_ref/1, set_ref/2, new_shared/1, get_shared/1,
          set_shared/2, register_fixtures/0,
-         mark_stopped/1, is_stopped/1, capture_log_levels/1, log/2]).
+         mark_stopped/1, is_stopped/1, capture_log_levels/1, log/2,
+         next_message_id/0]).
 
 %% no constructor registry on Erlang
 register_fixtures() ->
@@ -33,6 +34,15 @@ get_shared(Key) ->
 set_shared(Key, Value) ->
     persistent_term:put(Key, Value),
     nil.
+
+%% counts up from 1 in the test process
+next_message_id() ->
+    Id = case erlang:get(lily_test_message_id) of
+        undefined -> 1;
+        Last -> Last + 1
+    end,
+    erlang:put(lily_test_message_id, Id),
+    Id.
 
 %% settling a stopped server skips the call that would log a crash
 mark_stopped(Server) ->

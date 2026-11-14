@@ -6,6 +6,7 @@
 
 import gleam/bit_array
 import gleam/dict
+import gleam/int
 import gleam/list
 import gleam/option
 import gleam/set
@@ -30,7 +31,7 @@ fn checked(
   schema: transport.Schema,
 ) -> Result(transport.Protocol(model, message), Nil) {
   transport.decode_checked(
-    session_message(payload),
+    numbered_session_message(1, payload),
     serialiser: test_support.automatic_serialiser(transport.Json),
     schema: option.Some(schema),
   )
@@ -82,8 +83,16 @@ fn rooted(message: WireType) -> transport.Schema {
 }
 
 fn session_message(payload: String) -> BitArray {
+  numbered_session_message(wire_support.unique_id(), payload)
+}
+
+fn numbered_session_message(id: Int, payload: String) -> BitArray {
   bit_array.from_string(
-    "{\"type\":\"session_message\",\"payload\":" <> payload <> "}",
+    "{\"type\":\"session_message\",\"id\":"
+    <> int.to_string(id)
+    <> ",\"payload\":"
+    <> payload
+    <> "}",
   )
 }
 
@@ -91,7 +100,9 @@ fn topic_message(topic_id: String, payload: String) -> BitArray {
   bit_array.from_string(
     "{\"type\":\"topic_message\",\"topic_id\":\""
     <> topic_id
-    <> "\",\"payload\":"
+    <> "\",\"id\":"
+    <> int.to_string(wire_support.unique_id())
+    <> ",\"payload\":"
     <> payload
     <> "}",
   )
@@ -104,7 +115,7 @@ fn topic_message(topic_id: String, payload: String) -> BitArray {
 pub fn schema_accepts_a_matching_payload_test() {
   test_support.register_fixtures()
   checked("{\"_\":\"SetName\",\"0\":\"a\"}", message_schema())
-  |> should.equal(Ok(transport.SessionMessage(payload: SetName("a"))))
+  |> should.equal(Ok(transport.SessionMessage(id: 1, payload: SetName("a"))))
 }
 
 pub fn schema_rejects_an_int_in_a_string_field_test() {
@@ -130,7 +141,7 @@ pub fn schema_rejects_a_wrong_field_count_test() {
 pub fn schema_checks_nested_custom_types_test() {
   test_support.register_fixtures()
   checked("{\"_\":\"SetTab\",\"0\":{\"_\":\"TabB\"}}", message_schema())
-  |> should.equal(Ok(transport.SessionMessage(payload: SetTab(TabB))))
+  |> should.equal(Ok(transport.SessionMessage(id: 1, payload: SetTab(TabB))))
   checked(
     "{\"_\":\"SetTab\",\"0\":{\"_\":\"SetName\",\"0\":\"x\"}}",
     message_schema(),
@@ -140,18 +151,24 @@ pub fn schema_checks_nested_custom_types_test() {
 
 pub fn schema_substitutes_type_parameters_test() {
   checked("{\"_\":\"Some\",\"0\":\"x\"}", option_schema(StringType))
-  |> should.equal(Ok(transport.SessionMessage(payload: option.Some("x"))))
+  |> should.equal(
+    Ok(transport.SessionMessage(id: 1, payload: option.Some("x"))),
+  )
   checked("{\"_\":\"Some\",\"0\":\"x\"}", option_schema(IntType))
   |> should.equal(Error(Nil))
   checked("{\"_\":\"None\"}", option_schema(IntType))
-  |> should.equal(Ok(transport.SessionMessage(payload: option.None)))
+  |> should.equal(Ok(transport.SessionMessage(id: 1, payload: option.None)))
 }
 
 pub fn schema_float_field_takes_a_whole_number_as_a_float_test() {
   checked("{\"_\":\"Some\",\"0\":2}", option_schema(FloatType))
-  |> should.equal(Ok(transport.SessionMessage(payload: option.Some(2.0))))
+  |> should.equal(
+    Ok(transport.SessionMessage(id: 1, payload: option.Some(2.0))),
+  )
   checked("{\"_\":\"Some\",\"0\":1.5}", option_schema(FloatType))
-  |> should.equal(Ok(transport.SessionMessage(payload: option.Some(1.5))))
+  |> should.equal(
+    Ok(transport.SessionMessage(id: 1, payload: option.Some(1.5))),
+  )
   checked("{\"_\":\"Some\",\"0\":1.5}", option_schema(IntType))
   |> should.equal(Error(Nil))
 }
@@ -162,7 +179,7 @@ pub fn schema_checks_collections_test() {
   checked("{\"0\":[1,2],\"1\":{\"_\":\"$dict\",\"0\":[[\"a\",true]]}}", schema)
   |> should.equal(
     Ok(
-      transport.SessionMessage(payload: #(
+      transport.SessionMessage(id: 1, payload: #(
         [1, 2],
         dict.from_list([#("a", True)]),
       )),
@@ -176,16 +193,18 @@ pub fn schema_checks_collections_test() {
 
 pub fn schema_checks_set_members_test() {
   checked("{\"_\":\"$set\",\"0\":[null]}", rooted(SetOf(NilType)))
-  |> should.equal(Ok(transport.SessionMessage(payload: set.from_list([Nil]))))
+  |> should.equal(
+    Ok(transport.SessionMessage(id: 1, payload: set.from_list([Nil]))),
+  )
   checked("{\"_\":\"$set\",\"0\":[1]}", rooted(SetOf(NilType)))
   |> should.equal(Error(Nil))
 }
 
 pub fn schema_anything_and_unbound_variables_pass_test() {
   checked("{\"0\":1,\"1\":\"a\"}", rooted(Anything))
-  |> should.equal(Ok(transport.SessionMessage(payload: #(1, "a"))))
+  |> should.equal(Ok(transport.SessionMessage(id: 1, payload: #(1, "a"))))
   checked("{\"0\":1,\"1\":\"a\"}", rooted(Variable(0)))
-  |> should.equal(Ok(transport.SessionMessage(payload: #(1, "a"))))
+  |> should.equal(Ok(transport.SessionMessage(id: 1, payload: #(1, "a"))))
 }
 
 pub fn schema_checks_message_pack_payloads_test() {
@@ -193,7 +212,7 @@ pub fn schema_checks_message_pack_payloads_test() {
   let serialiser = test_support.message_pack_serialiser()
   let bytes =
     transport.encode(
-      transport.SessionMessage(payload: AddTransitionItem(5)),
+      transport.SessionMessage(id: 1, payload: AddTransitionItem(5)),
       serialiser:,
     )
   let module = "lily/test_support"
@@ -213,7 +232,9 @@ pub fn schema_checks_message_pack_payloads_test() {
     serialiser:,
     schema: option.Some(message_schema()),
   )
-  |> should.equal(Ok(transport.SessionMessage(payload: AddTransitionItem(5))))
+  |> should.equal(
+    Ok(transport.SessionMessage(id: 1, payload: AddTransitionItem(5))),
+  )
   transport.decode_checked(bytes, serialiser:, schema: option.Some(as_string))
   |> should.equal(Error(Nil))
 }
@@ -267,9 +288,9 @@ pub fn server_drops_a_session_message_that_fails_the_schema_test() {
   raw()
   |> list.map(wire_support.decode_automatic)
   |> should.equal([
-    transport.Dropped(target: transport.Session),
-    transport.Dropped(target: transport.Session),
-    transport.Acknowledge(target: transport.Session, sequence: 1),
+    transport.Dropped(target: transport.Session, id: 0),
+    transport.Dropped(target: transport.Session, id: 0),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
   ])
 }
 
@@ -297,7 +318,7 @@ pub fn server_drops_a_topic_message_that_fails_the_schema_test() {
 
   raw()
   |> list.map(wire_support.decode_automatic)
-  |> should.equal([transport.Dropped(target: transport.Topic("chat"))])
+  |> should.equal([transport.Dropped(target: transport.Topic("chat"), id: 0)])
   events(app)
   |> should.equal([
     server.Diagnostic(
@@ -324,6 +345,6 @@ pub fn server_without_a_schema_accepts_any_shape_test() {
   raw()
   |> list.map(wire_support.decode_automatic)
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 1),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
   ])
 }

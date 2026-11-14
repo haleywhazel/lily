@@ -151,8 +151,9 @@ pub fn connection_status(
   })
 }
 
-/// Reloads the page on every `lily_dev` rebuild while developing. Does nothing
-/// unless the page is on `localhost`, `127.0.0.1` or `[::1]`.
+/// Reloads the page whenever the dev server's reload socket, on the page's port
+/// plus one, reports a rebuild. Does nothing unless the page is on
+/// `localhost`, `127.0.0.1` or `[::1]`.
 ///
 /// Pair with [`recover_after_reload`](#recover_after_reload) to keep simple
 /// model fields across the reload.

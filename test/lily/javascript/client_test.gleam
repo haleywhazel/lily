@@ -9,6 +9,8 @@ import gleam/bit_array
 @target(javascript)
 import gleam/list
 @target(javascript)
+import gleam/option
+@target(javascript)
 import gleam/string
 
 @target(javascript)
@@ -164,6 +166,81 @@ pub fn client_update_that_crashes_is_logged_and_the_queue_continues_test() {
 }
 
 // =============================================================================
+// AUTHORISE
+// =============================================================================
+
+@target(javascript)
+pub fn client_message_the_rule_refuses_is_neither_applied_nor_sent_test() {
+  test_support.reset_dom()
+  let runtime =
+    test_support.topic_store()
+    |> store.authorise(rule: fn(_sender, _target, message) {
+      message != test_support.Decrement
+    })
+    |> client.start
+  let #(handler, sent) = test_support.connect_capturing(runtime)
+  handler.opened()
+  let _ = sent()
+
+  client.dispatch(runtime)(test_support.Decrement)
+
+  client.model(runtime).count |> should.equal(0)
+  sent() |> should.equal([])
+}
+
+@target(javascript)
+pub fn client_message_the_rule_refuses_is_a_diagnostic_test() {
+  test_support.reset_dom()
+  let #(record, recorded) = wire_support.recorder()
+  let runtime =
+    test_support.topic_store()
+    |> store.authorise(rule: fn(_sender, _target, message) {
+      message != test_support.Decrement
+    })
+    |> client.start
+    |> client.observe(fn(event, _model) {
+      case event {
+        client.Diagnostic(level:, ..) -> record(level)
+        _ -> Nil
+      }
+    })
+
+  client.dispatch(runtime)(test_support.Decrement)
+
+  recorded() |> should.equal([transport.Warning])
+}
+
+@target(javascript)
+pub fn client_replayed_offline_message_skips_the_rule_test() {
+  test_support.reset_dom()
+  test_support.register_fixtures()
+  let frame =
+    transport.encode(
+      transport.SessionMessage(id: 1, payload: Increment),
+      serialiser: test_support.automatic_serialiser(transport.Json),
+    )
+  test_support.write_session_storage(
+    "test_queue_authorise",
+    "{\"protocol\":2,\"frames\":[\""
+      <> bit_array.base64_encode(frame, True)
+      <> "\"]}",
+  )
+  let runtime =
+    test_support.automatic_session_store(transport.Json)
+    |> store.authorise(rule: fn(_sender, _target, _message) { False })
+    |> client.start
+  let connector =
+    transport.connector(fn(_handler) {
+      transport.Channel(send: fn(_) { Error(Nil) }, close: fn() { Nil })
+    })
+    |> transport.with_offline_queue(storage_key: "test_queue_authorise")
+
+  let _ = client.connect(runtime, with: connector)
+
+  client.model(runtime).count |> should.equal(1)
+}
+
+// =============================================================================
 // HYDRATE
 // =============================================================================
 
@@ -288,7 +365,7 @@ pub fn client_dispatch_routed_to_a_topic_sends_topic_message_test() {
 
   sent()
   |> should.equal([
-    transport.TopicMessage(topic_id: "chat", payload: Increment),
+    transport.TopicMessage(topic_id: "chat", id: 1, payload: Increment),
   ])
 }
 
@@ -304,7 +381,11 @@ pub fn client_dispatch_routed_to_a_family_member_sends_its_concrete_id_test() {
 
   sent()
   |> should.equal([
-    transport.TopicMessage(topic_id: "room:42", payload: SetName("room:42")),
+    transport.TopicMessage(
+      topic_id: "room:42",
+      id: 1,
+      payload: SetName("room:42"),
+    ),
   ])
 }
 
@@ -319,7 +400,7 @@ pub fn client_dispatch_routed_to_the_session_sends_session_message_test() {
 
   sent()
   |> should.equal([
-    transport.SessionMessage(payload: test_support.IncrementSecondary),
+    transport.SessionMessage(id: 1, payload: test_support.IncrementSecondary),
   ])
 }
 
@@ -339,6 +420,86 @@ pub fn client_dispatch_routed_locally_is_applied_but_never_sent_test() {
 }
 
 // =============================================================================
+// SESSION RESUME
+// =============================================================================
+
+@target(javascript)
+pub fn client_reconnect_resyncs_with_the_last_resume_token_test() {
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let runtime = test_support.new_synced_runtime()
+  let #(handler, sent) = test_support.connect_capturing(runtime)
+  handler.opened()
+  receive(
+    handler,
+    transport.Connected(client_id: "c1", resume: "t1", answered: 0),
+  )
+  let _ = sent()
+
+  handler.closed()
+  handler.opened()
+
+  sent()
+  |> should.equal([
+    transport.Resync(
+      cursors: [transport.Unknown(transport.Session)],
+      resume: option.Some("t1"),
+      delivered: 0,
+    ),
+  ])
+}
+
+@target(javascript)
+pub fn client_resume_assigns_the_resumed_sessions_id_test() {
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let #(record, recorded) = wire_support.recorder()
+  let runtime =
+    test_support.new_synced_runtime()
+    |> client.observe(fn(event, _model) {
+      case event {
+        client.ClientIdAssigned(client_id:) -> record(client_id)
+        _ -> Nil
+      }
+    })
+  let #(handler, _sent) = test_support.connect_capturing(runtime)
+  handler.opened()
+
+  receive(
+    handler,
+    transport.Connected(client_id: "c2", resume: "t2", answered: 0),
+  )
+  receive(
+    handler,
+    transport.Connected(client_id: "c1", resume: "t2", answered: 0),
+  )
+
+  recorded() |> should.equal(["c2", "c1"])
+}
+
+@target(javascript)
+pub fn client_resume_settles_what_the_server_answered_without_replaying_it_test() {
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let #(runtime, handler, _sent) = chat_client()
+  receive(handler, wire_support.chat_snapshot(test_support.initial_model()))
+  client.dispatch(runtime)(Increment)
+  client.dispatch(runtime)(Increment)
+
+  // the first landed before the link died, the second didn't
+  receive(
+    handler,
+    transport.Connected(client_id: "c1", resume: "t1", answered: 1),
+  )
+  receive(
+    handler,
+    wire_support.chat_snapshot(Model(..test_support.initial_model(), count: 1)),
+  )
+
+  client.model(runtime).count |> should.equal(2)
+}
+
+// =============================================================================
 // SUBSCRIPTION DIFFING
 // =============================================================================
 
@@ -354,11 +515,15 @@ pub fn client_open_resyncs_the_session_and_every_wanted_topic_test() {
 
   sent()
   |> should.equal([
-    transport.Resync(cursors: [
-      transport.Unknown(transport.Session),
-      transport.Unknown(transport.Topic("chat")),
-      transport.Unknown(transport.Topic("room:1")),
-    ]),
+    transport.Resync(
+      cursors: [
+        transport.Unknown(transport.Session),
+        transport.Unknown(transport.Topic("chat")),
+        transport.Unknown(transport.Topic("room:1")),
+      ],
+      resume: option.None,
+      delivered: 0,
+    ),
   ])
 }
 
@@ -391,10 +556,14 @@ pub fn client_connector_that_opens_inside_connect_still_resyncs_test() {
     frame
   })
   |> should.equal([
-    transport.Resync(cursors: [
-      transport.Unknown(transport.Session),
-      transport.Unknown(transport.Topic("chat")),
-    ]),
+    transport.Resync(
+      cursors: [
+        transport.Unknown(transport.Session),
+        transport.Unknown(transport.Topic("chat")),
+      ],
+      resume: option.None,
+      delivered: 0,
+    ),
   ])
 
   // and the sync carries on from there
@@ -468,7 +637,11 @@ pub fn client_open_with_no_subscriptions_resyncs_only_the_session_test() {
 
   sent()
   |> should.equal([
-    transport.Resync(cursors: [transport.Unknown(transport.Session)]),
+    transport.Resync(
+      cursors: [transport.Unknown(transport.Session)],
+      resume: option.None,
+      delivered: 0,
+    ),
   ])
 }
 
@@ -591,10 +764,14 @@ pub fn client_reconnect_names_the_state_a_topic_was_confirmed_at_test() {
 
   sent()
   |> should.equal([
-    transport.Resync(cursors: [
-      transport.Unknown(transport.Session),
-      transport.Known(target: transport.Topic("chat"), epoch: 7, sequence: 4),
-    ]),
+    transport.Resync(
+      cursors: [
+        transport.Unknown(transport.Session),
+        transport.Known(target: transport.Topic("chat"), epoch: 7, sequence: 4),
+      ],
+      resume: option.None,
+      delivered: 0,
+    ),
   ])
 }
 
@@ -614,12 +791,14 @@ pub fn client_reconnect_after_an_unanswered_edit_asks_for_a_snapshot_test() {
   sent()
   |> list.first
   |> should.equal(
-    Ok(
-      transport.Resync(cursors: [
+    Ok(transport.Resync(
+      cursors: [
         transport.Unknown(transport.Session),
         transport.Unknown(transport.Topic("chat")),
-      ]),
-    ),
+      ],
+      resume: option.None,
+      delivered: 1,
+    )),
   )
 }
 
@@ -635,12 +814,19 @@ pub fn client_a_crossed_update_resyncs_without_a_cursor_test() {
     handler,
     transport.TopicUpdate(topic_id: "chat", sequence: 1, payload: Increment),
   )
-  receive(handler, transport.Acknowledge(transport.Topic("chat"), 2))
+  receive(
+    handler,
+    transport.Acknowledge(target: transport.Topic("chat"), sequence: 2, id: 1),
+  )
 
   sent()
   |> list.last
   |> should.equal(
-    Ok(transport.Resync(cursors: [transport.Unknown(transport.Topic("chat"))])),
+    Ok(transport.Resync(
+      cursors: [transport.Unknown(transport.Topic("chat"))],
+      resume: option.None,
+      delivered: 1,
+    )),
   )
 }
 
@@ -674,7 +860,9 @@ pub fn client_unchanged_keeps_the_slice_and_says_so_test() {
   // and edits go on as before
   client.dispatch(runtime)(Increment)
   sent()
-  |> should.equal([transport.TopicMessage(topic_id: "chat", payload: Increment)])
+  |> should.equal([
+    transport.TopicMessage(topic_id: "chat", id: 1, payload: Increment),
+  ])
 }
 
 @target(javascript)
@@ -694,10 +882,14 @@ pub fn client_reconnect_resyncs_everything_currently_wanted_test() {
 
   sent()
   |> should.equal([
-    transport.Resync(cursors: [
-      transport.Unknown(transport.Session),
-      transport.Unknown(transport.Topic("room:7")),
-    ]),
+    transport.Resync(
+      cursors: [
+        transport.Unknown(transport.Session),
+        transport.Unknown(transport.Topic("room:7")),
+      ],
+      resume: option.None,
+      delivered: 0,
+    ),
   ])
 }
 
@@ -744,7 +936,10 @@ pub fn client_snapshot_does_not_replay_an_acknowledged_message_test() {
   test_support.reset_mocks()
   let #(runtime, handler, _sent) = chat_client()
   client.dispatch(runtime)(Increment)
-  receive(handler, transport.Acknowledge(transport.Topic("chat"), 1))
+  receive(
+    handler,
+    transport.Acknowledge(target: transport.Topic("chat"), sequence: 1, id: 1),
+  )
 
   receive(
     handler,
@@ -807,11 +1002,18 @@ pub fn client_remote_update_under_a_pending_message_asks_for_a_snapshot_test() {
   receive(handler, transport.TopicUpdate("chat", 1, Claim("b")))
   client.model(runtime).name |> should.equal("a")
   sent() |> should.equal([])
-  receive(handler, transport.Acknowledge(transport.Topic("chat"), 2))
+  receive(
+    handler,
+    transport.Acknowledge(target: transport.Topic("chat"), sequence: 2, id: 1),
+  )
 
   sent()
   |> should.equal([
-    transport.Resync(cursors: [transport.Unknown(transport.Topic("chat"))]),
+    transport.Resync(
+      cursors: [transport.Unknown(transport.Topic("chat"))],
+      resume: option.None,
+      delivered: 1,
+    ),
   ])
   receive(
     handler,
@@ -826,7 +1028,10 @@ pub fn client_remote_update_with_nothing_pending_asks_for_nothing_test() {
   test_support.reset_mocks()
   let #(runtime, handler, sent) = chat_client()
   client.dispatch(runtime)(Claim("a"))
-  receive(handler, transport.Acknowledge(transport.Topic("chat"), 1))
+  receive(
+    handler,
+    transport.Acknowledge(target: transport.Topic("chat"), sequence: 1, id: 1),
+  )
   let _ = sent()
 
   receive(handler, transport.TopicUpdate("chat", 2, Claim("b")))
@@ -845,14 +1050,62 @@ pub fn client_remote_update_waits_for_every_pending_message_test() {
   receive(handler, transport.TopicUpdate("chat", 1, Increment))
   let _ = sent()
 
-  receive(handler, transport.Acknowledge(transport.Topic("chat"), 2))
+  receive(
+    handler,
+    transport.Acknowledge(target: transport.Topic("chat"), sequence: 2, id: 1),
+  )
   sent() |> should.equal([])
-  receive(handler, transport.Acknowledge(transport.Topic("chat"), 3))
+  receive(
+    handler,
+    transport.Acknowledge(target: transport.Topic("chat"), sequence: 3, id: 2),
+  )
 
   sent()
   |> should.equal([
-    transport.Resync(cursors: [transport.Unknown(transport.Topic("chat"))]),
+    transport.Resync(
+      cursors: [transport.Unknown(transport.Topic("chat"))],
+      resume: option.None,
+      delivered: 2,
+    ),
   ])
+}
+
+@target(javascript)
+pub fn client_answers_across_targets_settle_whatever_their_order_test() {
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let #(runtime, handler, sent) = chat_client()
+  client.dispatch(runtime)(test_support.IncrementSecondary)
+  client.dispatch(runtime)(Increment)
+  receive(
+    handler,
+    transport.Acknowledge(target: transport.Topic("chat"), sequence: 1, id: 2),
+  )
+  receive(
+    handler,
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 1),
+  )
+  let _ = sent()
+
+  // with nothing left pending, another client's update needs no snapshot
+  receive(handler, transport.TopicUpdate("chat", 2, Increment))
+  receive(handler, transport.SessionUpdate(2, test_support.IncrementSecondary))
+
+  sent() |> should.equal([])
+}
+
+@target(javascript)
+pub fn client_an_answer_to_nothing_pending_is_ignored_test() {
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let #(runtime, handler, sent) = chat_client()
+  client.dispatch(runtime)(Increment)
+  let _ = sent()
+
+  receive(handler, transport.Dropped(target: transport.Topic("chat"), id: 9))
+
+  sent() |> should.equal([])
+  client.model(runtime).count |> should.equal(1)
 }
 
 @target(javascript)
@@ -863,11 +1116,15 @@ pub fn client_dropped_message_rolls_back_through_a_snapshot_test() {
   client.dispatch(runtime)(Increment)
   let _ = sent()
 
-  receive(handler, transport.Dropped(transport.Topic("chat")))
+  receive(handler, transport.Dropped(target: transport.Topic("chat"), id: 1))
 
   sent()
   |> should.equal([
-    transport.Resync(cursors: [transport.Unknown(transport.Topic("chat"))]),
+    transport.Resync(
+      cursors: [transport.Unknown(transport.Topic("chat"))],
+      resume: option.None,
+      delivered: 1,
+    ),
   ])
   receive(handler, wire_support.chat_snapshot(test_support.initial_model()))
   client.model(runtime).count |> should.equal(0)
@@ -882,7 +1139,7 @@ pub fn client_dropped_on_a_topic_not_joined_asks_for_nothing_test() {
   client.dispatch(runtime)(SetName("room:1"))
   let _ = sent()
 
-  receive(handler, transport.Dropped(transport.Topic("room:1")))
+  receive(handler, transport.Dropped(target: transport.Topic("room:1"), id: 1))
 
   sent() |> should.equal([])
 }
@@ -898,23 +1155,32 @@ pub fn client_a_rejected_topic_is_cleared_by_a_snapshot_test() {
     transport.Rejected(topic_id: "chat", reason: transport.NotFound),
   )
   client.dispatch(runtime)(Increment)
-  receive(handler, transport.Dropped(transport.Topic("chat")))
+  receive(handler, transport.Dropped(target: transport.Topic("chat"), id: 1))
   // refused, a resync would join it
   sent()
-  |> should.equal([transport.TopicMessage(topic_id: "chat", payload: Increment)])
+  |> should.equal([
+    transport.TopicMessage(topic_id: "chat", id: 1, payload: Increment),
+  ])
 
   receive(handler, wire_support.chat_snapshot(test_support.initial_model()))
   client.model(runtime).count |> should.equal(0)
   client.dispatch(runtime)(Increment)
-  receive(handler, transport.Acknowledge(transport.Topic("chat"), 1))
+  receive(
+    handler,
+    transport.Acknowledge(target: transport.Topic("chat"), sequence: 1, id: 2),
+  )
   client.dispatch(runtime)(Increment)
-  receive(handler, transport.Dropped(transport.Topic("chat")))
+  receive(handler, transport.Dropped(target: transport.Topic("chat"), id: 3))
 
   sent()
   |> should.equal([
-    transport.TopicMessage(topic_id: "chat", payload: Increment),
-    transport.TopicMessage(topic_id: "chat", payload: Increment),
-    transport.Resync(cursors: [transport.Unknown(transport.Topic("chat"))]),
+    transport.TopicMessage(topic_id: "chat", id: 2, payload: Increment),
+    transport.TopicMessage(topic_id: "chat", id: 3, payload: Increment),
+    transport.Resync(
+      cursors: [transport.Unknown(transport.Topic("chat"))],
+      resume: option.None,
+      delivered: 3,
+    ),
   ])
   receive(
     handler,
@@ -930,23 +1196,27 @@ pub fn client_dropped_while_closed_waits_for_the_reconnect_test() {
   let #(runtime, handler, sent) = chat_client()
   client.dispatch(runtime)(Increment)
   handler.closed()
-  receive(handler, transport.Dropped(transport.Topic("chat")))
+  receive(handler, transport.Dropped(target: transport.Topic("chat"), id: 1))
   client.dispatch(runtime)(Increment)
   // nothing asked for while closed
   sent()
   |> should.equal([
-    transport.TopicMessage(topic_id: "chat", payload: Increment),
-    transport.TopicMessage(topic_id: "chat", payload: Increment),
+    transport.TopicMessage(topic_id: "chat", id: 1, payload: Increment),
+    transport.TopicMessage(topic_id: "chat", id: 2, payload: Increment),
   ])
 
   handler.opened()
 
   sent()
   |> should.equal([
-    transport.Resync(cursors: [
-      transport.Unknown(transport.Session),
-      transport.Unknown(transport.Topic("chat")),
-    ]),
+    transport.Resync(
+      cursors: [
+        transport.Unknown(transport.Session),
+        transport.Unknown(transport.Topic("chat")),
+      ],
+      resume: option.None,
+      delivered: 2,
+    ),
   ])
 }
 
@@ -1023,7 +1293,11 @@ pub fn client_forced_message_pack_writes_message_pack_on_localhost_test() {
   sent()
   |> should.equal([
     transport.encode(
-      transport.Resync(cursors: [transport.Unknown(transport.Session)]),
+      transport.Resync(
+        cursors: [transport.Unknown(transport.Session)],
+        resume: option.None,
+        delivered: 0,
+      ),
       serialiser: test_support.message_pack_serialiser(),
     ),
   ])
@@ -1049,7 +1323,7 @@ pub fn client_json_store_reads_message_pack_frames_test() {
   let message_pack = test_support.message_pack_serialiser()
 
   handler.received(transport.encode(
-    transport.Connected(client_id: "c1"),
+    transport.Connected(client_id: "c1", resume: "", answered: 0),
     serialiser: message_pack,
   ))
   handler.received(transport.encode(
@@ -1091,12 +1365,14 @@ pub fn client_json_store_replays_a_message_pack_offline_queue_test() {
   test_support.register_fixtures()
   let frame =
     transport.encode(
-      transport.SessionMessage(payload: Increment),
+      transport.SessionMessage(id: 1, payload: Increment),
       serialiser: test_support.message_pack_serialiser(),
     )
   test_support.write_session_storage(
     "test_queue_cross_format",
-    "[\"" <> bit_array.base64_encode(frame, True) <> "\"]",
+    "{\"protocol\":2,\"frames\":[\""
+      <> bit_array.base64_encode(frame, True)
+      <> "\"]}",
   )
   let runtime =
     client.start(test_support.automatic_session_store(transport.Json))

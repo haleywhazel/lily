@@ -84,7 +84,7 @@ pub fn crashing_observer_on_message_still_acknowledges_test() {
   // ack before observers, meaning a client never waits on an applied message
   frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 1),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
   ])
 }
 
@@ -277,7 +277,7 @@ pub fn crashing_topic_update_drops_the_message_test() {
 
   // the sender hears of it, topic and subscriber both survive
   frames()
-  |> should.equal([transport.Dropped(target: transport.Topic("room:1"))])
+  |> should.equal([transport.Dropped(target: transport.Topic("room:1"), id: 0)])
   test_support.subscriber_count(app, "room:1")
   |> should.equal(1)
 }
@@ -343,7 +343,7 @@ pub fn crashing_session_update_drops_the_message_test() {
   wire_support.session_message(connection, Increment)
 
   frames()
-  |> should.equal([transport.Dropped(target: transport.Session)])
+  |> should.equal([transport.Dropped(target: transport.Session, id: 0)])
   test_support.client_count(app)
   |> should.equal(1)
 }

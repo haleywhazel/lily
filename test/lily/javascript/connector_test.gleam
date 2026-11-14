@@ -8,6 +8,8 @@
 import gleam/bit_array
 @target(javascript)
 import gleam/list
+@target(javascript)
+import gleam/option
 
 @target(javascript)
 import gleeunit/should
@@ -222,7 +224,10 @@ pub fn offline_queue_passes_a_delivered_frame_straight_through_test() {
 pub fn offline_queue_pending_reads_frames_left_by_an_earlier_page_test() {
   test_support.reset_dom()
   // `AQID` is base64 for bytes 1, 2, 3
-  test_support.write_session_storage("test_queue_d", "[\"AQID\"]")
+  test_support.write_session_storage(
+    "test_queue_d",
+    "{\"protocol\":2,\"frames\":[\"AQID\"]}",
+  )
   let connector =
     transport.connector(fn(_handler) {
       transport.Channel(send: fn(_) { Ok(Nil) }, close: fn() { Nil })
@@ -236,7 +241,10 @@ pub fn offline_queue_pending_reads_frames_left_by_an_earlier_page_test() {
 pub fn offline_queue_keeps_an_earlier_page_frames_when_a_send_fails_test() {
   test_support.reset_dom()
   // `AQID` is base64 for bytes 1, 2, 3
-  test_support.write_session_storage("test_queue_e", "[\"AQID\"]")
+  test_support.write_session_storage(
+    "test_queue_e",
+    "{\"protocol\":2,\"frames\":[\"AQID\"]}",
+  )
   let online = test_support.new(False)
   let delivered = test_support.new([])
   let handler_cell = test_support.new(quiet_handler())
@@ -257,6 +265,79 @@ pub fn offline_queue_keeps_an_earlier_page_frames_when_a_send_fails_test() {
 }
 
 @target(javascript)
+pub fn offline_queue_drops_frames_queued_before_message_ids_test() {
+  test_support.reset_dom()
+  // a bare array is a version 1 queue, whose frames carry no ids
+  test_support.write_session_storage("test_queue_v1", "[\"AQID\"]")
+  let connector =
+    transport.connector(fn(_handler) {
+      transport.Channel(send: fn(_) { Ok(Nil) }, close: fn() { Nil })
+    })
+    |> transport.with_offline_queue(storage_key: "test_queue_v1")
+
+  transport.pending(connector) |> should.equal([])
+}
+
+@target(javascript)
+pub fn offline_queue_requeue_replaces_what_is_held_test() {
+  test_support.reset_dom()
+  test_support.write_session_storage("test_queue_requeue", "")
+  let connector =
+    transport.connector(fn(_handler) {
+      transport.Channel(send: fn(_) { Error(Nil) }, close: fn() { Nil })
+    })
+    |> transport.with_offline_queue(storage_key: "test_queue_requeue")
+  let channel = transport.run_connector(connector, quiet_handler())
+  let _ = channel.send(<<9>>)
+
+  transport.requeue(connector, [<<1>>, <<2>>], delivered: 0)
+
+  transport.pending(connector) |> should.equal([<<1>>, <<2>>])
+}
+
+@target(javascript)
+pub fn offline_queue_requeue_sends_in_order_on_the_next_open_test() {
+  test_support.reset_dom()
+  test_support.write_session_storage("test_queue_requeue_open", "")
+  let online = test_support.new(False)
+  let delivered = test_support.new([])
+  let handler_cell = test_support.new(quiet_handler())
+  let connector =
+    recording_connector(online, delivered, handler_cell)
+    |> transport.with_offline_queue(storage_key: "test_queue_requeue_open")
+  let _ = transport.run_connector(connector, quiet_handler())
+
+  transport.requeue(connector, [<<1>>, <<2>>], delivered: 0)
+  test_support.set(online, True)
+  test_support.get(handler_cell).opened()
+
+  test_support.get(delivered)
+  |> list.reverse
+  |> should.equal([<<1>>, <<2>>])
+}
+
+@target(javascript)
+pub fn offline_queue_requeue_keeps_what_was_on_the_wire_for_a_reload_test() {
+  test_support.reset_dom()
+  test_support.write_session_storage("test_queue_requeue_reload", "")
+  let connector =
+    transport.connector(fn(_handler) {
+      transport.Channel(send: fn(_) { Error(Nil) }, close: fn() { Nil })
+    })
+    |> transport.with_offline_queue(storage_key: "test_queue_requeue_reload")
+  let _ = transport.run_connector(connector, quiet_handler())
+
+  transport.requeue(connector, [<<1>>], delivered: 4)
+
+  transport.connector(fn(_handler) {
+    transport.Channel(send: fn(_) { Error(Nil) }, close: fn() { Nil })
+  })
+  |> transport.with_offline_queue(storage_key: "test_queue_requeue_reload")
+  |> transport.pending_delivered
+  |> should.equal(4)
+}
+
+@target(javascript)
 pub fn plain_connector_has_nothing_pending_test() {
   transport.connector(fn(_handler) {
     transport.Channel(send: fn(_) { Ok(Nil) }, close: fn() { Nil })
@@ -274,12 +355,14 @@ pub fn connect_applies_edits_left_in_the_queue_and_sends_them_once_test() {
   test_support.reset_dom()
   let frame =
     transport.encode(
-      transport.SessionMessage(payload: test_support.Increment),
+      transport.SessionMessage(id: 1, payload: test_support.Increment),
       serialiser: test_support.custom_serialiser(),
     )
   test_support.write_session_storage(
     "test_queue_replay",
-    "[\"" <> bit_array.base64_encode(frame, True) <> "\"]",
+    "{\"protocol\":2,\"frames\":[\""
+      <> bit_array.base64_encode(frame, True)
+      <> "\"]}",
   )
   let runtime = test_support.new_synced_runtime()
   let online = test_support.new(True)
@@ -330,12 +413,24 @@ pub fn connect_sends_the_resync_ahead_of_edits_queued_offline_test() {
   |> list.reverse
   |> decode_all
   |> should.equal([
-    transport.Resync(cursors: [
-      transport.Unknown(transport.Session),
-      transport.Unknown(transport.Topic("chat")),
-    ]),
-    transport.TopicMessage(topic_id: "chat", payload: test_support.Increment),
-    transport.TopicMessage(topic_id: "chat", payload: test_support.Increment),
+    transport.Resync(
+      cursors: [
+        transport.Unknown(transport.Session),
+        transport.Unknown(transport.Topic("chat")),
+      ],
+      resume: option.None,
+      delivered: 0,
+    ),
+    transport.TopicMessage(
+      topic_id: "chat",
+      id: 1,
+      payload: test_support.Increment,
+    ),
+    transport.TopicMessage(
+      topic_id: "chat",
+      id: 2,
+      payload: test_support.Increment,
+    ),
   ])
 }
 
@@ -345,11 +440,14 @@ pub fn connect_sends_the_resync_ahead_of_a_reloaded_queue_test() {
   let frame =
     encode(transport.TopicMessage(
       topic_id: "chat",
+      id: 1,
       payload: test_support.Increment,
     ))
   test_support.write_session_storage(
     "test_queue_reloaded_order",
-    "[\"" <> bit_array.base64_encode(frame, True) <> "\"]",
+    "{\"protocol\":2,\"frames\":[\""
+      <> bit_array.base64_encode(frame, True)
+      <> "\"]}",
   )
   let runtime = chat_runtime()
   let online = test_support.new(True)
@@ -367,12 +465,65 @@ pub fn connect_sends_the_resync_ahead_of_a_reloaded_queue_test() {
   |> list.reverse
   |> decode_all
   |> should.equal([
-    transport.Resync(cursors: [
-      transport.Unknown(transport.Session),
-      transport.Unknown(transport.Topic("chat")),
-    ]),
-    transport.TopicMessage(topic_id: "chat", payload: test_support.Increment),
+    transport.Resync(
+      cursors: [
+        transport.Unknown(transport.Session),
+        transport.Unknown(transport.Topic("chat")),
+      ],
+      resume: option.None,
+      delivered: 0,
+    ),
+    transport.TopicMessage(
+      topic_id: "chat",
+      id: 1,
+      payload: test_support.Increment,
+    ),
   ])
+}
+
+@target(javascript)
+pub fn connect_resyncs_with_what_an_earlier_page_put_on_the_wire_test() {
+  // its retransmits may have landed, a fresh session refuses them
+  test_support.reset_dom()
+  let frame =
+    encode(transport.TopicMessage(
+      topic_id: "chat",
+      id: 3,
+      payload: test_support.Increment,
+    ))
+  test_support.write_session_storage(
+    "test_queue_reloaded_delivered",
+    "{\"protocol\":2,\"frames\":[\""
+      <> bit_array.base64_encode(frame, True)
+      <> "\"],\"delivered\":3}",
+  )
+  let runtime = chat_runtime()
+  let online = test_support.new(True)
+  let delivered = test_support.new([])
+  let handler_cell = test_support.new(quiet_handler())
+  let connector =
+    recording_connector(online, delivered, handler_cell)
+    |> transport.with_offline_queue(
+      storage_key: "test_queue_reloaded_delivered",
+    )
+  let _ = client.connect(runtime, with: connector)
+
+  test_support.get(handler_cell).opened()
+
+  test_support.get(delivered)
+  |> list.reverse
+  |> decode_all
+  |> list.first
+  |> should.equal(
+    Ok(transport.Resync(
+      cursors: [
+        transport.Unknown(transport.Session),
+        transport.Unknown(transport.Topic("chat")),
+      ],
+      resume: option.None,
+      delivered: 3,
+    )),
+  )
 }
 
 @target(javascript)
@@ -382,11 +533,14 @@ pub fn connect_keeps_a_reloaded_edit_on_top_of_the_snapshot_test() {
   let frame =
     encode(transport.TopicMessage(
       topic_id: "chat",
+      id: 1,
       payload: test_support.Increment,
     ))
   test_support.write_session_storage(
     "test_queue_reloaded_pending",
-    "[\"" <> bit_array.base64_encode(frame, True) <> "\"]",
+    "{\"protocol\":2,\"frames\":[\""
+      <> bit_array.base64_encode(frame, True)
+      <> "\"]}",
   )
   let runtime = chat_runtime()
   let online = test_support.new(True)
@@ -410,7 +564,11 @@ pub fn connect_keeps_a_reloaded_edit_on_top_of_the_snapshot_test() {
   )
   client.model(runtime).count |> should.equal(1)
   handler.received(
-    encode(transport.Acknowledge(target: transport.Topic("chat"), sequence: 1)),
+    encode(transport.Acknowledge(
+      target: transport.Topic("chat"),
+      sequence: 1,
+      id: 1,
+    )),
   )
   handler.received(
     encode(transport.Snapshot(

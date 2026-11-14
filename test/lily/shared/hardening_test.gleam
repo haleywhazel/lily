@@ -8,6 +8,7 @@
 import gleam/bit_array
 @target(erlang)
 import gleam/erlang/process
+import gleam/int
 import gleam/list
 import gleam/option
 import gleam/result
@@ -97,7 +98,11 @@ fn logged(needle: String, thunk: fn() -> Nil) -> Int {
 
 fn session_message(payload: String) -> BitArray {
   bit_array.from_string(
-    "{\"type\":\"session_message\",\"payload\":" <> payload <> "}",
+    "{\"type\":\"session_message\",\"id\":"
+    <> int.to_string(wire_support.unique_id())
+    <> ",\"payload\":"
+    <> payload
+    <> "}",
   )
 }
 
@@ -129,7 +134,7 @@ pub fn hardening_an_oversized_frame_is_refused_before_decode_test() {
 
   // refused unread, its head still says which edit to roll back
   frames()
-  |> should.equal([transport.Dropped(target: transport.Session)])
+  |> should.equal([transport.Dropped(target: transport.Session, id: 0)])
   test_support.get(count)
   |> should.equal(0)
   events(app)
@@ -152,7 +157,7 @@ pub fn hardening_a_frame_is_decoded_once_in_the_callers_process_test() {
 
   frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 1),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
   ])
   test_support.get(count)
   |> should.equal(2)
@@ -201,14 +206,14 @@ pub fn hardening_a_payload_the_json_parser_refuses_is_still_dropped_test() {
 
   raw()
   |> list.map(wire_support.decode_automatic)
-  |> should.equal([transport.Dropped(target: transport.Session)])
+  |> should.equal([transport.Dropped(target: transport.Session, id: 0)])
 }
 
 pub fn hardening_a_frame_int_past_the_wire_range_is_refused_test() {
   let serialiser = test_support.automatic_serialiser(transport.Json)
   transport.decode(
     <<
-      "{\"type\":\"acknowledge\",\"target\":{\"kind\":\"session\"},\"sequence\":9007199254740993}",
+      "{\"type\":\"acknowledge\",\"target\":{\"kind\":\"session\"},\"sequence\":9007199254740993,\"id\":1}",
     >>,
     serialiser:,
   )
@@ -248,7 +253,7 @@ pub fn hardening_an_undecodable_payload_without_a_schema_is_dropped_test() {
 
   raw()
   |> list.map(wire_support.decode_automatic)
-  |> should.equal([transport.Dropped(target: transport.Session)])
+  |> should.equal([transport.Dropped(target: transport.Session, id: 0)])
   events(app)
   |> should.equal([
     server.Diagnostic(
@@ -268,10 +273,11 @@ pub fn hardening_duplicate_session_cursors_send_one_snapshot_test() {
 
   wire_support.send(
     c1,
-    transport.Resync(cursors: list.repeat(
-      transport.Unknown(transport.Session),
-      50,
-    )),
+    transport.Resync(
+      cursors: list.repeat(transport.Unknown(transport.Session), 50),
+      resume: option.None,
+      delivered: 0,
+    ),
   )
 
   frames()
@@ -288,10 +294,11 @@ pub fn hardening_duplicate_topic_cursors_send_one_snapshot_test() {
 
   wire_support.send(
     c1,
-    transport.Resync(cursors: list.repeat(
-      transport.Unknown(transport.Topic("chat")),
-      50,
-    )),
+    transport.Resync(
+      cursors: list.repeat(transport.Unknown(transport.Topic("chat")), 50),
+      resume: option.None,
+      delivered: 0,
+    ),
   )
 
   frames()
@@ -393,7 +400,7 @@ pub fn hardening_stopping_an_idle_topic_leaves_other_subscriptions_test() -> Lat
   wire_support.topic_message(c1, "room:2", SetName("room:2"))
   frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Topic("room:2"), sequence: 1),
+    transport.Acknowledge(target: transport.Topic("room:2"), sequence: 1, id: 0),
   ])
 }
 
@@ -474,7 +481,7 @@ pub fn hardening_a_stale_disconnect_does_not_remove_the_new_client_test() {
   wire_support.session_message(new, Increment)
   new_frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 1),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
   ])
 }
 
@@ -502,7 +509,7 @@ pub fn hardening_a_connection_rebuilt_from_an_id_reaches_the_current_client_test
 
   new_frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 1),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
   ])
 }
 
@@ -569,8 +576,8 @@ pub fn hardening_a_message_over_the_rate_limit_waits_its_turn_test() -> Later {
 
   frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 1),
-    transport.Acknowledge(target: transport.Session, sequence: 2),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
+    transport.Acknowledge(target: transport.Session, sequence: 2, id: 0),
   ])
   events(app)
   |> list.filter(is_throttled)
@@ -580,7 +587,7 @@ pub fn hardening_a_message_over_the_rate_limit_waits_its_turn_test() -> Later {
   use <- wire_support.after(100)
   frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 3),
+    transport.Acknowledge(target: transport.Session, sequence: 3, id: 0),
   ])
 }
 
@@ -602,9 +609,9 @@ pub fn hardening_past_the_hold_a_message_is_dropped_in_order_test() -> Later {
   use <- wire_support.after(100)
   frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 3),
-    transport.Acknowledge(target: transport.Session, sequence: 4),
-    transport.Dropped(target: transport.Session),
+    transport.Acknowledge(target: transport.Session, sequence: 3, id: 0),
+    transport.Acknowledge(target: transport.Session, sequence: 4, id: 0),
+    transport.Dropped(target: transport.Session, id: 0),
   ])
 }
 
@@ -622,7 +629,7 @@ pub fn hardening_the_rate_limit_refills_over_time_test() {
 
   frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 2),
+    transport.Acknowledge(target: transport.Session, sequence: 2, id: 0),
   ])
 }
 
@@ -638,7 +645,7 @@ pub fn hardening_a_rate_limited_resync_is_deferred_not_dropped_test() -> Later {
   wire_support.resync_session(c1)
   frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 1),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
   ])
 
   advance(time, 10)
@@ -659,7 +666,10 @@ pub fn hardening_a_resync_costs_its_distinct_cursors_test() {
     |> list.flatten
     |> list.map(transport.Unknown)
 
-  wire_support.send(c1, transport.Resync(cursors:))
+  wire_support.send(
+    c1,
+    transport.Resync(cursors:, resume: option.None, delivered: 0),
+  )
   wire_support.session_message(c1, IncrementSecondary)
   wire_support.session_message(c1, IncrementSecondary)
 
@@ -668,7 +678,7 @@ pub fn hardening_a_resync_costs_its_distinct_cursors_test() {
   |> should.equal(2)
   list.filter(received, fn(frame) { !wire_support.is_snapshot(frame) })
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 1),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
   ])
 }
 
@@ -733,7 +743,7 @@ pub fn hardening_a_held_subscribe_over_the_id_cap_is_refused_in_turn_test() -> L
   wire_support.subscribe(c1, "room:123456789")
   frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 1),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
   ])
 
   advance(time, 10)
@@ -801,7 +811,7 @@ pub fn hardening_a_big_message_and_its_snapshot_cost_their_size_test() {
   |> should.equal(1)
   list.filter(received, fn(frame) { !wire_support.is_snapshot(frame) })
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 1),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
   ])
 }
 
@@ -819,13 +829,16 @@ pub fn hardening_a_quiet_clients_big_edit_is_decoded_after_it_refilled_test() {
   let big = string.repeat("x", 70_000)
   server.incoming(
     c1,
-    bytes: wire_support.encode(transport.SessionMessage(SetName(big))),
+    bytes: wire_support.encode(transport.SessionMessage(
+      id: wire_support.unique_id(),
+      payload: SetName(big),
+    )),
   )
   |> should.equal(server.Accepted)
 
   frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 4),
+    transport.Acknowledge(target: transport.Session, sequence: 4, id: 0),
   ])
 }
 
@@ -857,8 +870,14 @@ pub fn hardening_an_empty_resync_still_costs_a_frame_test() {
   let app = test_support.start_server(builder)
   let #(c1, frames) = wire_support.open(app, "c1")
 
-  wire_support.send(c1, transport.Resync(cursors: []))
-  wire_support.send(c1, transport.Resync(cursors: []))
+  wire_support.send(
+    c1,
+    transport.Resync(cursors: [], resume: option.None, delivered: 0),
+  )
+  wire_support.send(
+    c1,
+    transport.Resync(cursors: [], resume: option.None, delivered: 0),
+  )
   wire_support.session_message(c1, Increment)
 
   frames()
@@ -889,7 +908,7 @@ pub fn hardening_a_big_topic_snapshot_is_charged_to_the_subscriber_test() {
 
   frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 1),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
   ])
 }
 
@@ -913,11 +932,11 @@ pub fn hardening_held_frames_past_the_byte_cap_are_dropped_in_order_test() -> La
   use <- wire_support.after(200)
   frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 31),
-    transport.Acknowledge(target: transport.Session, sequence: 32),
-    transport.Acknowledge(target: transport.Session, sequence: 33),
-    transport.Acknowledge(target: transport.Session, sequence: 34),
-    transport.Dropped(target: transport.Session),
+    transport.Acknowledge(target: transport.Session, sequence: 31, id: 0),
+    transport.Acknowledge(target: transport.Session, sequence: 32, id: 0),
+    transport.Acknowledge(target: transport.Session, sequence: 33, id: 0),
+    transport.Acknowledge(target: transport.Session, sequence: 34, id: 0),
+    transport.Dropped(target: transport.Session, id: 0),
   ])
 }
 
@@ -988,7 +1007,7 @@ pub fn hardening_a_rate_limit_of_zero_still_works_test() {
 
   frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 1),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
   ])
 }
 
@@ -1086,23 +1105,7 @@ pub fn hardening_a_diagnostic_escapes_and_truncates_the_client_id_test() {
 }
 
 pub fn hardening_a_crashing_topic_update_is_diagnosed_through_the_server_test() {
-  let crashing =
-    store.new(init: test_support.initial_model(), update: fn(model, message) {
-      case message {
-        Decrement -> panic as "update blew up"
-        _ -> test_support.update(model, message)
-      }
-    })
-    |> store.sync_with(
-      route: test_support.topic_route,
-      serialiser: test_support.custom_serialiser(),
-    )
-    |> store.topic(
-      id: "chat",
-      get: fn(model) { model },
-      set: fn(_, model) { model },
-      access: store.Open,
-    )
+  let crashing = test_support.crashing_topic_store()
   let #(builder, events) =
     wire_support.observed(server.new(crashing, origins: server.AnyOrigin))
   let app = test_support.start_server(builder)
@@ -1114,9 +1117,8 @@ pub fn hardening_a_crashing_topic_update_is_diagnosed_through_the_server_test() 
   wire_support.topic_message(c1, "chat", Decrement)
 
   frames()
-  |> should.equal([transport.Dropped(target: transport.Topic("chat"))])
-  let assert [server.TopicMessageReceived(..), server.Diagnostic(message:, ..)] =
-    events(app)
+  |> should.equal([transport.Dropped(target: transport.Topic("chat"), id: 0)])
+  let assert [server.Diagnostic(message:, ..)] = events(app)
   string.starts_with(
     message,
     "dropped malformed topic message on \"chat\" from \"c1\": ",
@@ -1131,13 +1133,27 @@ pub fn hardening_a_crashing_topic_update_is_diagnosed_through_the_server_test() 
 pub fn hardening_incoming_says_closed_once_the_id_is_taken_test() {
   let app = test_support.new_server()
   let #(old, _old_frames) = wire_support.open(app, "c1")
-  server.incoming(old, bytes: wire_support.encode(transport.Resync([])))
+  server.incoming(
+    old,
+    bytes: wire_support.encode(transport.Resync(
+      cursors: [],
+      resume: option.None,
+      delivered: 0,
+    )),
+  )
   |> should.equal(server.Accepted)
 
   let _ = wire_support.open(app, "c1")
   wire_support.settle(app)
 
-  server.incoming(old, bytes: wire_support.encode(transport.Resync([])))
+  server.incoming(
+    old,
+    bytes: wire_support.encode(transport.Resync(
+      cursors: [],
+      resume: option.None,
+      delivered: 0,
+    )),
+  )
   |> should.equal(server.Closed)
 }
 
@@ -1147,7 +1163,14 @@ pub fn hardening_incoming_says_closed_once_the_server_stops_test() {
 
   wire_support.stop(app)
 
-  server.incoming(c1, bytes: wire_support.encode(transport.Resync([])))
+  server.incoming(
+    c1,
+    bytes: wire_support.encode(transport.Resync(
+      cursors: [],
+      resume: option.None,
+      delivered: 0,
+    )),
+  )
   |> should.equal(server.Closed)
 }
 
@@ -1157,12 +1180,16 @@ pub fn hardening_incoming_says_too_large_and_accepts_a_throttled_frame_test() {
   let #(builder, _time) =
     clocked(
       test_support.session_builder()
-      |> server.max_frame_bytes(bytes: 64)
+      |> server.max_frame_bytes(bytes: 96)
       |> server.rate_limit(1, burst: 1),
     )
   let app = test_support.start_server(builder)
   let #(c1, _frames) = wire_support.open(app, "c1")
-  let message = wire_support.encode(transport.SessionMessage(Increment))
+  let message =
+    wire_support.encode(transport.SessionMessage(
+      id: wire_support.unique_id(),
+      payload: Increment,
+    ))
 
   server.incoming(c1, bytes: <<0:size(1000)-unit(8)>>)
   |> should.equal(server.TooLarge)
@@ -1178,8 +1205,8 @@ pub fn hardening_the_automatic_serialiser_refuses_server_tags_unread_test() {
   let frames = [
     "{\"type\":\"snapshot\",\"target\":{\"kind\":\"session\"},\"sequence\":1,\"state\":{\"_\":\"NoSuchConstructorAnywhere\"}}",
     "{\"type\":\"version\",\"hash\":\"x\",\"protocol\":1}",
-    "{\"type\":\"acknowledge\",\"target\":{\"kind\":\"session\"},\"sequence\":1}",
-    "{\"type\":\"connected\",\"client_id\":\"x\"}",
+    "{\"type\":\"acknowledge\",\"target\":{\"kind\":\"session\"},\"sequence\":1,\"id\":1}",
+    "{\"type\":\"connected\",\"client_id\":\"x\",\"resume\":\"\",\"answered\":0}",
   ]
   list.each(frames, fn(frame) {
     transport.decode_inbound(

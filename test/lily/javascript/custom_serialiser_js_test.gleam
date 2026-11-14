@@ -27,7 +27,7 @@ pub fn open_serialiser_client_sends_json_frames_test() {
   client.dispatch(runtime)(Increment)
 
   sent()
-  |> should.equal([transport.SessionMessage(payload: Increment)])
+  |> should.equal([transport.SessionMessage(id: 1, payload: Increment)])
 }
 
 @target(javascript)
@@ -76,7 +76,7 @@ pub fn open_serialiser_client_reports_the_client_id_test() {
   let #(handler, _sent) = test_support.connect_capturing(runtime)
 
   handler.received(transport.encode(
-    transport.Connected(client_id: "abc"),
+    transport.Connected(client_id: "abc", resume: "", answered: 0),
     serialiser: test_support.custom_serialiser(),
   ))
 

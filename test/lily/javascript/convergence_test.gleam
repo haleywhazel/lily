@@ -207,6 +207,21 @@ fn settle_rounds(peers: List(Peer), rounds: Int) -> Nil {
 }
 
 @target(javascript)
+/// One peer on a server that keeps a closed link's session for 30 seconds.
+fn setup_with_grace() -> #(server.Server(Model, Message), Peer) {
+  test_support.reset_dom()
+  test_support.reset_mocks()
+  let assert Ok(app) =
+    server.new(chat_store(test_support.topic_route), origins: server.AnyOrigin)
+    |> server.session_grace(milliseconds: 30_000)
+    |> server.start
+  let a = new_peer(chat_store(test_support.topic_route), "convergence_grace")
+  go_online(app, a, "a1")
+  settle([a])
+  #(app, a)
+}
+
+@target(javascript)
 fn setup() -> #(server.Server(Model, Message), Peer, Peer) {
   test_support.reset_dom()
   test_support.reset_mocks()
@@ -311,4 +326,91 @@ pub fn convergence_dropped_message_rolls_back_to_the_server_state_test() {
   settle([a])
 
   model(a) |> should.equal(Model(..test_support.initial_model(), count: 1))
+}
+
+// =============================================================================
+// LOST LINKS
+// =============================================================================
+
+@target(javascript)
+pub fn convergence_an_edit_answered_as_the_link_died_applies_once_on_resume_test() {
+  let #(app, a) = setup_with_grace()
+  dispatch(a, Increment)
+  deliver_up(a)
+
+  // the acknowledgement dies with the link
+  go_offline(a)
+  go_online(app, a, "a2")
+  settle([a])
+
+  model(a).count |> should.equal(1)
+  server_chat(app, "probe").count |> should.equal(1)
+}
+
+@target(javascript)
+pub fn convergence_an_edit_lost_with_the_link_applies_once_on_resume_test() {
+  let #(app, a) = setup_with_grace()
+  dispatch(a, Increment)
+
+  // never reached the server
+  go_offline(a)
+  go_online(app, a, "a2")
+  settle([a])
+
+  model(a).count |> should.equal(1)
+  server_chat(app, "probe").count |> should.equal(1)
+}
+
+@target(javascript)
+pub fn convergence_past_the_grace_an_edit_answered_as_the_link_died_applies_once_test() {
+  let #(app, a, _b) = setup()
+  dispatch(a, Increment)
+  deliver_up(a)
+
+  go_offline(a)
+  go_online(app, a, "a2")
+  settle([a])
+
+  model(a).count |> should.equal(1)
+  server_chat(app, "probe").count |> should.equal(1)
+}
+
+@target(javascript)
+pub fn convergence_past_the_grace_an_edit_lost_with_the_link_rolls_back_test() {
+  // at most once, its fate unknown to a fresh session
+  let #(app, a, _b) = setup()
+  dispatch(a, Increment)
+
+  go_offline(a)
+  go_online(app, a, "a2")
+  settle([a])
+
+  model(a).count |> should.equal(0)
+  server_chat(app, "probe").count |> should.equal(0)
+}
+
+@target(javascript)
+pub fn convergence_a_closed_link_queues_its_unanswered_messages_in_id_order_test() {
+  let #(_app, a, _b) = setup()
+  dispatch(a, test_support.IncrementSecondary)
+  dispatch(a, Increment)
+  dispatch(a, test_support.IncrementSecondary)
+
+  go_offline(a)
+
+  transport.connector(fn(_handler) {
+    transport.Channel(send: fn(_) { Error(Nil) }, close: fn() { Nil })
+  })
+  |> transport.with_offline_queue(storage_key: "convergence_a")
+  |> transport.pending
+  |> list.map(fn(bytes) {
+    let assert Ok(frame) =
+      transport.decode(bytes, serialiser: test_support.custom_serialiser())
+    frame
+  })
+  |> should.equal([
+    transport.SessionMessage(id: 1, payload: test_support.IncrementSecondary),
+    transport.TopicMessage(topic_id: "chat", id: 2, payload: Increment),
+    transport.SessionMessage(id: 3, payload: test_support.IncrementSecondary),
+  ])
 }

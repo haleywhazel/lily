@@ -349,6 +349,12 @@ export function newRef(value) {
   return { value };
 }
 
+/** Counts up from 1, for the message ids a mock client sends. */
+export function nextMessageId() {
+  lastMessageId += 1;
+  return lastMessageId;
+}
+
 /** Tags of the connected elements a stubbed `kind` observer watches. */
 export function observedTags(kind) {
   return toList(
@@ -757,3 +763,5 @@ let observers = [];
 
 // children `stashChildren` took off the page, by selector
 const stashed = new Map();
+
+let lastMessageId = 0;

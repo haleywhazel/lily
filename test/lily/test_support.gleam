@@ -236,6 +236,23 @@ pub fn connect_raw(
 @external(javascript, "./test_support.ffi.mjs", "countDomCalls")
 pub fn count_dom_calls(_thunk: fn() -> Nil) -> #(Int, Int)
 
+/// Only `chat`, whose update crashes on `Decrement`.
+pub fn crashing_topic_store() -> store.Store(Model, Message, store.Synced) {
+  store.new(init: initial_model(), update: fn(model, message) {
+    case message {
+      Decrement -> panic as "update blew up"
+      _ -> update(model, message)
+    }
+  })
+  |> store.sync_with(route: topic_route, serialiser: custom_serialiser())
+  |> store.topic(
+    id: "chat",
+    get: fn(model) { model },
+    set: fn(_, model) { model },
+    access: store.Open,
+  )
+}
+
 /// The fixtures' own codecs behind the recipe's envelope.
 pub fn custom_serialiser() -> Serialiser(Model, Message) {
   json_envelope(
@@ -530,6 +547,31 @@ pub fn mount_html(
   Nil
 }
 
+/// The session and `chat` hold `count` alone, and every update also bumps
+/// `secondary_count`, outside both slices. Routed by
+/// [`topic_route`](#topic_route).
+pub fn narrow_store() -> store.Store(Model, Message, store.Synced) {
+  narrow_store_with(set: fn(model, count) { Model(..model, count:) })
+}
+
+/// [`narrow_store`](#narrow_store) with `set` for both slices.
+pub fn narrow_store_with(
+  set set: fn(Model, Int) -> Model,
+) -> store.Store(Model, Message, store.Synced) {
+  store.new(init: initial_model(), update: fn(model, message) {
+    let next = update(model, message)
+    Model(..next, secondary_count: next.secondary_count + 1)
+  })
+  |> store.sync_with(route: topic_route, serialiser: custom_serialiser())
+  |> store.session(get: fn(model) { model.count }, set:)
+  |> store.topic(
+    id: "chat",
+    get: fn(model) { model.count },
+    set:,
+    access: store.Open,
+  )
+}
+
 @target(javascript)
 /// Reloads and assigns jsdom was asked for.
 @external(javascript, "./test_support.ffi.mjs", "navigationCount")
@@ -650,8 +692,10 @@ pub fn restore_children(_selector: String) -> Nil
 @external(javascript, "./test_support.ffi.mjs", "scrollTo")
 pub fn scroll_to(_selector: String, _top: Int, _left: Int) -> Nil
 
+/// With no session grace, like [`start_server`](#start_server).
 pub fn session_builder() -> server.Builder(Model, Message) {
   server.new(session_store(), origins: server.AnyOrigin)
+  |> server.session_grace(milliseconds: 0)
 }
 
 pub fn session_store() -> store.Store(Model, Message, store.Synced) {
@@ -687,10 +731,14 @@ pub fn set_shared(cell: Shared(value), value: value) -> Nil
 @external(javascript, "./test_support.ffi.mjs", "setVisibility")
 pub fn set_visibility(_visible: Bool) -> Nil
 
+/// With no session grace, a closed connection ending its session at once.
+/// `session_grace_test` starts its own.
 pub fn start_server(
   builder: server.Builder(Model, Message),
 ) -> server.Server(Model, Message) {
-  let assert Ok(app) = server.start(builder)
+  let assert Ok(app) =
+    server.session_grace(builder, milliseconds: 0)
+    |> server.start
   app
 }
 
@@ -738,8 +786,10 @@ pub fn to_placeholder() -> String {
   "<lily-nest></lily-nest>"
 }
 
+/// With no session grace, like [`start_server`](#start_server).
 pub fn topic_builder() -> server.Builder(Model, Message) {
   server.new(topic_store(), origins: server.AnyOrigin)
+  |> server.session_grace(milliseconds: 0)
 }
 
 /// Counters and claims to `chat`, `SetName(id)` to `id`, `IncrementSecondary`
@@ -929,15 +979,19 @@ fn frame_decoder(
     "acknowledge" -> {
       use target <- decode.field("target", target_decoder())
       use sequence <- decode.field("sequence", decode.int)
-      decode.success(transport.Acknowledge(target:, sequence:))
+      use id <- decode.field("id", decode.int)
+      decode.success(transport.Acknowledge(target:, sequence:, id:))
     }
     "connected" -> {
       use client_id <- decode.field("client_id", decode.string)
-      decode.success(transport.Connected(client_id:))
+      use resume <- decode.field("resume", decode.string)
+      use answered <- decode.field("answered", decode.int)
+      decode.success(transport.Connected(client_id:, resume:, answered:))
     }
     "dropped" -> {
       use target <- decode.field("target", target_decoder())
-      decode.success(transport.Dropped(target:))
+      use id <- decode.field("id", decode.int)
+      decode.success(transport.Dropped(target:, id:))
     }
     "rejected" -> {
       use topic_id <- decode.field("topic_id", decode.string)
@@ -946,11 +1000,14 @@ fn frame_decoder(
     }
     "resync" -> {
       use cursors <- decode.field("cursors", decode.list(cursor_decoder()))
-      decode.success(transport.Resync(cursors:))
+      use resume <- decode.field("resume", decode.optional(decode.string))
+      use delivered <- decode.field("delivered", decode.int)
+      decode.success(transport.Resync(cursors:, resume:, delivered:))
     }
     "session_message" -> {
+      use id <- decode.field("id", decode.int)
       use payload <- decode.field("payload", message_decoder)
-      decode.success(transport.SessionMessage(payload:))
+      decode.success(transport.SessionMessage(id:, payload:))
     }
     "session_update" -> {
       use sequence <- decode.field("sequence", decode.int)
@@ -970,8 +1027,9 @@ fn frame_decoder(
     }
     "topic_message" -> {
       use topic_id <- decode.field("topic_id", decode.string)
+      use id <- decode.field("id", decode.int)
       use payload <- decode.field("payload", message_decoder)
-      decode.success(transport.TopicMessage(topic_id:, payload:))
+      decode.success(transport.TopicMessage(topic_id:, id:, payload:))
     }
     "topic_update" -> {
       use topic_id <- decode.field("topic_id", decode.string)
@@ -1002,24 +1060,39 @@ fn frame_json(
   encode_model: fn(model) -> Json,
 ) -> Json {
   case frame {
-    transport.Acknowledge(target:, sequence:) ->
+    transport.Acknowledge(target:, sequence:, id:) ->
       tagged("acknowledge", [
         #("target", target_json(target)),
         #("sequence", json.int(sequence)),
+        #("id", json.int(id)),
       ])
-    transport.Connected(client_id:) ->
-      tagged("connected", [#("client_id", json.string(client_id))])
-    transport.Dropped(target:) ->
-      tagged("dropped", [#("target", target_json(target))])
+    transport.Connected(client_id:, resume:, answered:) ->
+      tagged("connected", [
+        #("client_id", json.string(client_id)),
+        #("resume", json.string(resume)),
+        #("answered", json.int(answered)),
+      ])
+    transport.Dropped(target:, id:) ->
+      tagged("dropped", [
+        #("target", target_json(target)),
+        #("id", json.int(id)),
+      ])
     transport.Rejected(topic_id:, reason:) ->
       tagged("rejected", [
         #("topic_id", json.string(topic_id)),
         #("reason", reason_json(reason)),
       ])
-    transport.Resync(cursors:) ->
-      tagged("resync", [#("cursors", json.array(cursors, cursor_json))])
-    transport.SessionMessage(payload:) ->
-      tagged("session_message", [#("payload", encode_message(payload))])
+    transport.Resync(cursors:, resume:, delivered:) ->
+      tagged("resync", [
+        #("cursors", json.array(cursors, cursor_json)),
+        #("resume", json.nullable(resume, json.string)),
+        #("delivered", json.int(delivered)),
+      ])
+    transport.SessionMessage(id:, payload:) ->
+      tagged("session_message", [
+        #("id", json.int(id)),
+        #("payload", encode_message(payload)),
+      ])
     transport.SessionUpdate(sequence:, payload:) ->
       tagged("session_update", [
         #("sequence", json.int(sequence)),
@@ -1034,9 +1107,10 @@ fn frame_json(
       ])
     transport.Subscribe(topic_id:) ->
       tagged("subscribe", [#("topic_id", json.string(topic_id))])
-    transport.TopicMessage(topic_id:, payload:) ->
+    transport.TopicMessage(topic_id:, id:, payload:) ->
       tagged("topic_message", [
         #("topic_id", json.string(topic_id)),
+        #("id", json.int(id)),
         #("payload", encode_message(payload)),
       ])
     transport.TopicUpdate(topic_id:, sequence:, payload:) ->

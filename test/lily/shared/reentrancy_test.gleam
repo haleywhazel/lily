@@ -51,7 +51,7 @@ pub fn reentrancy_session_applied_dispatch_to_keeps_both_updates_test() {
 
   frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 1),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
     transport.SessionUpdate(sequence: 2, payload: Increment),
   ])
 }

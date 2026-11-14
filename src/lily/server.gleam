@@ -78,12 +78,17 @@
 //// A client id that is already connected is taken over by the newer
 //// connection, see [`connect_as`](#connect_as).
 ////
+//// A connection that closes doesn't end its session straight away. The server
+//// keeps it for [`session_grace`](#session_grace), and a client that
+//// reconnects in time picks it up again, which fires no events. So presence
+//// built from `ClientConnected` and `ClientDisconnected` lags by that long.
+////
 //// Most apps then just need [`observe`](#observe). An observer sees every
-//// [`ServerEvent`](#ServerEvent), a client coming and going, a session message
-//// applied, a client joining, leaving or being refused a topic, together with
-//// the server it happened on. This is the place to notice events and do
-//// quick work rather than slower work (e.g. database writes, process
-//// sleeps, side effects) to prevent stalling the observer.
+//// [`ServerEvent`](#ServerEvent), a client coming and going, a message applied
+//// to a session or a topic, a client joining, leaving or being refused a
+//// topic, together with the server it happened on. Most events run in the
+//// server process, where every client waits on the observer, so keep those
+//// quick and spawn anything slow (e.g. HTTP calls, process sleeps).
 ////
 //// When the server itself needs to change state, rather than react to
 //// something a client sent, use [`dispatch_to`](#dispatch_to) for a single
@@ -97,6 +102,10 @@
 //// with [`topic_init`](#topic_init), or a whole family of them with
 //// [`topics_init`](#topics_init). Running inside the topic itself when it
 //// starts and every time it restarts, a slow loader only holds up that topic.
+////
+//// Write it back from `TopicMessageApplied`, which also runs in the topic,
+//// before the sender's `Acknowledge`, and in no order with the server's own
+//// events.
 ////
 //// The server treats every client as possibly hostile. A frame is decoded in
 //// the process that calls [`incoming`](#incoming), refused past
@@ -236,6 +245,7 @@ pub opaque type Builder(model, message) {
     restart_tolerance: Tolerance,
     clock: fn() -> Int,
     idle_after: Option(Int),
+    session_grace: Int,
   )
 }
 
@@ -337,9 +347,9 @@ pub opaque type Server(model, message) {
 
 /// Something that happened on the server, given to every observer.
 pub type ServerEvent(model, message) {
-  /// A client was registered
+  /// A session started, on a client's first frame, once per session
   ClientConnected(client_id: String)
-  /// A client left, or its connection process died
+  /// A session ended, its grace period over or the client cut off
   ClientDisconnected(client_id: String)
   /// The server cut a client off, a `ClientDisconnected` follows
   ClientEvicted(client_id: String, reason: EvictionReason)
@@ -348,8 +358,14 @@ pub type ServerEvent(model, message) {
   ClientThrottled(client_id: String)
   /// A session message was applied (`model` is the client's model after it)
   SessionMessageApplied(client_id: String, message: message, model: model)
-  /// A client sent a message to a topic it joined, before the topic applies it
-  TopicMessageReceived(client_id: String, topic_id: String, message: message)
+  /// A topic applied a message, from a client or `None` for
+  /// [`dispatch_topic`](#dispatch_topic), `model` being the topic's after it
+  TopicMessageApplied(
+    client_id: Option(String),
+    topic_id: String,
+    message: message,
+    model: model,
+  )
   /// A topic admitted a client
   Subscribed(client_id: String, topic_id: String)
   /// A subscribe was refused with a `Rejected` frame
@@ -517,9 +533,10 @@ pub fn connect(
 /// Registers a client like [`connect`](#connect), letting you choose its id,
 /// seed its session and pick which process to watch.
 ///
-/// `seed` is a list of messages applied to the new connection's session
-/// before anything it sends, such as who signed in. Use `watch: Unwatched`
-/// for short-lived HTTP requests.
+/// `seed` is a list of messages applied to a new session before anything it
+/// sends, such as who signed in, and a client resuming its session must come
+/// back with the same seed (see [`session_grace`](#session_grace)). Use
+/// `watch: Unwatched` for short-lived HTTP requests.
 ///
 /// An id that's already connected is taken over. The old connection is
 /// unsubscribed from everything and reported as
@@ -610,7 +627,8 @@ pub fn diagnostic_budget(
   Builder(..builder, diagnostic_budget: RateLimit(per_second:, burst:))
 }
 
-/// Unregisters a client, usually when its socket closes.
+/// Ends a client's connection, usually when its socket closes. Its session is
+/// kept for [`session_grace`](#session_grace) for the client to resume.
 pub fn disconnect(connection: Connection(model, message)) -> Nil {
   let client_id = connection.client_id
   case connection.link {
@@ -630,7 +648,8 @@ pub fn disconnect(connection: Connection(model, message)) -> Nil {
 /// Applies a message to one client's session and sends it the update, for
 /// changes the server makes on its own, like the result of async work.
 ///
-/// Does nothing if the client isn't connected. Safe to call from any process.
+/// A parked session takes it too, and it does nothing once a session has
+/// ended. Safe to call from any process.
 ///
 /// ```gleam
 /// server.dispatch_to(app, client_id:, message: Welcome)
@@ -722,7 +741,7 @@ pub fn incoming(
       let size = bit_array.byte_size(bytes)
       // decoded here so a hostile frame costs its own process
       let #(inbound, received) = case size > gate.max_frame_bytes {
-        True -> #(Oversized(target: transport.peek_target(bytes)), TooLarge)
+        True -> #(Oversized(message: transport.peek_message(bytes)), TooLarge)
         False ->
           case
             transport.decode_inbound(
@@ -765,7 +784,8 @@ pub fn max_clients(
 
 /// Caps the size of a frame a client may send, 1 MiB by default. A bigger one
 /// is dropped before it's decoded and charged against the client's
-/// [`rate_limit`](#rate_limit), a message gets a `Dropped`.
+/// [`rate_limit`](#rate_limit), a message gets a `Dropped` when its head names
+/// its id.
 ///
 /// ```gleam
 /// server.new(shared.store(), origins: server.AnyOrigin)
@@ -947,6 +967,7 @@ pub fn new(
     restart_tolerance: Tolerance(intensity: 3, period: 10),
     clock: monotonic_milliseconds,
     idle_after: option.None,
+    session_grace: 30_000,
   )
 }
 
@@ -954,6 +975,10 @@ pub fn new(
 /// the server it happened on. Pipe it from [`new`](#new).
 ///
 /// Keep it quick, every other client waits while it runs. Spawn anything slow.
+///
+/// `TopicMessageApplied` is the exception, it runs in the topic's process
+/// before the sender's acknowledgement, the place to persist a topic (see
+/// [server](./server.html)).
 ///
 /// ```gleam
 /// server.observe(builder, fn(event, app) {
@@ -1084,6 +1109,25 @@ pub fn restart_tolerance(
   let restart_tolerance =
     Tolerance(intensity: int.max(intensity, 0), period: int.max(period, 1))
   Builder(..builder, restart_tolerance:)
+}
+
+/// Keeps a session whose connection closed for `milliseconds`, 30,000 by
+/// default, so a client that reconnects in time resumes it with its model and
+/// its topics. 0 ends a session the moment its connection closes.
+///
+/// A resume fires no events, and `ClientDisconnected` only comes once the
+/// session expires, see [server](./server.html) for what that means for
+/// presence. Clamped to at least 0.
+///
+/// ```gleam
+/// server.new(shared.store(), origins: server.AnyOrigin)
+/// |> server.session_grace(milliseconds: 10_000)
+/// ```
+pub fn session_grace(
+  builder: Builder(model, message),
+  milliseconds milliseconds: Int,
+) -> Builder(model, message) {
+  Builder(..builder, session_grace: int.max(milliseconds, 0))
 }
 
 /// Starts the server. Pipe it from [`new`](#new). On Erlang,
@@ -1301,8 +1345,9 @@ pub fn clock(
   Builder(..builder, clock: now)
 }
 
-/// Don't call it from an observer, which runs inside the server and would
-/// wait on itself.
+/// Don't call it from an observer. In the server's it would wait on itself,
+/// and in a topic's it times out on Erlang and returns the default on
+/// JavaScript, the same as `subscriber_count`.
 @internal
 pub fn inspect(server: Server(model, message)) -> Result(Inspection, Nil) {
   // guarded like `cast`, calling a stopped cell raises on Erlang
@@ -1316,6 +1361,11 @@ pub fn inspect(server: Server(model, message)) -> Result(Inspection, Nil) {
 // PRIVATE TYPES
 // =============================================================================
 
+// the session a link resumed, reached under the link's own id
+type Alias {
+  Alias(session: String, token: Int)
+}
+
 // whether a snapshot is paid for by the client it goes to
 type Charge {
   // it asked for it
@@ -1328,6 +1378,16 @@ type Client(model, message) {
   Client(
     // which registration holds the id, a stale one's events are ignored
     token: Int,
+    // the id its link registered under, another's after a resume
+    link_id: String,
+    // kept across resumes
+    epoch: Int,
+    // what a resume has to match
+    seed: List(message),
+    // the token that resumes it, empty without a grace period
+    resume: String,
+    // the highest message id processed or refused
+    answered: Int,
     limiter: Limiter(model, message),
     // what the connection's `incoming` reads
     mirror: ClientMirror,
@@ -1391,7 +1451,7 @@ type Gauge
 type Held(model, message) {
   HeldFrame(inbound: Inbound(model, message), size: Int)
   // a frame that couldn't wait, its `Dropped` waits behind those that did
-  HeldRefusal(target: transport.SyncTarget)
+  HeldRefusal(target: transport.SyncTarget, id: Int)
 }
 
 // what held frames may take, one client's and every client's together
@@ -1402,8 +1462,8 @@ type HeldBytes {
 // a frame as `incoming` hands it to the server
 type Inbound(model, message) {
   Decoded(frame: transport.Protocol(model, message), format: Option(Format))
-  // over `max_frame_bytes`, with the target read from its head
-  Oversized(target: Option(transport.SyncTarget))
+  // over `max_frame_bytes`, with the target and id read from its head
+  Oversized(message: Option(#(transport.SyncTarget, Int)))
   Undecodable(failure: transport.DecodeFailure)
 }
 
@@ -1433,8 +1493,15 @@ type InternalEvent(model, message) {
   RecheckAccess(client_id: String)
   // runs what the rate limit held back, in order
   RetryHeld(client_id: String, token: Int)
+  // a parked session's grace ran out
+  SessionExpired(client_id: String, park: Int)
   // a message `incoming` shed past `max_inbound_queue`, refused in order
-  Shed(client_id: String, token: ConnectionToken, target: transport.SyncTarget)
+  Shed(
+    client_id: String,
+    token: ConnectionToken,
+    target: transport.SyncTarget,
+    id: Int,
+  )
   Stop
   StopTopic(topic_id: String)
   TopicDown(id: String)
@@ -1449,6 +1516,8 @@ type Joining {
   Rejoined
   // a joined holder put back after a restart, neither
   Restored
+  // a resumed session back on a topic it held, no snapshot
+  Resumed
 }
 
 // a client's rate limit and diagnostics, times in milliseconds
@@ -1484,9 +1553,16 @@ type Link {
   Refused
 }
 
+type Located(model, message) {
+  LiveSession(session: String, client: Client(model, message))
+  // a registration whose first frame hasn't come yet
+  AwaitingFrame(token: Int, provisional: Provisional(model, message))
+  Unregistered
+}
+
 type MessageSource {
-  // a client, answered with an `Acknowledge` or a `Dropped`
-  FromClient
+  // a client's message `id`, answered with an `Acknowledge` or a `Dropped`
+  FromClient(id: Int)
   // the server, answered with a `SessionUpdate` carrying the message
   FromServer
 }
@@ -1506,6 +1582,31 @@ type Overrun {
   Waited
   // refused, these add up to an eviction
   Bounced
+}
+
+type Parked(model, message) {
+  Parked(
+    client: Client(model, message),
+    // the topics it had joined
+    held: List(String),
+    timer: actor.Timer,
+    // tells this parking's timer from an earlier one's
+    park: Int,
+  )
+}
+
+// waiting for its first frame
+type Provisional(model, message) {
+  Provisional(
+    client_id: String,
+    send: fn(BitArray) -> Nil,
+    close: Option(fn() -> Nil),
+    mirror: ClientMirror,
+    seed: List(message),
+    resume: String,
+    // `dispatch_to` meanwhile, newest first
+    dispatched: List(message),
+  )
 }
 
 // first in first out, a front list and a reversed back, the front only empty
@@ -1565,7 +1666,16 @@ type ServerState(model, message) {
     // what every client's held frames take, bounded together
     held_bytes_total: Int,
     idle_after: Option(Int),
+    session_grace: Int,
+    // live sessions
     clients: Dict(String, Client(model, message)),
+    parked: Dict(String, Parked(model, message)),
+    // by link token
+    provisional: Dict(Int, Provisional(model, message)),
+    // resume token to session id
+    resume_tokens: Dict(String, String),
+    // by the id a resumed session's link registered under
+    aliases: Dict(String, Alias),
     topics: Dict(String, TopicEntry(model, message)),
     // clients holding a stopped topic, by topic id, rejoined when it starts
     lapsed: Dict(String, Set(String)),
@@ -1607,7 +1717,7 @@ type Tolerance {
 }
 
 type TopicActor(model, message) =
-  Cell(TopicState(model, message), TopicEvent(message), Int)
+  Cell(TopicState(model, message), TopicEvent(model, message), Int)
 
 // why a topic stops
 type TopicEnd {
@@ -1639,13 +1749,19 @@ type TopicEntry(model, message) {
   )
 }
 
-type TopicEvent(message) {
-  // `from` is the sending client and how to reach it, `None` for the server
-  TopicDispatch(from: Option(#(String, Subscriber)), message: message)
+type TopicEvent(model, message) {
+  // `from` is the sending client and how to reach it, `None` for the server,
+  // and `session` its session copy when the store has an `authorise` rule
+  TopicDispatch(
+    from: Option(#(String, Subscriber)),
+    session: Option(model),
+    id: Int,
+    message: message,
+  )
   TopicLoad
   // a `Dropped` for a message the server refused, sent behind the topic's own
   // answers to that client
-  TopicRefuse(to: #(String, Subscriber))
+  TopicRefuse(to: #(String, Subscriber), id: Int)
   TopicSendSnapshot(
     client_id: String,
     token: Int,
@@ -1678,6 +1794,10 @@ type TopicReport {
   LoadFailed(reason: String)
   // `update` crashed on a message, from this client or `None` for the server
   MessageCrashed(from: Option(String), reason: String)
+  // the store's `get` or `set` crashed, snapshots carry the whole model
+  ProjectionFailed(reason: String)
+  // the `authorise` rule turned this client's message down, or crashed
+  MessageRefused(client_id: String, crash: Option(String))
   // a snapshot this big went to this registration, charged to it
   SnapshotSent(client_id: String, token: Int, bytes: Int)
   // a send to this registration raised, its connection is gone
@@ -1692,9 +1812,16 @@ type TopicState(model, message) {
     update: fn(model, message) -> model,
     load: Option(fn() -> model),
     report: fn(TopicReport) -> Nil,
+    // runs the server's observers in this topic's process
+    notify: fn(ServerEvent(model, message)) -> Nil,
+    authorise: Option(fn(model, model, message) -> Bool),
     subscribers: Dict(String, Subscriber),
     current: model,
     sequence: Int,
+    // what a snapshot carries
+    project: fn(model) -> model,
+    // cached for this sequence
+    projected: Option(#(Int, model)),
   )
 }
 
@@ -1754,9 +1881,13 @@ fn admit(
 ) -> ServerState(model, message) {
   // a resync's cursors are bounded once, for its cost and its work
   let inbound = case inbound {
-    Decoded(frame: transport.Resync(cursors:), format:) ->
+    Decoded(frame: transport.Resync(cursors:, resume:, delivered:), format:) ->
       Decoded(
-        frame: transport.Resync(distinct_cursors(state, cursors)),
+        frame: transport.Resync(
+          cursors: distinct_cursors(state, cursors),
+          resume:,
+          delivered:,
+        ),
         format:,
       )
     Decoded(..) | Oversized(..) | Undecodable(..) -> inbound
@@ -1774,12 +1905,26 @@ fn apply_to_session(
   case dict.get(state.clients, client_id) {
     Error(_) -> state
     Ok(client) -> {
+      let permitted = case source, store.authorisation(state.store) {
+        FromClient(..), option.Some(rule) ->
+          authorised(rule, client.model, client.model, message)
+        FromClient(..), option.None | FromServer, _ -> Ok(Nil)
+      }
+      use <- bool.lazy_guard(when: result.is_error(permitted), return: fn() {
+        let crash = result.unwrap_error(permitted, option.None)
+        let id = case source {
+          FromClient(id:) -> id
+          FromServer -> 0
+        }
+        diagnose_refused(state, client_id, "a session message", crash)
+        |> push_dropped(client_id, transport.Session, id)
+      })
       let update = store.update_function(state.store)
       case actor.rescue(fn() { update(client.model, message) }) {
         // crash means a hostile frame or bad dispatch, drop to keep the actor
         Error(reason) ->
           case source {
-            FromClient ->
+            FromClient(id:) ->
               diagnose_client(
                 state,
                 client_id,
@@ -1789,7 +1934,7 @@ fn apply_to_session(
                   <> ": "
                   <> reason,
               )
-              |> push_dropped(client_id, transport.Session)
+              |> push_dropped(client_id, transport.Session, id)
             FromServer -> {
               diagnose(
                 state,
@@ -1807,13 +1952,17 @@ fn apply_to_session(
           let state =
             put_client(state, client_id, Client(..client, model:, sequence:))
           let state = case source {
-            FromClient -> {
+            FromClient(id:) -> {
               let state =
                 push(
                   state,
                   client_id,
                   client,
-                  transport.Acknowledge(target: transport.Session, sequence:),
+                  transport.Acknowledge(
+                    target: transport.Session,
+                    sequence:,
+                    id:,
+                  ),
                 )
               notify(state, SessionMessageApplied(client_id:, message:, model:))
               state
@@ -1834,6 +1983,52 @@ fn apply_to_session(
         }
       }
     }
+  }
+}
+
+// without a grace period every connection is fresh, its first resync says
+// what the page sent before
+fn already_sent(
+  state: ServerState(model, message),
+  client_id: String,
+  delivered: Int,
+) -> ServerState(model, message) {
+  case state.session_grace, dict.get(state.clients, client_id) {
+    0, Ok(client) if client.answered == 0 ->
+      put_client(state, client_id, Client(..client, answered: delivered))
+    _, _ -> state
+  }
+}
+
+// a repeat gets a `Dropped`, never applied twice
+fn answering(
+  state: ServerState(model, message),
+  client_id: String,
+  target: transport.SyncTarget,
+  id: Int,
+  handle: fn(ServerState(model, message)) -> ServerState(model, message),
+) -> ServerState(model, message) {
+  case dict.get(state.clients, client_id) {
+    Error(_) -> state
+    Ok(client) if id <= client.answered ->
+      push_dropped(state, client_id, target, id)
+    Ok(client) ->
+      put_client(state, client_id, Client(..client, answered: id))
+      |> handle
+  }
+}
+
+// `Error` holds the crash, which refuses too
+fn authorised(
+  rule: fn(model, model, message) -> Bool,
+  sender: model,
+  target: model,
+  message: message,
+) -> Result(Nil, Option(String)) {
+  case actor.rescue(fn() { rule(sender, target, message) }) {
+    Ok(True) -> Ok(Nil)
+    Ok(False) -> Error(option.None)
+    Error(reason) -> Error(option.Some(reason))
   }
 }
 
@@ -1944,11 +2139,19 @@ fn compact_unheld(
 fn cost(inbound: Inbound(model, message), size: Int) -> Int {
   let base = case inbound {
     Oversized(..) -> 10
-    Decoded(frame: transport.Resync(cursors:), ..) ->
+    Decoded(frame: transport.Resync(cursors:, ..), ..) ->
       int.max(list.length(cursors), 1)
     Decoded(..) | Undecodable(..) -> 1
   }
   base + size / bytes_per_cost
+}
+
+// parked sessions don't count, they never block a reconnect
+fn count_registered(state: ServerState(model, message)) -> Nil {
+  gauge_set(
+    state.server.gate.registered,
+    dict.size(state.clients) + dict.size(state.provisional),
+  )
 }
 
 // `AnyToken` matches whoever holds the id now
@@ -1980,6 +2183,43 @@ fn delivered(
       False
     }
   }
+}
+
+// quietly, giving back the topics it had joined
+fn detach(
+  state: ServerState(model, message),
+  session: String,
+  client: Client(model, message),
+) -> #(ServerState(model, message), Client(model, message), List(String)) {
+  let held =
+    dict.fold(client.topics, [], fn(held, topic_id, subscription) {
+      case subscription {
+        Joined -> [topic_id, ..held]
+        Pending | Lapsed -> held
+      }
+    })
+  let state =
+    dict.fold(client.topics, state, fn(state, topic_id, subscription) {
+      leave_quietly(state, session, topic_id, subscription)
+    })
+    |> let_go_of_link(session, client)
+  // held frames go with the connection, the client sends them again
+  let limiter =
+    Limiter(
+      ..client.limiter,
+      held: queue_from_list([]),
+      held_controls: 0,
+      held_bytes: 0,
+      retry_scheduled: False,
+    )
+  let state =
+    ServerState(
+      ..state,
+      clients: dict.delete(state.clients, session),
+      held_bytes_total: state.held_bytes_total - client.limiter.held_bytes,
+    )
+  count_registered(state)
+  #(state, Client(..client, limiter:, topics: dict.new()), list.reverse(held))
 }
 
 fn diagnose(
@@ -2047,6 +2287,26 @@ fn diagnose_limited(
   actor.log_limited_with(key, description, diagnose(state, level, _))
 }
 
+// a crashing rule refuses too
+fn diagnose_refused(
+  state: ServerState(model, message),
+  client_id: String,
+  what: String,
+  crash: Option(String),
+) -> ServerState(model, message) {
+  let why = case crash {
+    option.None -> " that the store's authorise rule refused"
+    option.Some(reason) ->
+      ", the store's authorise rule crashed on it: " <> reason
+  }
+  diagnose_client(
+    state,
+    client_id,
+    transport.Warning,
+    "dropped " <> what <> " from " <> shown(client_id) <> why,
+  )
+}
+
 // bounded, and a repeated target would cost another snapshot
 fn distinct_cursors(
   state: ServerState(model, message),
@@ -2075,9 +2335,9 @@ fn drain(
     Error(_) -> state
     Ok(client) ->
       case client.limiter.held.front, client.limiter.allowance > 0 {
-        [HeldRefusal(target:), ..], _ ->
+        [HeldRefusal(target:, id:), ..], _ ->
           pop_held(state, client_id, client)
-          |> push_dropped(client_id, target)
+          |> push_dropped(client_id, target, id)
           |> drain(client_id)
         [HeldFrame(inbound:, size:), ..], True -> {
           let state = pop_held(state, client_id, client)
@@ -2089,6 +2349,31 @@ fn drain(
         }
         [], _ | [HeldFrame(..), ..], False -> schedule_retry(state, client_id)
       }
+  }
+}
+
+// never reported, its first frame never came
+fn drop_provisional(
+  state: ServerState(model, message),
+  token: Int,
+) -> ServerState(model, message) {
+  case dict.get(state.provisional, token) {
+    Error(Nil) -> state
+    Ok(provisional) -> {
+      let _ =
+        actor.unwatch(
+          state.server.handle,
+          down: ClientLeft(
+            client_id: provisional.client_id,
+            token: Token(token),
+          ),
+        )
+      gauge_set(provisional.mirror.closed, 1)
+      let state =
+        ServerState(..state, provisional: dict.delete(state.provisional, token))
+      count_registered(state)
+      state
+    }
   }
 }
 
@@ -2107,6 +2392,7 @@ fn drop_misrouted(
   state: ServerState(model, message),
   client_id: String,
   target: transport.SyncTarget,
+  id: Int,
   what: String,
   why: String,
 ) -> ServerState(model, message) {
@@ -2116,7 +2402,7 @@ fn drop_misrouted(
     transport.Warning,
     "dropped " <> what <> " from " <> shown(client_id) <> why,
   )
-  |> push_dropped(client_id, target)
+  |> push_dropped(client_id, target, id)
 }
 
 // its holders lapse, rejoining when it starts again, and are told it's gone
@@ -2157,6 +2443,26 @@ fn encode_and_send(
   }
 }
 
+// reported as if it had just left
+fn end_parked(
+  state: ServerState(model, message),
+  session: String,
+  parked: Parked(model, message),
+) -> ServerState(model, message) {
+  actor.cancel_timer(parked.timer)
+  let state =
+    ServerState(
+      ..state,
+      parked: dict.delete(state.parked, session),
+      resume_tokens: dict.delete(state.resume_tokens, parked.client.resume),
+    )
+  list.each(parked.held, fn(topic_id) {
+    notify(state, Unsubscribed(client_id: session, topic_id:))
+  })
+  notify(state, ClientDisconnected(client_id: session))
+  state
+}
+
 // pending included, an admission racing the revocation is undone on report
 fn evict(
   state: ServerState(model, message),
@@ -2185,6 +2491,63 @@ fn evict_client(
         option.None -> Nil
       }
       state
+    }
+  }
+}
+
+// a resync naming a session with the same seed resumes it, anything else
+// starts one
+fn finalise(
+  state: ServerState(model, message),
+  link: Int,
+  provisional: Provisional(model, message),
+  inbound: Inbound(model, message),
+) -> #(ServerState(model, message), String) {
+  let state =
+    ServerState(..state, provisional: dict.delete(state.provisional, link))
+  let resumable = case inbound {
+    Decoded(
+      frame: transport.Resync(cursors:, resume: option.Some(token), ..),
+      ..,
+    ) -> {
+      use session <- result.try(dict.get(state.resume_tokens, token))
+      let seed = case
+        dict.get(state.clients, session),
+        dict.get(state.parked, session)
+      {
+        Ok(client), _ -> Ok(client.seed)
+        Error(_), Ok(parked) -> Ok(parked.client.seed)
+        Error(_), Error(_) -> Error(Nil)
+      }
+      case seed {
+        Ok(seed) if seed == provisional.seed -> Ok(#(session, token, cursors))
+        Ok(_) | Error(_) -> Error(Nil)
+      }
+    }
+    Decoded(..) | Oversized(..) | Undecodable(..) -> Error(Nil)
+  }
+  case resumable {
+    Ok(#(session, token, cursors)) -> #(
+      resume_session(
+        state,
+        session,
+        token,
+        link,
+        provisional,
+        distinct_cursors(state, cursors),
+      ),
+      session,
+    )
+    // what the page sent before is of unknown fate, its retransmits refused
+    Error(Nil) -> {
+      let answered = case inbound {
+        Decoded(frame: transport.Resync(delivered:, ..), ..) -> delivered
+        Decoded(..) | Oversized(..) | Undecodable(..) -> 0
+      }
+      #(
+        start_session(state, provisional, link, answered:, greet: False),
+        provisional.client_id,
+      )
     }
   }
 }
@@ -2258,7 +2621,7 @@ fn forget_topic(
 fn gate_of(builder: Builder(model, message)) -> Gate(model, message) {
   Gate(
     serialiser: store.serialiser_of(builder.store),
-    conform: transport.message_conformer(store.schema_of(builder.store)),
+    conform: store.message_conformer(builder.store),
     max_frame_bytes: builder.max_frame_bytes,
     max_inbound_queue: builder.max_inbound_queue,
     max_outbound_bytes: builder.max_outbound_bytes,
@@ -2270,6 +2633,17 @@ fn gate_of(builder: Builder(model, message)) -> Gate(model, message) {
     reserved: new_gauge(),
     incarnation: new_gauge(),
   )
+}
+
+fn greeting(
+  state: ServerState(model, message),
+  client_id: String,
+  resume: String,
+) -> List(transport.Protocol(model, message)) {
+  [
+    transport.Version(hash: state.boot_id, protocol: transport.protocol_version),
+    transport.Connected(client_id:, resume:, answered: 0),
+  ]
 }
 
 // the topics a client holds whose access rule has to run again
@@ -2314,6 +2688,7 @@ fn handle_admitted(
   }
 }
 
+// under a grace period it's greeted at once and waits for its first frame
 fn handle_connect(
   state: ServerState(model, message),
   client_id: String,
@@ -2323,74 +2698,58 @@ fn handle_connect(
   mirror: ClientMirror,
   session: List(message),
 ) -> ServerState(model, message) {
-  let now = state.server.gate.clock()
-  let fresh =
-    Limiter(
-      allowance: state.server.gate.rate_limit.burst * 1000,
-      refilled_at: now,
-      window_started_at: now,
-      refused: 0,
-      reported: False,
-      held: queue_from_list([]),
-      held_controls: 0,
-      held_bytes: 0,
-      retry_scheduled: False,
-      diagnosed_at: option.None,
-      suppressed: 0,
-    )
-  // a reused id replaces the old connection, only its budget carries over, so
-  // reconnecting under one id can't buy a fresh burst
-  let limiter = case dict.get(state.clients, client_id) {
-    Ok(old) ->
-      Limiter(
-        ..fresh,
-        allowance: old.limiter.allowance,
-        refilled_at: old.limiter.refilled_at,
-        window_started_at: old.limiter.window_started_at,
-        refused: old.limiter.refused,
-        reported: old.limiter.reported,
-        diagnosed_at: old.limiter.diagnosed_at,
-        suppressed: old.limiter.suppressed,
+  case state.session_grace {
+    0 ->
+      start_session(
+        state,
+        Provisional(
+          client_id:,
+          send:,
+          close:,
+          mirror:,
+          seed: session,
+          resume: "",
+          dispatched: [],
+        ),
+        token,
+        answered: 0,
+        greet: True,
       )
-    Error(Nil) -> fresh
+    _ -> {
+      let provisional =
+        Provisional(
+          client_id:,
+          send:,
+          close:,
+          mirror:,
+          seed: session,
+          resume: random_hex(byte_count: 16),
+          dispatched: [],
+        )
+      let state =
+        ServerState(
+          ..state,
+          provisional: dict.insert(state.provisional, token, provisional),
+        )
+      // counted as registered before the reservation goes, the cap never dips
+      count_registered(state)
+      gauge_release(state.server.gate.reserved)
+      let greeted =
+        list.all(greeting(state, client_id, provisional.resume), fn(frame) {
+          encode_and_send(
+            frame,
+            state.server.gate.serialiser,
+            state.format,
+            "client",
+            send,
+          ).1
+        })
+      case greeted {
+        True -> state
+        False -> drop_provisional(state, token)
+      }
+    }
   }
-  let state = evict_client(state, client_id, Superseded)
-  let model = store.get_model(state.store)
-  let client =
-    Client(
-      token:,
-      limiter:,
-      mirror:,
-      send:,
-      close:,
-      model:,
-      sequence: 0,
-      topics: dict.new(),
-      format: option.None,
-    )
-  let state = put_client(state, client_id, client)
-  // counted as registered before the reservation goes, the cap never dips
-  gauge_set(state.server.gate.registered, dict.size(state.clients))
-  gauge_release(state.server.gate.reserved)
-  let state =
-    state
-    |> push(
-      client_id,
-      client,
-      transport.Version(
-        hash: state.boot_id,
-        protocol: transport.protocol_version,
-      ),
-    )
-    |> push(client_id, client, transport.Connected(client_id:))
-  // seeds applied in the actor land before this client's first frame
-  let state =
-    list.fold(session, state, fn(state, message) {
-      warn_about_seed(state, message)
-      |> apply_to_session(client_id, message, FromServer)
-    })
-  notify(state, ClientConnected(client_id:))
-  state
 }
 
 fn handle_disconnect(
@@ -2400,13 +2759,73 @@ fn handle_disconnect(
 ) -> ServerState(model, message) {
   // close callback and dead process can both land, report only once, and a
   // socket `attach` killed is reported as the slow reader it was
-  case current_client(state, client_id, token) {
-    Error(_) -> state
-    Ok(client) ->
-      case gauge_value(client.mirror.overflowed) {
-        0 -> remove_client(state, client_id, client)
-        _ -> evict_client(state, client_id, SlowReader)
+  case locate(state, client_id, token) {
+    Unregistered -> state
+    AwaitingFrame(token:, ..) -> drop_provisional(state, token)
+    LiveSession(session:, client:) ->
+      case gauge_value(client.mirror.overflowed), state.session_grace {
+        0, 0 -> remove_client(state, session, client)
+        0, _ -> park(state, session, client)
+        _, _ -> evict_client(state, session, SlowReader)
       }
+  }
+}
+
+// a parked session moves on so its resync misses, a waiting registration keeps
+// it for a fresh session
+fn handle_dispatch_to(
+  state: ServerState(model, message),
+  client_id: String,
+  message: message,
+) -> ServerState(model, message) {
+  case
+    dict.has_key(state.clients, client_id),
+    dict.get(state.parked, client_id)
+  {
+    True, _ -> apply_to_session(state, client_id, message, FromServer)
+    False, Ok(parked) -> {
+      let update = store.update_function(state.store)
+      case actor.rescue(fn() { update(parked.client.model, message) }) {
+        Ok(model) -> {
+          let client =
+            Client(
+              ..parked.client,
+              model:,
+              sequence: parked.client.sequence + 1,
+            )
+          ServerState(
+            ..state,
+            parked: dict.insert(
+              state.parked,
+              client_id,
+              Parked(..parked, client:),
+            ),
+          )
+        }
+        Error(reason) -> {
+          diagnose(
+            state,
+            transport.Warning,
+            "dropped crashing dispatch to "
+              <> shown(client_id)
+              <> ": "
+              <> reason,
+          )
+          state
+        }
+      }
+    }
+    False, Error(Nil) -> {
+      let provisional =
+        dict.map_values(state.provisional, fn(_token, link) {
+          case link.client_id == client_id {
+            True ->
+              Provisional(..link, dispatched: [message, ..link.dispatched])
+            False -> link
+          }
+        })
+      ServerState(..state, provisional:)
+    }
   }
 }
 
@@ -2428,7 +2847,10 @@ fn handle_dispatch_topic(
   }
   case found {
     Ok(#(state, topic, _)) -> {
-      actor.send(topic, TopicDispatch(from: option.None, message:))
+      actor.send(
+        topic,
+        TopicDispatch(from: option.None, session: option.None, id: 0, message:),
+      )
       // in use, so it moves to the back of the line to be stopped for room
       case dict.get(state.topics, topic_id) {
         Ok(entry) ->
@@ -2459,15 +2881,17 @@ fn handle_frame(
   frame: transport.Protocol(model, message),
 ) -> ServerState(model, message) {
   case frame {
-    transport.SessionMessage(payload:) ->
+    transport.SessionMessage(id:, payload:) -> {
+      use state <- answering(state, client_id, transport.Session, id)
       case route_of(state, payload) {
         Ok(store.Session) ->
-          apply_to_session(state, client_id, payload, FromClient)
+          apply_to_session(state, client_id, payload, FromClient(id:))
         Ok(store.Topic(_)) | Ok(store.Local) ->
           drop_misrouted(
             state,
             client_id,
             transport.Session,
+            id,
             "a session message",
             " that the store routes elsewhere",
           )
@@ -2476,13 +2900,17 @@ fn handle_frame(
             state,
             client_id,
             transport.Session,
+            id,
             "a session message",
             ", the store's route crashed on it: " <> reason,
           )
       }
+    }
 
-    transport.TopicMessage(topic_id:, payload:) ->
-      handle_topic_message(state, client_id, topic_id, payload)
+    transport.TopicMessage(topic_id:, id:, payload:) -> {
+      use state <- answering(state, client_id, transport.Topic(topic_id), id)
+      handle_topic_message(state, client_id, topic_id, id, payload)
+    }
 
     transport.Subscribe(topic_id:) ->
       handle_subscribe(state, client_id, topic_id, option.None)
@@ -2490,15 +2918,16 @@ fn handle_frame(
     transport.Unsubscribe(topic_id:) ->
       handle_unsubscribe(state, client_id, topic_id)
 
-    transport.Resync(cursors:) ->
-      list.fold(cursors, state, fn(state, cursor) {
+    transport.Resync(cursors:, delivered:, ..) ->
+      already_sent(state, client_id, delivered)
+      |> list.fold(cursors, _, fn(state, cursor) {
         handle_resync(state, client_id, cursor)
       })
 
     // server-to-client variants, never legitimately arrive here
-    transport.Acknowledge(_, _)
-    | transport.Connected(_)
-    | transport.Dropped(_)
+    transport.Acknowledge(..)
+    | transport.Connected(..)
+    | transport.Dropped(..)
     | transport.Rejected(_, _)
     | transport.SessionUpdate(_, _)
     | transport.Snapshot(..)
@@ -2530,7 +2959,7 @@ fn handle_inbound(
   inbound: Inbound(model, message),
 ) -> ServerState(model, message) {
   case inbound {
-    Oversized(target:) -> {
+    Oversized(message:) -> {
       let state =
         diagnose_client(
           state,
@@ -2538,13 +2967,13 @@ fn handle_inbound(
           transport.Warning,
           "dropped an oversized frame from " <> shown(client_id),
         )
-      case target {
-        option.Some(target) -> push_dropped(state, client_id, target)
+      case message {
+        option.Some(#(target, id)) -> push_dropped(state, client_id, target, id)
         option.None -> state
       }
     }
 
-    Undecodable(failure: transport.Nonconforming(target:)) -> {
+    Undecodable(failure: transport.Nonconforming(target:, id:)) -> {
       let why = case option.is_some(store.schema_of(state.store)) {
         True -> " that fails the schema"
         False -> " whose payload failed to decode"
@@ -2555,7 +2984,7 @@ fn handle_inbound(
         transport.Warning,
         "dropped a message from " <> shown(client_id) <> why,
       )
-      |> push_dropped(client_id, target)
+      |> push_dropped(client_id, target, id)
     }
 
     Undecodable(failure: transport.Malformed) ->
@@ -2581,10 +3010,14 @@ fn handle_incoming(
   inbound: Inbound(model, message),
   size: Int,
 ) -> ServerState(model, message) {
-  case current_client(state, client_id, token) {
+  case locate(state, client_id, token) {
     // gone, never here, or an older registration of the id
-    Error(_) -> state
-    Ok(client) -> {
+    Unregistered -> state
+    AwaitingFrame(token: link, provisional:) -> {
+      let #(state, session) = finalise(state, link, provisional, inbound)
+      handle_incoming(state, session, Token(link), inbound, size)
+    }
+    LiveSession(session: client_id, client:) -> {
       let now = state.server.gate.clock()
       let limiter = refill_limiter(client.limiter, state, now)
       let client = Client(..client, limiter:)
@@ -2624,9 +3057,9 @@ fn handle_resync(
   }
   case dict.get(state.clients, client_id), cursor.target {
     Error(_), _ -> state
-    // a session's epoch is its registration, a reconnect always starts over
+    // a session's epoch is its first registration, kept across resumes
     Ok(client), transport.Session -> {
-      let epoch = state.epoch_base + client.token
+      let epoch = client.epoch
       case seen == option.Some(Seen(epoch:, sequence: client.sequence)) {
         True ->
           push(state, client_id, client, transport.Unchanged(transport.Session))
@@ -2640,7 +3073,7 @@ fn handle_resync(
                 target: transport.Session,
                 epoch:,
                 sequence: client.sequence,
-                state: client.model,
+                state: project_session(state, client.model),
               ),
             )
           charge_bytes(state, client_id, client.token, bytes)
@@ -2698,18 +3131,31 @@ fn handle_retry(
   }
 }
 
+// an earlier parking's timer is stale
+fn handle_session_expired(
+  state: ServerState(model, message),
+  session: String,
+  park: Int,
+) -> ServerState(model, message) {
+  case dict.get(state.parked, session) {
+    Ok(parked) if parked.park == park -> end_parked(state, session, parked)
+    Ok(_) | Error(_) -> state
+  }
+}
+
 // refused like a frame past the rate limit, in line behind what's waiting
 fn handle_shed(
   state: ServerState(model, message),
   client_id: String,
   token: ConnectionToken,
   target: transport.SyncTarget,
+  id: Int,
 ) -> ServerState(model, message) {
-  case current_client(state, client_id, token) {
-    Error(_) -> state
-    Ok(_) ->
-      refuse(state, client_id, target)
-      |> note_over_limit(client_id, state.server.gate.clock(), Bounced)
+  case locate(state, client_id, token) {
+    Unregistered | AwaitingFrame(..) -> state
+    LiveSession(session:, ..) ->
+      refuse(state, session, target, id)
+      |> note_over_limit(session, state.server.gate.clock(), Bounced)
   }
 }
 
@@ -2794,6 +3240,7 @@ fn handle_topic_message(
   state: ServerState(model, message),
   client_id: String,
   topic_id: String,
+  id: Int,
   message: message,
 ) -> ServerState(model, message) {
   let target = transport.Topic(topic_id)
@@ -2804,6 +3251,7 @@ fn handle_topic_message(
         state,
         client_id,
         target,
+        id,
         what,
         ", the store's route crashed on it: " <> reason,
       )
@@ -2812,6 +3260,7 @@ fn handle_topic_message(
         state,
         client_id,
         target,
+        id,
         what,
         " that the store routes elsewhere",
       )
@@ -2819,11 +3268,14 @@ fn handle_topic_message(
     Ok(_), Ok(client) ->
       case dict.get(client.topics, topic_id), dict.get(state.topics, topic_id) {
         Ok(Pending), Ok(entry) | Ok(Joined), Ok(entry) -> {
-          notify(state, TopicMessageReceived(client_id:, topic_id:, message:))
           let from = #(client_id, subscriber_of(state, client))
+          // the session only travels when a rule will read it
+          let session =
+            store.authorisation(state.store)
+            |> option.map(fn(_) { client.model })
           actor.send(
             entry.actor,
-            TopicDispatch(from: option.Some(from), message:),
+            TopicDispatch(from: option.Some(from), session:, id:, message:),
           )
           state
         }
@@ -2842,7 +3294,7 @@ fn handle_topic_message(
               <> shown(client_id)
               <> ", which hasn't joined it",
           )
-          |> push_dropped(client_id, target)
+          |> push_dropped(client_id, target, id)
       }
   }
 }
@@ -2878,6 +3330,25 @@ fn handle_topic_report(
           <> shown(client_id)
           <> ": "
           <> reason,
+      )
+    ProjectionFailed(reason:) -> {
+      diagnose_limited(
+        state,
+        "project",
+        transport.Warning,
+        "the get or set of topic "
+          <> shown(topic_id)
+          <> " crashed, its snapshot carries the whole model: "
+          <> reason,
+      )
+      state
+    }
+    MessageRefused(client_id:, crash:) ->
+      diagnose_refused(
+        state,
+        client_id,
+        "a message for " <> shown(topic_id),
+        crash,
       )
     SnapshotSent(client_id:, token:, bytes:) ->
       charge_bytes(state, client_id, token, bytes)
@@ -2945,11 +3416,11 @@ fn hold(
     Decoded(..), _, True | Undecodable(..), option.Some(_), True ->
       push_held(state, client_id, HeldFrame(inbound:, size:), size, control)
       |> note_over_limit(client_id, now, Waited)
-    Decoded(..), option.Some(target), False
-    | Undecodable(..), option.Some(target), False
-    | Oversized(..), option.Some(target), _
+    Decoded(..), option.Some(#(target, id)), False
+    | Undecodable(..), option.Some(#(target, id)), False
+    | Oversized(..), option.Some(#(target, id)), _
     ->
-      refuse(state, client_id, target)
+      refuse(state, client_id, target, id)
       |> note_over_limit(client_id, now, Bounced)
     // a control that can't wait can't be answered, so a connection that can
     // close is closed and resyncs
@@ -3020,6 +3491,22 @@ fn learn_format(
   }
 }
 
+// `leave_topic` with no `Unsubscribed`
+fn leave_quietly(
+  state: ServerState(model, message),
+  client_id: String,
+  topic_id: String,
+  subscription: SubscriptionState,
+) -> ServerState(model, message) {
+  case subscription {
+    Lapsed -> remove_lapsed(state, topic_id, client_id)
+    Joined | Pending -> {
+      with_topic(state, topic_id, actor.send(_, TopicUnsubscribe(client_id:)))
+      remove_holder(state, topic_id, client_id)
+    }
+  }
+}
+
 // the client lets go of a topic, its entry in `Client.topics` is the
 // caller's to remove
 fn leave_topic(
@@ -3029,16 +3516,28 @@ fn leave_topic(
   subscription: SubscriptionState,
 ) -> ServerState(model, message) {
   case subscription {
-    Lapsed -> remove_lapsed(state, topic_id, client_id)
-    Joined -> {
-      with_topic(state, topic_id, actor.send(_, TopicUnsubscribe(client_id:)))
-      notify(state, Unsubscribed(client_id:, topic_id:))
-      remove_holder(state, topic_id, client_id)
-    }
-    Pending -> {
-      with_topic(state, topic_id, actor.send(_, TopicUnsubscribe(client_id:)))
-      remove_holder(state, topic_id, client_id)
-    }
+    Joined -> notify(state, Unsubscribed(client_id:, topic_id:))
+    Pending | Lapsed -> Nil
+  }
+  leave_quietly(state, client_id, topic_id, subscription)
+}
+
+// its watch, its alias and what its `incoming` reads
+fn let_go_of_link(
+  state: ServerState(model, message),
+  session: String,
+  client: Client(model, message),
+) -> ServerState(model, message) {
+  let _ =
+    actor.unwatch(
+      state.server.handle,
+      down: ClientLeft(client_id: client.link_id, token: Token(client.token)),
+    )
+  gauge_set(client.mirror.closed, 1)
+  case client.link_id == session {
+    True -> state
+    False ->
+      ServerState(..state, aliases: dict.delete(state.aliases, client.link_id))
   }
 }
 
@@ -3060,6 +3559,31 @@ fn live_token(
   }
 }
 
+// through an alias first, then a registration still waiting
+fn locate(
+  state: ServerState(model, message),
+  client_id: String,
+  token: ConnectionToken,
+) -> Located(model, message) {
+  let session = resolve_id(state, client_id, token)
+  case current_client(state, session, token), token {
+    Ok(client), _ -> LiveSession(session:, client:)
+    Error(_), Token(link) ->
+      case dict.get(state.provisional, link) {
+        Ok(provisional) if provisional.client_id == client_id ->
+          AwaitingFrame(token: link, provisional:)
+        Ok(_) | Error(_) -> Unregistered
+      }
+    Error(_), AnyToken ->
+      dict.fold(state.provisional, Unregistered, fn(found, link, provisional) {
+        case found, provisional.client_id == client_id {
+          Unregistered, True -> AwaitingFrame(token: link, provisional:)
+          _, _ -> found
+        }
+      })
+  }
+}
+
 // the topic left unheld longest, stopped, if any is
 fn make_room(
   state: ServerState(model, message),
@@ -3076,6 +3600,36 @@ fn make_room(
         _ -> make_room(state)
       }
     }
+  }
+}
+
+// oldest parked first, never a live one
+fn make_room_for_session(
+  state: ServerState(model, message),
+) -> ServerState(model, message) {
+  let held =
+    dict.size(state.clients)
+    + dict.size(state.provisional)
+    + dict.size(state.parked)
+  let oldest =
+    dict.fold(
+      state.parked,
+      Error(Nil),
+      fn(
+        oldest: Result(#(String, Parked(model, message)), Nil),
+        session,
+        parked: Parked(model, message),
+      ) {
+        case oldest {
+          Ok(#(_, current)) if current.park < parked.park -> oldest
+          Ok(_) | Error(Nil) -> Ok(#(session, parked))
+        }
+      },
+    )
+  case held > state.server.gate.max_clients, oldest {
+    True, Ok(#(session, parked)) ->
+      end_parked(state, session, parked) |> make_room_for_session
+    True, Error(Nil) | False, _ -> state
   }
 }
 
@@ -3126,18 +3680,18 @@ fn mark_unheld(
   }
 }
 
-// a message's target, the `Dropped` a refusal owes
+// a message's target and id, the `Dropped` a refusal owes
 fn message_target_of(
   inbound: Inbound(model, message),
-) -> Option(transport.SyncTarget) {
+) -> Option(#(transport.SyncTarget, Int)) {
   case inbound {
-    Decoded(frame: transport.SessionMessage(..), ..) ->
-      option.Some(transport.Session)
-    Decoded(frame: transport.TopicMessage(topic_id:, ..), ..) ->
-      option.Some(transport.Topic(topic_id))
-    Undecodable(failure: transport.Nonconforming(target:)) ->
-      option.Some(target)
-    Oversized(target:) -> target
+    Decoded(frame: transport.SessionMessage(id:, ..), ..) ->
+      option.Some(#(transport.Session, id))
+    Decoded(frame: transport.TopicMessage(topic_id:, id:, ..), ..) ->
+      option.Some(#(transport.Topic(topic_id), id))
+    Undecodable(failure: transport.Nonconforming(target:, id:)) ->
+      option.Some(#(target, id))
+    Oversized(message:) -> message
     Decoded(..) | Undecodable(failure: transport.Malformed) -> option.None
   }
 }
@@ -3177,7 +3731,12 @@ fn new_state(
     unheld_sequence: 0,
     held_bytes_total: 0,
     idle_after: builder.idle_after,
+    session_grace: builder.session_grace,
     clients: dict.new(),
+    parked: dict.new(),
+    provisional: dict.new(),
+    resume_tokens: dict.new(),
+    aliases: dict.new(),
     topics: dict.new(),
     lapsed: dict.new(),
     // fresh per incarnation, lets a client tell a restart from a reconnect
@@ -3257,14 +3816,45 @@ fn notify(
   state: ServerState(model, message),
   event: ServerEvent(model, message),
 ) -> Nil {
-  list.each(state.observers, fn(observer) {
-    actor.rescue_or("observer", Nil, fn() { observer(event, state.server) })
+  notify_observers(state.observers, state.server, event)
+}
+
+fn notify_observers(
+  observers: List(Observer(model, message)),
+  server: Server(model, message),
+  event: ServerEvent(model, message),
+) -> Nil {
+  list.each(observers, fn(observer) {
+    actor.rescue_or("observer", Nil, fn() { observer(event, server) })
   })
 }
 
 // the server's mailbox is past `max_inbound_queue`, always False on JavaScript
 fn overloaded(server: Server(model, message)) -> Bool {
   server_queue_length(server) > server.gate.max_inbound_queue
+}
+
+fn park(
+  state: ServerState(model, message),
+  session: String,
+  client: Client(model, message),
+) -> ServerState(model, message) {
+  let #(state, client, held) = detach(state, session, client)
+  let park = unique_integer()
+  let timer =
+    actor.send_after(
+      state.server.handle,
+      state.session_grace,
+      SessionExpired(client_id: session, park:),
+    )
+  ServerState(
+    ..state,
+    parked: dict.insert(
+      state.parked,
+      session,
+      Parked(client:, held:, timer:, park:),
+    ),
+  )
 }
 
 // takes the head of the held queue off
@@ -3298,6 +3888,28 @@ fn pop_held(
   }
 }
 
+// the whole copy when `get` or `set` crashes
+fn project_session(state: ServerState(model, message), model: model) -> model {
+  let init = store.get_model(state.store)
+  case
+    actor.rescue(fn() {
+      store.merge_snapshot(state.store, transport.Session, init, model)
+    })
+  {
+    Ok(projected) -> projected
+    Error(reason) -> {
+      diagnose_limited(
+        state,
+        "project",
+        transport.Warning,
+        "the session's get or set crashed, its snapshot carries the whole model: "
+          <> reason,
+      )
+      model
+    }
+  }
+}
+
 // a serialiser crash drops the frame, keeps the connection
 fn push(
   state: ServerState(model, message),
@@ -3314,15 +3926,18 @@ fn push_dropped(
   state: ServerState(model, message),
   client_id: String,
   target: transport.SyncTarget,
+  id: Int,
 ) -> ServerState(model, message) {
   case dict.get(state.clients, client_id), target {
     Error(_), _ -> state
-    Ok(client), transport.Topic(id) ->
-      case dict.get(state.topics, id) {
+    Ok(client), transport.Topic(topic_id) -> {
+      let client = Client(..client, answered: int.max(client.answered, id))
+      let state = put_client(state, client_id, client)
+      case dict.get(state.topics, topic_id) {
         Ok(entry) -> {
           actor.send(
             entry.actor,
-            TopicRefuse(to: #(client_id, subscriber_of(state, client))),
+            TopicRefuse(to: #(client_id, subscriber_of(state, client)), id:),
           )
           state
         }
@@ -3334,19 +3949,23 @@ fn push_dropped(
             client,
             transport.Dropped(
               target: transport.Topic(truncate_bytes(
-                id,
+                topic_id,
                 state.max_topic_id_bytes,
               )),
+              id:,
             ),
           )
       }
-    Ok(client), transport.Session ->
-      push(
-        state,
+    }
+    Ok(client), transport.Session -> {
+      let client = Client(..client, answered: int.max(client.answered, id))
+      put_client(state, client_id, client)
+      |> push(
         client_id,
         client,
-        transport.Dropped(target: transport.Session),
+        transport.Dropped(target: transport.Session, id:),
       )
+    }
   }
 }
 
@@ -3489,14 +4108,23 @@ fn reduce(
     ClientLeft(client_id:, token:) ->
       Continue(handle_disconnect(state, client_id, token))
 
-    DispatchToAllClients(message:) ->
-      dict.fold(state.clients, state, fn(state, client_id, _client) {
-        apply_to_session(state, client_id, message, FromServer)
+    DispatchToAllClients(message:) -> {
+      let ids =
+        list.flatten([
+          dict.keys(state.clients),
+          dict.keys(state.parked),
+          dict.values(state.provisional)
+            |> list.map(fn(link) { link.client_id }),
+        ])
+        |> list.unique
+      list.fold(ids, state, fn(state, client_id) {
+        handle_dispatch_to(state, client_id, message)
       })
       |> Continue
+    }
 
     DispatchToClient(client_id:, message:) ->
-      Continue(apply_to_session(state, client_id, message, FromServer))
+      Continue(handle_dispatch_to(state, client_id, message))
 
     DispatchTopic(topic_id:, message:) ->
       Continue(handle_dispatch_topic(state, topic_id, message))
@@ -3530,9 +4158,11 @@ fn reduce(
       )
 
     Overflowed(client_id:, token:) ->
-      case current_client(state, client_id, Token(token)) {
-        Ok(_) -> Continue(evict_client(state, client_id, SlowReader))
-        Error(Nil) -> Continue(state)
+      case locate(state, client_id, Token(token)) {
+        LiveSession(session:, ..) ->
+          Continue(evict_client(state, session, SlowReader))
+        AwaitingFrame(token:, ..) -> Continue(drop_provisional(state, token))
+        Unregistered -> Continue(state)
       }
 
     RecheckAccess(client_id:) -> Continue(recheck_client(state, client_id))
@@ -3540,11 +4170,14 @@ fn reduce(
     RetryHeld(client_id:, token:) ->
       Continue(handle_retry(state, client_id, token))
 
-    Shed(client_id:, token:, target:) ->
-      Continue(handle_shed(state, client_id, token, target))
+    SessionExpired(client_id:, park:) ->
+      Continue(handle_session_expired(state, client_id, park))
 
-    // topics stop first, each sends a final `Acknowledge(Topic(id), sequence)`,
-    // and every connection now reads as closed
+    Shed(client_id:, token:, target:, id:) ->
+      Continue(handle_shed(state, client_id, token, target, id))
+
+    // topics stop first, each sending a final `Acknowledge` with id 0, and
+    // every connection now reads as closed
     Stop -> {
       dict.each(state.topics, fn(_id, entry) {
         actor.send(entry.actor, TopicStop(end: ShutDown))
@@ -3585,11 +4218,12 @@ fn refuse(
   state: ServerState(model, message),
   client_id: String,
   target: transport.SyncTarget,
+  id: Int,
 ) -> ServerState(model, message) {
   case dict.get(state.clients, client_id) {
     Ok(client) if client.limiter.held.size > 0 ->
-      push_held(state, client_id, HeldRefusal(target:), 0, False)
-    Ok(_) | Error(_) -> push_dropped(state, client_id, target)
+      push_held(state, client_id, HeldRefusal(target:, id:), 0, False)
+    Ok(_) | Error(_) -> push_dropped(state, client_id, target, id)
   }
 }
 
@@ -3752,29 +4386,59 @@ fn rejoin(
   }
 }
 
+// quietly, while its resync names it and access allows it
+fn rejoin_resumed(
+  state: ServerState(model, message),
+  session: String,
+  topic_id: String,
+  wanted: Bool,
+) -> ServerState(model, message) {
+  case dict.get(state.clients, session), dict.get(state.topics, topic_id) {
+    Ok(client), Ok(entry) if wanted ->
+      case still_permitted(state, session, client.model, topic_id) {
+        #(state, True) -> {
+          actor.send(
+            entry.actor,
+            TopicSubscribe(
+              client_id: session,
+              token: client.token,
+              subscriber: subscriber_of(state, client),
+              joining: Resumed,
+              seen: option.None,
+            ),
+          )
+          set_subscription(state, session, topic_id, Joined)
+        }
+        #(state, False) -> {
+          notify(state, Unsubscribed(client_id: session, topic_id:))
+          state
+        }
+      }
+    Ok(_), _ | Error(_), _ -> {
+      notify(state, Unsubscribed(client_id: session, topic_id:))
+      state
+    }
+  }
+}
+
 fn remove_client(
   state: ServerState(model, message),
   client_id: String,
   client: Client(model, message),
 ) -> ServerState(model, message) {
-  // an evicted client's watch would otherwise outlive it
-  let _ =
-    actor.unwatch(
-      state.server.handle,
-      down: ClientLeft(client_id:, token: Token(client.token)),
-    )
   let state =
     dict.fold(client.topics, state, fn(state, topic_id, subscription) {
       leave_topic(state, client_id, topic_id, subscription)
     })
-  gauge_set(client.mirror.closed, 1)
+    |> let_go_of_link(client_id, client)
   let state =
     ServerState(
       ..state,
       clients: dict.delete(state.clients, client_id),
       held_bytes_total: state.held_bytes_total - client.limiter.held_bytes,
+      resume_tokens: dict.delete(state.resume_tokens, client.resume),
     )
-  gauge_set(state.server.gate.registered, dict.size(state.clients))
+  count_registered(state)
   notify(state, ClientDisconnected(client_id:))
   state
 }
@@ -3852,6 +4516,113 @@ fn reserve_client(gate: Gate(model, message)) -> Bool {
     True -> {
       gauge_release(gate.reserved)
       False
+    }
+  }
+}
+
+// for `AnyToken` a live session under the id itself wins
+fn resolve_id(
+  state: ServerState(model, message),
+  client_id: String,
+  token: ConnectionToken,
+) -> String {
+  case dict.get(state.aliases, client_id), token {
+    Ok(Alias(session:, token: aliased)), Token(held) if held == aliased ->
+      session
+    Ok(Alias(session:, ..)), AnyToken ->
+      case dict.has_key(state.clients, client_id) {
+        True -> client_id
+        False -> session
+      }
+    Ok(_), Token(_) | Error(_), _ -> client_id
+  }
+}
+
+// its `Connected` goes ahead of the answers to the resync
+fn resume_session(
+  state: ServerState(model, message),
+  session: String,
+  token: String,
+  link: Int,
+  provisional: Provisional(model, message),
+  cursors: List(transport.Cursor),
+) -> ServerState(model, message) {
+  let found = case
+    dict.get(state.clients, session),
+    dict.get(state.parked, session)
+  {
+    // half-open, its old link goes quietly
+    Ok(live), _ -> {
+      let #(state, client, held) = detach(state, session, live)
+      option.map(live.close, actor.rescue_or("close", Nil, _))
+      Ok(#(state, client, held))
+    }
+    Error(_), Ok(parked) -> {
+      actor.cancel_timer(parked.timer)
+      let state =
+        ServerState(..state, parked: dict.delete(state.parked, session))
+      Ok(#(state, parked.client, parked.held))
+    }
+    Error(_), Error(_) -> Error(Nil)
+  }
+  case found {
+    Error(Nil) ->
+      start_session(state, provisional, link, answered: 0, greet: False)
+    Ok(#(state, client, held)) -> {
+      let client =
+        Client(
+          ..client,
+          token: link,
+          link_id: provisional.client_id,
+          resume: provisional.resume,
+          mirror: provisional.mirror,
+          send: provisional.send,
+          close: provisional.close,
+          format: option.None,
+        )
+      let aliases = case provisional.client_id == session {
+        True -> state.aliases
+        False ->
+          dict.insert(
+            state.aliases,
+            provisional.client_id,
+            Alias(session:, token: link),
+          )
+      }
+      let resume_tokens =
+        dict.delete(state.resume_tokens, token)
+        |> dict.insert(provisional.resume, session)
+      let state =
+        ServerState(
+          ..put_client(state, session, client),
+          aliases:,
+          resume_tokens:,
+        )
+      count_registered(state)
+      let wanted =
+        list.filter_map(cursors, fn(cursor) {
+          case cursor.target {
+            transport.Topic(id) -> Ok(id)
+            transport.Session -> Error(Nil)
+          }
+        })
+      list.fold(held, state, fn(state, topic_id) {
+        rejoin_resumed(
+          state,
+          session,
+          topic_id,
+          list.contains(wanted, topic_id),
+        )
+      })
+      |> push(
+        session,
+        client,
+        transport.Connected(
+          client_id: session,
+          resume: provisional.resume,
+          answered: client.answered,
+        ),
+      )
     }
   }
 }
@@ -3974,8 +4745,8 @@ fn shed(
       actor.rescue_or("close", Nil, close)
       Overloaded
     }
-    option.None, option.Some(target), _ -> {
-      cast(server, Shed(client_id:, token:, target:))
+    option.None, option.Some(#(target, id)), _ -> {
+      cast(server, Shed(client_id:, token:, target:, id:))
       Overloaded
     }
     option.None, option.None, True -> {
@@ -4002,6 +4773,109 @@ fn spend(
   put_limiter(state, client_id, client, Limiter(..client.limiter, allowance:))
 }
 
+// a reused id replaces the old session, only its budget carries over, so
+// reconnecting under one id can't buy a fresh burst
+fn start_session(
+  state: ServerState(model, message),
+  provisional: Provisional(model, message),
+  token: Int,
+  answered answered: Int,
+  greet greet: Bool,
+) -> ServerState(model, message) {
+  let client_id = provisional.client_id
+  let now = state.server.gate.clock()
+  let fresh =
+    Limiter(
+      allowance: state.server.gate.rate_limit.burst * 1000,
+      refilled_at: now,
+      window_started_at: now,
+      refused: 0,
+      reported: False,
+      held: queue_from_list([]),
+      held_controls: 0,
+      held_bytes: 0,
+      retry_scheduled: False,
+      diagnosed_at: option.None,
+      suppressed: 0,
+    )
+  let earlier = case
+    dict.get(state.clients, client_id),
+    dict.get(state.parked, client_id)
+  {
+    Ok(old), _ -> Ok(old.limiter)
+    Error(_), Ok(parked) -> Ok(parked.client.limiter)
+    Error(_), Error(_) -> Error(Nil)
+  }
+  let limiter = case earlier {
+    Ok(old) ->
+      Limiter(
+        ..fresh,
+        allowance: old.allowance,
+        refilled_at: old.refilled_at,
+        window_started_at: old.window_started_at,
+        refused: old.refused,
+        reported: old.reported,
+        diagnosed_at: old.diagnosed_at,
+        suppressed: old.suppressed,
+      )
+    Error(Nil) -> fresh
+  }
+  let state =
+    evict_client(state, client_id, Superseded)
+    |> supersede_parked(client_id)
+  let client =
+    Client(
+      token:,
+      link_id: client_id,
+      epoch: state.epoch_base + token,
+      seed: provisional.seed,
+      resume: provisional.resume,
+      answered:,
+      limiter:,
+      mirror: provisional.mirror,
+      send: provisional.send,
+      close: provisional.close,
+      model: store.get_model(state.store),
+      sequence: 0,
+      topics: dict.new(),
+      format: option.None,
+    )
+  let state = put_client(state, client_id, client)
+  let state = case provisional.resume {
+    "" -> state
+    resume ->
+      ServerState(
+        ..state,
+        resume_tokens: dict.insert(state.resume_tokens, resume, client_id),
+      )
+  }
+  count_registered(state)
+  let state = case greet {
+    True -> {
+      // counted as registered before the reservation goes, the cap never dips
+      gauge_release(state.server.gate.reserved)
+      list.fold(
+        greeting(state, client_id, provisional.resume),
+        state,
+        fn(state, frame) { push(state, client_id, client, frame) },
+      )
+    }
+    False -> state
+  }
+  let state = make_room_for_session(state)
+  // seeds applied in the actor land before this client's first frame
+  let state =
+    list.fold(provisional.seed, state, fn(state, message) {
+      warn_about_seed(state, message)
+      |> apply_to_session(client_id, message, FromServer)
+    })
+    |> list.fold(list.reverse(provisional.dispatched), _, fn(state, message) {
+      apply_to_session(state, client_id, message, FromServer)
+    })
+  notify(state, ClientConnected(client_id:))
+  state
+}
+
 // with the incarnation that tells its reports from an earlier actor's
 fn start_topic(
   state: ServerState(model, message),
@@ -4016,19 +4890,29 @@ fn start_topic(
       fn() { init(rest) }
     })
     |> option.from_result
+  let app_store = state.store
+  let init = store.get_model(app_store)
+  let observers = state.observers
+  let server = state.server
   let topic_state =
     TopicState(
       id:,
       incarnation:,
       serialiser: state.server.gate.serialiser,
-      update: store.update_function(state.store),
+      update: store.update_function(app_store),
       load:,
       report: fn(report) {
         actor.send(cell, TopicReported(topic_id: id, report:))
       },
+      notify: notify_observers(observers, server, _),
+      authorise: store.authorisation(app_store),
       subscribers: dict.new(),
-      current: store.get_model(state.store),
+      current: init,
       sequence: 0,
+      project: fn(model) {
+        store.merge_snapshot(app_store, transport.Topic(id), init, model)
+      },
+      projected: option.None,
     )
   actor.start_in_supervisor(
     state.supervisor,
@@ -4116,6 +5000,20 @@ fn subscriber_of(
     format: option.unwrap(client.format, state.format),
     token: client.token,
   )
+}
+
+// reported like a live session taken over
+fn supersede_parked(
+  state: ServerState(model, message),
+  client_id: String,
+) -> ServerState(model, message) {
+  case dict.get(state.parked, client_id) {
+    Error(Nil) -> state
+    Ok(parked) -> {
+      notify(state, ClientEvicted(client_id:, reason: Superseded))
+      end_parked(state, client_id, parked)
+    }
+  }
 }
 
 @target(erlang)
@@ -4211,26 +5109,52 @@ fn topic_frame_in(
 fn topic_handle_dispatch(
   state: TopicState(model, message),
   from: Option(#(String, Subscriber)),
+  session: Option(model),
+  id: Int,
   message: message,
 ) -> TopicState(model, message) {
   let sender = option.map(from, pair.first)
   // clients write only to subscribed topics, server dispatches are trusted
-  let authorised = case sender {
+  let subscribed = case sender {
     option.Some(client_id) -> dict.has_key(state.subscribers, client_id)
     option.None -> True
   }
-  use <- bool.lazy_guard(when: !authorised, return: fn() {
-    topic_send_dropped(state, from)
+  use <- bool.lazy_guard(when: !subscribed, return: fn() {
+    topic_send_dropped(state, from, id)
+    state
+  })
+  let permitted = case sender, state.authorise, session {
+    option.None, _, _ | option.Some(_), option.None, _ -> Ok(Nil)
+    option.Some(_), option.Some(rule), option.Some(session) ->
+      authorised(rule, session, state.current, message)
+    // fails closed, the server sends the session whenever there's a rule
+    option.Some(_), option.Some(_), option.None -> Error(option.None)
+  }
+  use <- bool.lazy_guard(when: result.is_error(permitted), return: fn() {
+    let crash = result.unwrap_error(permitted, option.None)
+    case sender {
+      option.Some(client_id) ->
+        topic_report(state, MessageRefused(client_id:, crash:))
+      option.None -> Nil
+    }
+    topic_send_dropped(state, from, id)
     state
   })
   // an unmatched payload crashes, drop the frame not the actor
   case actor.rescue(fn() { state.update(state.current, message) }) {
     Error(reason) -> {
       topic_report(state, MessageCrashed(from: sender, reason:))
-      topic_send_dropped(state, from)
+      topic_send_dropped(state, from, id)
       state
     }
     Ok(current) -> {
+      // before the acknowledgement, a write the observer makes is done first
+      state.notify(TopicMessageApplied(
+        client_id: sender,
+        topic_id: state.id,
+        message:,
+        model: current,
+      ))
       let sequence = state.sequence + 1
       let #(originator, others) = case sender {
         option.Some(id) -> #(
@@ -4242,7 +5166,7 @@ fn topic_handle_dispatch(
       let update =
         transport.TopicUpdate(topic_id: state.id, sequence:, payload: message)
       let acknowledge =
-        transport.Acknowledge(target: transport.Topic(state.id), sequence:)
+        transport.Acknowledge(target: transport.Topic(state.id), sequence:, id:)
       // encode only in the recipients' formats, at most two
       let update_frames = topic_encode_each(state, update, others)
       let acknowledge_frames = topic_encode_each(state, acknowledge, originator)
@@ -4265,7 +5189,7 @@ fn topic_handle_load(
     option.None -> state
     option.Some(load) ->
       case actor.rescue(load) {
-        Ok(current) -> TopicState(..state, current:)
+        Ok(current) -> TopicState(..state, current:, projected: option.None)
         Error(reason) -> {
           topic_report(state, LoadFailed(reason:))
           state
@@ -4284,9 +5208,8 @@ fn topic_handle_send_snapshot(
   case dict.has_key(state.subscribers, client_id) {
     True ->
       topic_send_snapshot(state, client_id, token, subscriber, Charged, seen)
-    False -> Nil
+    False -> state
   }
-  state
 }
 
 // every subscriber gets its last `Acknowledge`, then a `Rejected` when the
@@ -4295,9 +5218,11 @@ fn topic_handle_stop(state: TopicState(model, message), end: TopicEnd) -> Nil {
   let acknowledge_frames =
     topic_encode_each(
       state,
+      // answers no message
       transport.Acknowledge(
         target: transport.Topic(state.id),
         sequence: state.sequence,
+        id: 0,
       ),
       state.subscribers,
     )
@@ -4340,34 +5265,65 @@ fn topic_handle_subscribe(
       ..state,
       subscribers: dict.insert(state.subscribers, client_id, subscriber),
     )
-  let charge = case joining {
-    Asked -> Charged
-    Rejoined | Restored -> Free
+  let state = case joining {
+    Asked ->
+      topic_send_snapshot(state, client_id, token, subscriber, Charged, seen)
+    Rejoined | Restored ->
+      topic_send_snapshot(state, client_id, token, subscriber, Free, seen)
+    // its resync asks for the snapshot next
+    Resumed -> state
   }
-  topic_send_snapshot(state, client_id, token, subscriber, charge, seen)
   case joining, already_in {
     Asked, False | Rejoined, False ->
       topic_report(
         state,
         Admitted(client_id:, token:, incarnation: state.incarnation),
       )
-    Asked, True | Rejoined, True | Restored, _ -> Nil
+    Asked, True | Rejoined, True | Restored, _ | Resumed, _ -> Nil
   }
   state
 }
 
+// once per state, the whole model when `get` or `set` crashes
+fn topic_projection(
+  state: TopicState(model, message),
+) -> #(TopicState(model, message), model) {
+  case state.projected {
+    option.Some(#(sequence, projected)) if sequence == state.sequence -> #(
+      state,
+      projected,
+    )
+    option.Some(_) | option.None -> {
+      let projected = case actor.rescue(fn() { state.project(state.current) }) {
+        Ok(projected) -> projected
+        Error(reason) -> {
+          topic_report(state, ProjectionFailed(reason:))
+          state.current
+        }
+      }
+      #(
+        TopicState(
+          ..state,
+          projected: option.Some(#(state.sequence, projected)),
+        ),
+        projected,
+      )
+    }
+  }
+}
+
 fn topic_reduce(
-  event: TopicEvent(message),
+  event: TopicEvent(model, message),
   state: TopicState(model, message),
 ) -> actor.CellOutcome(TopicState(model, message), Int) {
   case event {
-    TopicDispatch(from:, message:) ->
-      Continue(topic_handle_dispatch(state, from, message))
+    TopicDispatch(from:, session:, id:, message:) ->
+      Continue(topic_handle_dispatch(state, from, session, id, message))
 
     TopicLoad -> Continue(topic_handle_load(state))
 
-    TopicRefuse(to:) -> {
-      topic_send_dropped(state, option.Some(to))
+    TopicRefuse(to:, id:) -> {
+      topic_send_dropped(state, option.Some(to), id)
       Continue(state)
     }
 
@@ -4438,6 +5394,7 @@ fn topic_send(
 fn topic_send_dropped(
   state: TopicState(model, message),
   to: Option(#(String, Subscriber)),
+  id: Int,
 ) -> Nil {
   case to {
     option.Some(#(client_id, subscriber)) -> {
@@ -4446,7 +5403,7 @@ fn topic_send_dropped(
           state,
           client_id,
           subscriber,
-          transport.Dropped(target: transport.Topic(state.id)),
+          transport.Dropped(target: transport.Topic(state.id), id:),
         )
       Nil
     }
@@ -4463,16 +5420,17 @@ fn topic_send_snapshot(
   subscriber: Subscriber,
   charge: Charge,
   seen: Option(Seen),
-) -> Nil {
+) -> TopicState(model, message) {
   let target = transport.Topic(state.id)
   let current = Seen(epoch: state.incarnation, sequence: state.sequence)
   case seen == option.Some(current) {
     True -> {
       let _ =
         topic_send(state, client_id, subscriber, transport.Unchanged(target))
-      Nil
+      state
     }
     False -> {
+      let #(state, projected) = topic_projection(state)
       let bytes =
         topic_send(
           state,
@@ -4482,7 +5440,7 @@ fn topic_send_snapshot(
             target:,
             epoch: state.incarnation,
             sequence: state.sequence,
-            state: state.current,
+            state: projected,
           ),
         )
       case charge, bytes >= bytes_per_cost {
@@ -4490,6 +5448,7 @@ fn topic_send_snapshot(
           topic_report(state, SnapshotSent(client_id:, token:, bytes:))
         Charged, False | Free, _ -> Nil
       }
+      state
     }
   }
 }
@@ -4625,8 +5584,8 @@ fn warn_about_setup(builder: Builder(model, message)) -> Nil {
       actor.log(
         transport.Warning,
         "lily: the server decodes with the automatic serialiser and no schema, "
-          <> "so a client can put any type in any field, generate one with "
-          <> "`gleam run -m lily/dev schema` and pipe it into store.schema",
+          <> "so a client can put any type in any field, build one with "
+          <> "transport.schema and pipe it into store.schema",
       )
     False, True ->
       actor.log(

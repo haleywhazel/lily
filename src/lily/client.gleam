@@ -70,6 +70,10 @@
 //// again after concurrent edits. A reconnect does the same, edits made
 //// offline included.
 ////
+//// A message in flight when a connection drops is sent again, applied exactly
+//// once within [`server.session_grace`](./server.html#session_grace) and at
+//// most once past it.
+////
 //// Lily doesn't need to know whether your messages commute. It only replays
 //// your own messages through your own `update` on top of the server's state,
 //// which suits CRDT style messages (they converge whatever the order) as well
@@ -196,7 +200,7 @@ pub fn connect(
 /// })
 /// ```
 pub fn dispatch(runtime: Runtime(model, message, mode)) -> fn(message) -> Nil {
-  fn(message) { apply_message(runtime, message, Dispatched) }
+  fn(message) { apply_message(runtime, message, Dispatched, checked: True) }
 }
 
 /// The current model.
@@ -300,8 +304,8 @@ type Confirmed {
 
 @target(javascript)
 type PendingMessage(message) {
-  // sent on the current connection
-  PendingMessage(message: message, delivered: Bool)
+  // `delivered` when sent on the current connection
+  PendingMessage(id: Int, message: message, delivered: Bool)
 }
 
 // `front` oldest first then `back` newest first, pushes and pops stay cheap
@@ -343,7 +347,11 @@ type SyncState(model, message) {
     // sent before the channel exists
     waiting: List(BitArray),
     open: Bool,
-    replaying: Bool,
+    // the id of the offline queue frame being replayed
+    replaying: Option(Int),
+    // the next message's id, and the highest one put on the wire
+    next_id: Int,
+    delivered: Int,
     subscribed: List(String),
     // the model `subscribed` was worked out from
     subscribed_for: Option(model),
@@ -362,21 +370,52 @@ type SyncState(model, message) {
     // another protocol, nothing is sent or read again
     stopped: Bool,
     warned_no_session: Bool,
+    // from the last `Connected`
+    resume: Option(String),
   )
+}
+
+@target(javascript)
+type Unanswered(message) {
+  Unanswered(target: transport.SyncTarget, id: Int, message: message)
 }
 
 // =============================================================================
 // PRIVATE FUNCTIONS
 // =============================================================================
 
+// by id, across every target
+@target(javascript)
+fn all_pending(sync: SyncSession(model, message)) -> List(Unanswered(message)) {
+  dict.fold(sync_state(sync).pending, [], fn(all, target, queue) {
+    list.append(queue.front, list.reverse(queue.back))
+    |> list.map(fn(entry) {
+      Unanswered(target:, id: entry.id, message: entry.message)
+    })
+    |> list.append(all, _)
+  })
+  |> list.sort(fn(one, other) { int.compare(one.id, other.id) })
+}
+
+// a message the store's rule turns down is neither applied nor sent
 fn apply_message(
   runtime: Runtime(model, message, mode),
   message: message,
   origin: MessageOrigin,
+  checked checked: Bool,
 ) -> Nil {
   let update = store.update_function(runtime.store)
   run(runtime.handle, fn(model) {
-    #(update(model, message), MessageApplied(message:, origin:))
+    case !checked || permitted(runtime.store, model, message) {
+      True -> #(update(model, message), MessageApplied(message:, origin:))
+      False -> #(
+        model,
+        Diagnostic(
+          level: transport.Warning,
+          message: "skipped a message the store's authorise rule refused",
+        ),
+      )
+    }
   })
 }
 
@@ -445,7 +484,10 @@ fn connect_with(
         channel: None,
         waiting: [],
         open: False,
-        replaying: False,
+        replaying: None,
+        next_id: 1,
+        // an earlier page's, its retransmits are refused
+        delivered: transport.pending_delivered(connector),
         subscribed: [],
         subscribed_for: None,
         pending: dict.new(),
@@ -455,6 +497,7 @@ fn connect_with(
         rejected: set.new(),
         stopped: False,
         warned_no_session: False,
+        resume: None,
       )),
     )
 
@@ -468,13 +511,13 @@ fn connect_with(
     sync_subscriptions(sync, model)
   })
 
-  // replay an earlier page's offline queue, sent once the connection opens
+  // replay an earlier page's offline queue, sent once the connection opens,
+  // new messages numbered after it
   codec.when_registered(fn() {
-    update_state(sync, fn(state) { SyncState(..state, replaying: True) })
     list.each(transport.pending(connector), fn(bytes) {
-      replay(runtime, transport.decode(bytes, serialiser: sync.serialiser))
+      replay(sync, transport.decode(bytes, serialiser: sync.serialiser))
     })
-    update_state(sync, fn(state) { SyncState(..state, replaying: False) })
+    update_state(sync, fn(state) { SyncState(..state, replaying: None) })
   })
 
   let handler =
@@ -488,7 +531,7 @@ fn connect_with(
         })
       },
       opened: fn() { handle_opened(sync) },
-      closed: fn() { handle_closed(sync) },
+      closed: fn() { handle_closed(sync, connector) },
     )
   let connected = transport.run_connector(connector, handler)
   update_state(sync, fn(state) { SyncState(..state, channel: Some(connected)) })
@@ -531,10 +574,13 @@ fn emit(handle: RuntimeHandle, event: ClientEvent(model, message)) -> Nil {
   run(handle, fn(model) { #(model, event) })
 }
 
+// an edit sent but unanswered may or may not have landed, so its slice no
+// longer matches what was confirmed, a queue sends it again
 @target(javascript)
-fn handle_closed(sync: SyncSession(model, message)) -> Nil {
-  // an edit sent but unanswered may or may not have landed, so its slice no
-  // longer matches what was confirmed, and the reconnect snapshot decides
+fn handle_closed(
+  sync: SyncSession(model, message),
+  connector: transport.Connector,
+) -> Nil {
   update_state(sync, fn(state) {
     let unsure =
       dict.filter(state.pending, fn(_target, queue) {
@@ -547,7 +593,11 @@ fn handle_closed(sync: SyncSession(model, message)) -> Nil {
       confirmed: dict.drop(state.confirmed, dict.keys(unsure)),
     )
   })
-  update_pending(sync, list.filter(_, fn(entry) { !entry.delivered }))
+  case sync.queues {
+    True -> requeue(sync, connector)
+    False ->
+      update_pending(sync, list.filter(_, fn(entry) { !entry.delivered }))
+  }
   emit(sync.runtime.handle, ConnectionClosed)
 }
 
@@ -560,17 +610,27 @@ fn handle_incoming(
   let handle = sync.runtime.handle
   case frame {
     // in step order
-    Ok(transport.Acknowledge(target:, sequence:)) ->
+    Ok(transport.Acknowledge(target:, sequence:, id:)) ->
       run_effect(handle, fn() {
         confirm(sync, target, sequence)
-        settle(sync, target, dropped: False)
+        settle(sync, target, id, dropped: False)
       })
 
-    Ok(transport.Dropped(target:)) ->
-      run_effect(handle, fn() { settle(sync, target, dropped: True) })
+    Ok(transport.Dropped(target:, id:)) ->
+      run_effect(handle, fn() { settle(sync, target, id, dropped: True) })
 
-    Ok(transport.Connected(client_id:)) ->
-      emit(handle, ClientIdAssigned(client_id:))
+    // again on a resume, ahead of its snapshots
+    Ok(transport.Connected(client_id:, resume:, answered:)) ->
+      run_effect(handle, fn() {
+        update_state(sync, fn(state) {
+          case resume {
+            "" -> state
+            token -> SyncState(..state, resume: Some(token))
+          }
+        })
+        settle_answered(sync, answered)
+        emit(handle, ClientIdAssigned(client_id:))
+      })
 
     // a late one for a topic left is ignored
     Ok(transport.TopicUpdate(topic_id:, payload:, sequence:)) ->
@@ -628,10 +688,10 @@ fn handle_incoming(
       }
 
     // client-to-server variants, never legitimately arrive here
-    Ok(transport.Resync(_))
-    | Ok(transport.SessionMessage(_))
+    Ok(transport.Resync(..))
+    | Ok(transport.SessionMessage(..))
     | Ok(transport.Subscribe(_))
-    | Ok(transport.TopicMessage(_, _))
+    | Ok(transport.TopicMessage(..))
     | Ok(transport.Unsubscribe(_)) -> Nil
 
     Error(Nil) ->
@@ -671,14 +731,25 @@ fn handle_opened(sync: SyncSession(model, message)) -> Nil {
       Error(Nil) -> transport.Unknown(target:)
     }
   }
+  let state = sync_state(sync)
   let _ =
     send(
       sync,
-      transport.Resync(cursors: [
-        cursor(transport.Session),
-        ..list.map(wanted, fn(topic_id) { cursor(transport.Topic(topic_id)) })
-      ]),
+      transport.Resync(
+        cursors: [
+          cursor(transport.Session),
+          ..list.map(wanted, fn(topic_id) { cursor(transport.Topic(topic_id)) })
+        ],
+        resume: state.resume,
+        delivered: state.delivered,
+      ),
     )
+  // the queue flushes behind the resync
+  let flushed =
+    list.fold(all_pending(sync), state.delivered, fn(highest, entry) {
+      int.max(highest, entry.id)
+    })
+  update_state(sync, fn(state) { SyncState(..state, delivered: flushed) })
   update_pending(
     sync,
     list.map(_, fn(entry) { PendingMessage(..entry, delivered: True) }),
@@ -764,6 +835,29 @@ fn pending_messages(
   }
 }
 
+// a crashing rule refuses
+@target(javascript)
+fn permitted(
+  app_store: Store(model, message, mode),
+  model: model,
+  message: message,
+) -> Bool {
+  case store.authorisation(app_store), store.route(app_store, message) {
+    None, _ | Some(_), store.Local -> True
+    Some(rule), store.Session | Some(rule), store.Topic(_) ->
+      actor.rescue(fn() { rule(model, model, message) }) == Ok(True)
+  }
+}
+
+@target(erlang)
+fn permitted(
+  _store: Store(model, message, mode),
+  _model: model,
+  _message: message,
+) -> Bool {
+  True
+}
+
 @target(javascript)
 fn queue_is_empty(queue: PendingQueue(message)) -> Bool {
   queue.front == [] && queue.back == []
@@ -808,13 +902,23 @@ fn rebase(
 // only client-to-server message frames are queued
 @target(javascript)
 fn replay(
-  runtime: Runtime(model, message, Synced),
+  sync: SyncSession(model, message),
   frame: Result(transport.Protocol(model, message), Nil),
 ) -> Nil {
+  let runtime = sync.runtime
   case frame {
-    Ok(transport.SessionMessage(payload:))
-    | Ok(transport.TopicMessage(payload:, ..)) ->
-      apply_message(runtime, payload, Dispatched)
+    // already in the connector's queue, the server has the last word
+    Ok(transport.SessionMessage(id:, payload:))
+    | Ok(transport.TopicMessage(id:, payload:, ..)) -> {
+      update_state(sync, fn(state) {
+        SyncState(
+          ..state,
+          replaying: Some(id),
+          next_id: int.max(state.next_id, id + 1),
+        )
+      })
+      apply_message(runtime, payload, Dispatched, checked: False)
+    }
 
     Ok(transport.Acknowledge(..))
     | Ok(transport.Connected(..))
@@ -838,6 +942,26 @@ fn replay(
         ),
       )
   }
+}
+
+// exactly what's pending, in id order
+@target(javascript)
+fn requeue(
+  sync: SyncSession(model, message),
+  connector: transport.Connector,
+) -> Nil {
+  all_pending(sync)
+  |> list.filter_map(fn(entry) {
+    let frame = case entry.target {
+      transport.Session ->
+        transport.SessionMessage(id: entry.id, payload: entry.message)
+      transport.Topic(topic_id) ->
+        transport.TopicMessage(topic_id:, id: entry.id, payload: entry.message)
+    }
+    actor.rescue(fn() { transport.encode(frame, serialiser: sync.serialiser) })
+    |> result.replace_error(Nil)
+  })
+  |> transport.requeue(connector, _, delivered: sync_state(sync).delivered)
 }
 
 // waits until every edit is answered, an earlier snapshot would miss some
@@ -876,7 +1000,14 @@ fn resync_if_settled(
       case asking {
         True -> {
           let _ =
-            send(sync, transport.Resync(cursors: [transport.Unknown(target:)]))
+            send(
+              sync,
+              transport.Resync(
+                cursors: [transport.Unknown(target:)],
+                resume: None,
+                delivered: sync_state(sync).delivered,
+              ),
+            )
           Nil
         }
         False -> Nil
@@ -935,16 +1066,33 @@ fn send_message(sync: SyncSession(model, message), message: message) -> Nil {
     store.Topic(id) -> Some(transport.Topic(id))
   }
   let state = sync_state(sync)
+  let id = state.next_id
   case target, state.replaying {
     None, _ -> Nil
-    // already in the connector's queue
-    Some(target), True -> track(sync, target, message, delivered: state.open)
-    Some(transport.Session), False -> {
+    // already in the connector's queue, under its own id
+    Some(target), Some(replayed) ->
+      track(sync, target, replayed, message, delivered: state.open)
+    Some(transport.Session), None -> {
       warn_if_no_session(sync)
-      sent(sync, transport.Session, message, transport.SessionMessage(message))
+      update_state(sync, fn(state) { SyncState(..state, next_id: id + 1) })
+      sent(
+        sync,
+        transport.Session,
+        id,
+        message,
+        transport.SessionMessage(id:, payload: message),
+      )
     }
-    Some(transport.Topic(id) as target), False ->
-      sent(sync, target, message, transport.TopicMessage(id, message))
+    Some(transport.Topic(topic_id) as target), None -> {
+      update_state(sync, fn(state) { SyncState(..state, next_id: id + 1) })
+      sent(
+        sync,
+        target,
+        id,
+        message,
+        transport.TopicMessage(topic_id:, id:, payload: message),
+      )
+    }
   }
 }
 
@@ -952,12 +1100,18 @@ fn send_message(sync: SyncSession(model, message), message: message) -> Nil {
 fn sent(
   sync: SyncSession(model, message),
   target: transport.SyncTarget,
+  id: Int,
   message: message,
   frame: transport.Protocol(model, message),
 ) -> Nil {
   case send_frame(sync, frame), sync.queues {
-    SentOrQueued, _ -> track(sync, target, message, delivered: True)
-    Unsent, True -> track(sync, target, message, delivered: False)
+    SentOrQueued, _ -> {
+      update_state(sync, fn(state) {
+        SyncState(..state, delivered: int.max(state.delivered, id))
+      })
+      track(sync, target, id, message, delivered: True)
+    }
+    Unsent, True -> track(sync, target, id, message, delivered: False)
     // lost, never queued either, needs a snapshot
     Unsent, False | Unencodable, _ -> {
       mark_diverged(sync, target)
@@ -966,25 +1120,50 @@ fn sent(
   }
 }
 
-// a stopping topic's last `Acknowledge` may find nothing pending
+// by id, an answer to nothing pending is ignored
 @target(javascript)
 fn settle(
   sync: SyncSession(model, message),
   target: transport.SyncTarget,
+  id: Int,
   dropped dropped: Bool,
 ) -> Nil {
+  let held = case dict.get(sync_state(sync).pending, target) {
+    Ok(queue) ->
+      list.any(queue.front, fn(entry) { entry.id == id })
+      || list.any(queue.back, fn(entry) { entry.id == id })
+    Error(Nil) -> False
+  }
+  use <- bool.lazy_guard(when: !held, return: fn() {
+    resync_if_settled(sync, target)
+  })
   update_target(sync, target, fn(queue) {
-    case queue.front {
-      [_, ..front] -> PendingQueue(..queue, front:)
-      [] ->
-        PendingQueue(front: list.drop(list.reverse(queue.back), 1), back: [])
-    }
+    PendingQueue(
+      front: list.filter(queue.front, fn(entry) { entry.id != id }),
+      back: list.filter(queue.back, fn(entry) { entry.id != id }),
+    )
   })
   case dropped {
     True -> mark_diverged(sync, target)
     False -> Nil
   }
   resync_if_settled(sync, target)
+}
+
+// the resumed session applied these, its snapshot holds them
+@target(javascript)
+fn settle_answered(sync: SyncSession(model, message), answered: Int) -> Nil {
+  let settled =
+    all_pending(sync)
+    |> list.filter_map(fn(entry) {
+      case entry.id <= answered {
+        True -> Ok(entry.target)
+        False -> Error(Nil)
+      }
+    })
+    |> list.unique
+  update_pending(sync, list.filter(_, fn(entry) { entry.id > answered }))
+  list.each(settled, mark_diverged(sync, _))
 }
 
 // for good, the server may misread anything sent
@@ -1073,12 +1252,13 @@ fn sync_subscriptions(sync: SyncSession(model, message), model: model) -> Nil {
 fn track(
   sync: SyncSession(model, message),
   target: transport.SyncTarget,
+  id: Int,
   message: message,
   delivered delivered: Bool,
 ) -> Nil {
   update_target(sync, target, fn(queue) {
     PendingQueue(..queue, back: [
-      PendingMessage(message:, delivered:),
+      PendingMessage(id:, message:, delivered:),
       ..queue.back
     ])
   })

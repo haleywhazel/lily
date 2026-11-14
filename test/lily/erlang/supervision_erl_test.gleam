@@ -516,7 +516,7 @@ pub fn supervision_subscribed_does_not_refire_on_reattach_test() {
   wire_support.topic_message(c1, "chat", Increment)
   frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Topic("chat"), sequence: 1),
+    transport.Acknowledge(target: transport.Topic("chat"), sequence: 1, id: 0),
   ])
 }
 
@@ -684,7 +684,7 @@ pub fn supervision_a_slow_loader_holds_up_its_topic_and_not_the_server_test() {
 
   list.map(recorded2(), wire_support.decode)
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 1),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
   ])
   recorded1() |> should.equal([])
   // and the subscriber hears once it's loaded

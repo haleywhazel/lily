@@ -208,7 +208,9 @@ pub fn observer_connected_version_and_rejected_frames_are_events_test() {
   let events = record(runtime)
   let #(handler, _sent) = test_support.connect_capturing(runtime)
 
-  handler.received(frame(transport.Connected(client_id: "abc")))
+  handler.received(
+    frame(transport.Connected(client_id: "abc", resume: "", answered: 0)),
+  )
   handler.received(
     frame(transport.Version(hash: "v1", protocol: transport.protocol_version)),
   )

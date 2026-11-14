@@ -6,6 +6,7 @@
 // =============================================================================
 
 import gleam/bit_array
+import gleam/option
 import gleam/string
 
 import gleeunit/should
@@ -37,11 +38,11 @@ fn message_pack_capped(depth: Int) -> transport.Serialiser(Model, Message) {
 
 pub fn encode_connected_test() {
   transport.encode(
-    Connected(client_id: "abc123"),
+    Connected(client_id: "abc123", resume: "r1", answered: 3),
     serialiser: test_support.custom_serialiser(),
   )
   |> should.equal(bit_array.from_string(
-    "{\"type\":\"connected\",\"client_id\":\"abc123\"}",
+    "{\"type\":\"connected\",\"client_id\":\"abc123\",\"resume\":\"r1\",\"answered\":3}",
   ))
 }
 
@@ -58,36 +59,40 @@ pub fn encode_version_test() {
 pub fn encode_acknowledge_test() {
   let result =
     transport.encode(
-      Acknowledge(target: Session, sequence: 1),
+      Acknowledge(target: Session, sequence: 1, id: 4),
       serialiser: test_support.custom_serialiser(),
     )
   result
   |> should.equal(bit_array.from_string(
-    "{\"type\":\"acknowledge\",\"target\":{\"kind\":\"session\"},\"sequence\":1}",
+    "{\"type\":\"acknowledge\",\"target\":{\"kind\":\"session\"},\"sequence\":1,\"id\":4}",
   ))
 }
 
 pub fn encode_session_message_test() {
   let result =
     transport.encode(
-      SessionMessage(payload: Increment),
+      SessionMessage(id: 1, payload: Increment),
       serialiser: test_support.custom_serialiser(),
     )
   result
   |> should.equal(bit_array.from_string(
-    "{\"type\":\"session_message\",\"payload\":{\"tag\":\"Increment\"}}",
+    "{\"type\":\"session_message\",\"id\":1,\"payload\":{\"tag\":\"Increment\"}}",
   ))
 }
 
 pub fn encode_resync_test() {
   let result =
     transport.encode(
-      Resync(cursors: [transport.Unknown(Session)]),
+      Resync(
+        cursors: [transport.Unknown(Session)],
+        resume: option.Some("r1"),
+        delivered: 4,
+      ),
       serialiser: test_support.custom_serialiser(),
     )
   result
   |> should.equal(bit_array.from_string(
-    "{\"type\":\"resync\",\"cursors\":[{\"target\":{\"kind\":\"session\"}}]}",
+    "{\"type\":\"resync\",\"cursors\":[{\"target\":{\"kind\":\"session\"}}],\"resume\":\"r1\",\"delivered\":4}",
   ))
 }
 
@@ -130,17 +135,19 @@ pub fn encode_snapshot_test() {
 pub fn decode_connected_test() {
   test_support.register_fixtures()
   transport.decode(
-    bit_array.from_string("{\"type\":\"connected\",\"client_id\":\"abc123\"}"),
+    bit_array.from_string(
+      "{\"type\":\"connected\",\"client_id\":\"abc123\",\"resume\":\"r1\",\"answered\":3}",
+    ),
     serialiser: test_support.custom_serialiser(),
   )
-  |> should.equal(Ok(Connected(client_id: "abc123")))
+  |> should.equal(Ok(Connected(client_id: "abc123", resume: "r1", answered: 3)))
 }
 
 pub fn decode_json_deeper_than_the_cap_fails_test() {
   // a server reads JSON from any client, the cap must hold there too
   test_support.register_fixtures()
   let nested = fn(depth) {
-    "{\"type\":\"session_message\",\"payload\":"
+    "{\"type\":\"session_message\",\"id\":1,\"payload\":"
     <> string.repeat("[", depth)
     <> string.repeat("]", depth)
     <> "}"
@@ -170,52 +177,58 @@ pub fn decode_acknowledge_test() {
   test_support.register_fixtures()
   let bytes =
     bit_array.from_string(
-      "{\"type\":\"acknowledge\",\"target\":{\"kind\":\"session\"},\"sequence\":1}",
+      "{\"type\":\"acknowledge\",\"target\":{\"kind\":\"session\"},\"sequence\":1,\"id\":4}",
     )
   let result =
     transport.decode(bytes, serialiser: test_support.custom_serialiser())
 
   result
-  |> should.equal(Ok(Acknowledge(target: Session, sequence: 1)))
+  |> should.equal(Ok(Acknowledge(target: Session, sequence: 1, id: 4)))
 }
 
 pub fn decode_session_message_test() {
   test_support.register_fixtures()
   let bytes =
     bit_array.from_string(
-      "{\"type\":\"session_message\",\"payload\":{\"tag\":\"Increment\"}}",
+      "{\"type\":\"session_message\",\"id\":1,\"payload\":{\"tag\":\"Increment\"}}",
     )
   let result =
     transport.decode(bytes, serialiser: test_support.custom_serialiser())
 
   result
-  |> should.equal(Ok(SessionMessage(payload: Increment)))
+  |> should.equal(Ok(SessionMessage(id: 1, payload: Increment)))
 }
 
 pub fn decode_session_message_with_fields_test() {
   test_support.register_fixtures()
   let bytes =
     bit_array.from_string(
-      "{\"type\":\"session_message\",\"payload\":{\"tag\":\"SetName\",\"name\":\"Alice\"}}",
+      "{\"type\":\"session_message\",\"id\":1,\"payload\":{\"tag\":\"SetName\",\"name\":\"Alice\"}}",
     )
   let result =
     transport.decode(bytes, serialiser: test_support.custom_serialiser())
 
   result
-  |> should.equal(Ok(SessionMessage(payload: SetName("Alice"))))
+  |> should.equal(Ok(SessionMessage(id: 1, payload: SetName("Alice"))))
 }
 
 pub fn decode_resync_test() {
   test_support.register_fixtures()
   let bytes =
     bit_array.from_string(
-      "{\"type\":\"resync\",\"cursors\":[{\"target\":{\"kind\":\"session\"}}]}",
+      "{\"type\":\"resync\",\"cursors\":[{\"target\":{\"kind\":\"session\"}}],\"resume\":null,\"delivered\":0}",
     )
   let result =
     transport.decode(bytes, serialiser: test_support.custom_serialiser())
 
   result
-  |> should.equal(Ok(Resync(cursors: [transport.Unknown(Session)])))
+  |> should.equal(
+    Ok(Resync(
+      cursors: [transport.Unknown(Session)],
+      resume: option.None,
+      delivered: 0,
+    )),
+  )
 }
 
 pub fn decode_topic_update_test() {
@@ -377,7 +390,7 @@ pub fn open_serialiser_round_trips_through_its_own_codec_test() {
       encode: fn(protocol) { transport.encode(protocol, serialiser: inner) },
       decode: fn(bytes) { transport.decode(bytes, serialiser: inner) },
     )
-  let frame = transport.SessionMessage(payload: test_support.Increment)
+  let frame = transport.SessionMessage(id: 1, payload: test_support.Increment)
 
   transport.encode(frame, serialiser: open)
   |> transport.decode(serialiser: open)
@@ -495,19 +508,19 @@ pub fn max_decode_depth_session_message_within_cap_decodes_test() {
   test_support.register_fixtures()
   let bytes =
     transport.encode(
-      SessionMessage(payload: Increment),
+      SessionMessage(id: 1, payload: Increment),
       serialiser: test_support.message_pack_serialiser(),
     )
 
   transport.decode(bytes, serialiser: test_support.message_pack_serialiser())
-  |> should.equal(Ok(SessionMessage(payload: Increment)))
+  |> should.equal(Ok(SessionMessage(id: 1, payload: Increment)))
 }
 
 pub fn max_decode_depth_zero_rejects_session_message_test() {
   test_support.register_fixtures()
   let bytes =
     transport.encode(
-      SessionMessage(payload: Increment),
+      SessionMessage(id: 1, payload: Increment),
       serialiser: test_support.message_pack_serialiser(),
     )
   let capped = message_pack_capped(0)
@@ -520,13 +533,13 @@ pub fn max_decode_depth_one_allows_session_message_test() {
   test_support.register_fixtures()
   let bytes =
     transport.encode(
-      SessionMessage(payload: Increment),
+      SessionMessage(id: 1, payload: Increment),
       serialiser: test_support.message_pack_serialiser(),
     )
   let capped = message_pack_capped(1)
 
   transport.decode(bytes, serialiser: capped)
-  |> should.equal(Ok(SessionMessage(payload: Increment)))
+  |> should.equal(Ok(SessionMessage(id: 1, payload: Increment)))
 }
 
 pub fn max_decode_depth_one_rejects_deeper_snapshot_test() {

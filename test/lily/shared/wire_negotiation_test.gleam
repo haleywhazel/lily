@@ -6,6 +6,7 @@
 // =============================================================================
 
 import gleam/list
+import gleam/option
 
 import gleeunit/should
 
@@ -87,7 +88,9 @@ pub fn negotiation_greeting_goes_out_in_the_server_format_test() {
   |> should.equal([MessagePack, MessagePack])
   list.map(sent, wire_support.decode_automatic)
   |> list.drop(1)
-  |> should.equal([transport.Connected(client_id: "c1")])
+  |> should.equal([
+    transport.Connected(client_id: "c1", resume: "", answered: 0),
+  ])
 }
 
 pub fn negotiation_seeded_session_update_goes_out_in_the_server_format_test() {
@@ -123,7 +126,11 @@ pub fn negotiation_json_client_gets_json_replies_test() {
 
   wire_support.send_in(
     connection,
-    transport.Resync(cursors: [transport.Unknown(transport.Session)]),
+    transport.Resync(
+      cursors: [transport.Unknown(transport.Session)],
+      resume: option.None,
+      delivered: 0,
+    ),
     Json,
   )
   let sent = frames()
@@ -141,7 +148,11 @@ pub fn negotiation_message_pack_client_gets_message_pack_replies_test() {
 
   wire_support.send_in(
     connection,
-    transport.Resync(cursors: [transport.Unknown(transport.Session)]),
+    transport.Resync(
+      cursors: [transport.Unknown(transport.Session)],
+      resume: option.None,
+      delivered: 0,
+    ),
     MessagePack,
   )
 
@@ -153,14 +164,18 @@ pub fn negotiation_acknowledge_goes_out_in_the_client_format_test() {
   let app = by_host_server()
   let #(connection, frames) = open_quiet(app, "c1")
 
-  wire_support.send_in(connection, transport.SessionMessage(Noop), Json)
+  wire_support.send_in(
+    connection,
+    transport.SessionMessage(id: wire_support.unique_id(), payload: Noop),
+    Json,
+  )
   let sent = frames()
 
   list.map(sent, format_of)
   |> should.equal([Json])
   list.map(sent, wire_support.decode_automatic)
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 1),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
   ])
 }
 
@@ -183,8 +198,16 @@ pub fn negotiation_remembers_the_first_frame_format_test() {
   let app = by_host_server()
   let #(connection, frames) = open_quiet(app, "c1")
 
-  wire_support.send_in(connection, transport.SessionMessage(Noop), Json)
-  wire_support.send_in(connection, transport.SessionMessage(Noop), MessagePack)
+  wire_support.send_in(
+    connection,
+    transport.SessionMessage(id: wire_support.unique_id(), payload: Noop),
+    Json,
+  )
+  wire_support.send_in(
+    connection,
+    transport.SessionMessage(id: wire_support.unique_id(), payload: Noop),
+    MessagePack,
+  )
 
   list.map(frames(), format_of)
   |> should.equal([Json, Json])
@@ -195,7 +218,11 @@ pub fn negotiation_ignores_a_frame_that_fails_to_decode_test() {
   let #(connection, frames) = open_quiet(app, "c1")
 
   server.incoming(connection, bytes: <<"{not json":utf8>>)
-  wire_support.send_in(connection, transport.SessionMessage(Noop), Json)
+  wire_support.send_in(
+    connection,
+    transport.SessionMessage(id: wire_support.unique_id(), payload: Noop),
+    Json,
+  )
 
   list.map(frames(), format_of)
   |> should.equal([Json])
@@ -247,7 +274,11 @@ pub fn negotiation_topic_originator_is_acknowledged_in_its_format_test() {
 
   wire_support.send_in(
     json_client,
-    transport.TopicMessage(topic_id: "chat", payload: Increment),
+    transport.TopicMessage(
+      topic_id: "chat",
+      id: wire_support.unique_id(),
+      payload: Increment,
+    ),
     Json,
   )
   let json_sent = json_frames()
@@ -257,7 +288,7 @@ pub fn negotiation_topic_originator_is_acknowledged_in_its_format_test() {
   |> should.equal([Json])
   list.map(json_sent, wire_support.decode_automatic)
   |> should.equal([
-    transport.Acknowledge(target: transport.Topic("chat"), sequence: 1),
+    transport.Acknowledge(target: transport.Topic("chat"), sequence: 1, id: 0),
   ])
   list.map(pack_sent, format_of)
   |> should.equal([MessagePack])
@@ -269,7 +300,11 @@ pub fn negotiation_topic_resync_snapshot_goes_out_in_the_client_format_test() {
 
   wire_support.send_in(
     json_client,
-    transport.Resync(cursors: [transport.Unknown(transport.Topic("chat"))]),
+    transport.Resync(
+      cursors: [transport.Unknown(transport.Topic("chat"))],
+      resume: option.None,
+      delivered: 0,
+    ),
     Json,
   )
   let sent = json_frames()

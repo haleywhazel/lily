@@ -5,6 +5,7 @@
 // =============================================================================
 
 import gleam/int
+import gleam/option
 
 import gleeunit/should
 
@@ -55,7 +56,7 @@ pub fn store_synced_store_has_a_serialiser_test() {
 
 pub fn store_serialiser_of_a_synced_store_round_trips_a_frame_test() {
   let serialiser = store.serialiser_of(test_support.session_store())
-  let frame = transport.SessionMessage(payload: Decrement)
+  let frame = transport.SessionMessage(id: 1, payload: Decrement)
 
   transport.encode(frame, serialiser:)
   |> transport.decode(serialiser:)
@@ -96,6 +97,29 @@ pub fn store_update_function_is_the_stores_update_test() {
   let update = store.update_function(test_support.session_store())
   update(test_support.initial_model(), Increment).count
   |> should.equal(1)
+}
+
+// =============================================================================
+// AUTHORISE
+// =============================================================================
+
+pub fn store_has_no_authorise_rule_by_default_test() {
+  store.authorisation(test_support.session_store())
+  |> option.is_none
+  |> should.be_true
+}
+
+pub fn store_authorise_keeps_the_rule_test() {
+  let app_store =
+    test_support.session_store()
+    |> store.authorise(rule: fn(_sender, _target, message) {
+      message != Decrement
+    })
+  let assert option.Some(rule) = store.authorisation(app_store)
+  let model = test_support.initial_model()
+
+  rule(model, model, Decrement)
+  |> should.be_false
 }
 
 // =============================================================================

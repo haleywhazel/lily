@@ -49,19 +49,19 @@ fn assert_roundtrips(frame: transport.Protocol(Model, Message)) -> Nil {
 // =============================================================================
 
 pub fn auto_roundtrip_zero_field_test() {
-  assert_roundtrips(SessionMessage(payload: Increment))
+  assert_roundtrips(SessionMessage(id: 1, payload: Increment))
 }
 
 pub fn auto_roundtrip_decrement_test() {
-  assert_roundtrips(SessionMessage(payload: Decrement))
+  assert_roundtrips(SessionMessage(id: 1, payload: Decrement))
 }
 
 pub fn auto_roundtrip_reset_test() {
-  assert_roundtrips(SessionMessage(payload: Reset))
+  assert_roundtrips(SessionMessage(id: 1, payload: Reset))
 }
 
 pub fn auto_roundtrip_noop_test() {
-  assert_roundtrips(SessionMessage(payload: Noop))
+  assert_roundtrips(SessionMessage(id: 1, payload: Noop))
 }
 
 // =============================================================================
@@ -69,11 +69,11 @@ pub fn auto_roundtrip_noop_test() {
 // =============================================================================
 
 pub fn auto_roundtrip_single_field_test() {
-  assert_roundtrips(SessionMessage(payload: SetName("Alice")))
+  assert_roundtrips(SessionMessage(id: 1, payload: SetName("Alice")))
 }
 
 pub fn auto_roundtrip_empty_string_test() {
-  assert_roundtrips(SessionMessage(payload: SetName("")))
+  assert_roundtrips(SessionMessage(id: 1, payload: SetName("")))
 }
 
 // =============================================================================
@@ -117,11 +117,15 @@ pub fn auto_roundtrip_topic_update_test() {
 }
 
 pub fn auto_roundtrip_resync_test() {
-  assert_roundtrips(Resync(cursors: [transport.Unknown(Session)]))
+  assert_roundtrips(Resync(
+    cursors: [transport.Unknown(Session)],
+    resume: option.None,
+    delivered: 0,
+  ))
 }
 
 pub fn auto_roundtrip_acknowledge_test() {
-  assert_roundtrips(Acknowledge(target: Session, sequence: 2))
+  assert_roundtrips(Acknowledge(target: Session, sequence: 2, id: 0))
 }
 
 // =============================================================================
@@ -162,7 +166,7 @@ pub fn auto_roundtrip_list_field_test() {
 
 pub fn auto_json_format_roundtrip_test() {
   let frame: transport.Protocol(Model, Message) =
-    Acknowledge(target: Session, sequence: 9)
+    Acknowledge(target: Session, sequence: 9, id: 0)
 
   roundtrip(frame, json())
   |> should.equal(Ok(frame))
@@ -170,7 +174,7 @@ pub fn auto_json_format_roundtrip_test() {
 
 pub fn auto_message_pack_format_roundtrip_test() {
   let frame: transport.Protocol(Model, Message) =
-    Acknowledge(target: Session, sequence: 5)
+    Acknowledge(target: Session, sequence: 5, id: 0)
 
   roundtrip(frame, test_support.message_pack_serialiser())
   |> should.equal(Ok(frame))
@@ -182,7 +186,7 @@ pub fn auto_message_pack_format_roundtrip_test() {
 
 pub fn auto_message_pack_bytes_decode_under_json_test() {
   let frame: transport.Protocol(Model, Message) =
-    Acknowledge(target: Session, sequence: 1)
+    Acknowledge(target: Session, sequence: 1, id: 0)
 
   transport.encode(frame, serialiser: test_support.message_pack_serialiser())
   |> transport.decode(serialiser: json())
@@ -192,7 +196,7 @@ pub fn auto_message_pack_bytes_decode_under_json_test() {
 pub fn auto_json_bytes_decode_under_message_pack_test() {
   test_support.register_fixtures()
   let frame: transport.Protocol(Model, Message) =
-    SessionMessage(payload: Increment)
+    SessionMessage(id: 1, payload: Increment)
 
   transport.encode(frame, serialiser: json())
   |> transport.decode(serialiser: test_support.message_pack_serialiser())
@@ -201,7 +205,7 @@ pub fn auto_json_bytes_decode_under_message_pack_test() {
 
 pub fn auto_json_after_leading_whitespace_decodes_test() {
   let frame: transport.Protocol(Model, Message) =
-    Acknowledge(target: Session, sequence: 2)
+    Acknowledge(target: Session, sequence: 2, id: 0)
   let bytes = transport.encode(frame, serialiser: json())
 
   transport.decode(<<" \n\t\r":utf8, bytes:bits>>, serialiser: json())
@@ -210,7 +214,7 @@ pub fn auto_json_after_leading_whitespace_decodes_test() {
 
 pub fn auto_whitespace_before_message_pack_is_an_error_test() {
   let frame: transport.Protocol(Model, Message) =
-    Acknowledge(target: Session, sequence: 2)
+    Acknowledge(target: Session, sequence: 2, id: 0)
   let bytes =
     transport.encode(frame, serialiser: test_support.message_pack_serialiser())
 
@@ -313,26 +317,35 @@ pub fn auto_invalid_bytes_returns_error_test() {
 // PEEK
 // =============================================================================
 
-pub fn auto_peek_reads_a_message_target_from_either_format_test() {
-  let session = transport.SessionMessage(payload: test_support.Increment)
+pub fn auto_peek_reads_a_message_target_and_id_from_either_format_test() {
+  let session = transport.SessionMessage(id: 7, payload: test_support.Increment)
   let topic =
-    transport.TopicMessage(topic_id: "room:1", payload: test_support.Increment)
+    transport.TopicMessage(
+      topic_id: "room:1",
+      id: 12,
+      payload: test_support.Increment,
+    )
   list.each([transport.Json, transport.MessagePack], fn(format) {
     let serialiser = test_support.automatic_serialiser(format)
     transport.encode(session, serialiser:)
-    |> transport.peek_target
-    |> should.equal(option.Some(transport.Session))
+    |> transport.peek_message
+    |> should.equal(option.Some(#(transport.Session, 7)))
     transport.encode(topic, serialiser:)
-    |> transport.peek_target
-    |> should.equal(option.Some(transport.Topic("room:1")))
+    |> transport.peek_message
+    |> should.equal(option.Some(#(transport.Topic("room:1"), 12)))
     transport.encode(transport.Subscribe(topic_id: "room:1"), serialiser:)
-    |> transport.peek_target
+    |> transport.peek_message
     |> should.equal(option.None)
   })
-  transport.peek_target(<<
-    "{\"type\":\"topic_message\",\"topic_id\":\"a\\\"b\"",
+  transport.peek_message(<<
+    "{\"type\":\"topic_message\",\"topic_id\":\"a\\\"b\",\"id\":3",
   >>)
-  |> should.equal(option.Some(transport.Topic("a\"b")))
-  transport.peek_target(<<"junk">>)
+  |> should.equal(option.Some(#(transport.Topic("a\"b"), 3)))
+  transport.peek_message(<<"junk">>)
+  |> should.equal(option.None)
+}
+
+pub fn auto_peek_needs_the_id_in_the_head_test() {
+  transport.peek_message(<<"{\"type\":\"session_message\",\"payload\":1">>)
   |> should.equal(option.None)
 }

@@ -26,6 +26,6 @@ While Lily makes writing web applications that require both offline-functionalit
 
 ## Tutorial
 
-WIP NOT IN REPO YET
+Tutorials are currently WIP but I am slowly writing them!
 
 The sidebar should contain links to a tutorial that walks you through common use cases of Lily. Each page builds up to a single project that you can also find inside the `/examples` folder of the GitHub repo.

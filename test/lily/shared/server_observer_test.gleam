@@ -5,6 +5,7 @@
 // =============================================================================
 
 import gleam/list
+import gleam/option
 import gleam/string
 
 import gleeunit/should
@@ -134,7 +135,7 @@ pub fn observers_see_a_session_message_with_the_client_and_its_model_test() {
   ])
 }
 
-pub fn observers_see_a_topic_message_before_it_is_applied_test() {
+pub fn observers_see_a_topic_message_with_the_model_after_it_test() {
   let #(app, events) = observed_server()
   let connection = connect_quiet(app, "c1")
   wire_support.subscribe(connection, "chat")
@@ -144,11 +145,124 @@ pub fn observers_see_a_topic_message_before_it_is_applied_test() {
 
   events()
   |> should.equal([
-    server.TopicMessageReceived(
-      client_id: "c1",
+    server.TopicMessageApplied(
+      client_id: option.Some("c1"),
       topic_id: "chat",
       message: Increment,
+      model: test_support.Model(..test_support.initial_model(), count: 1),
     ),
+  ])
+}
+
+pub fn observers_see_a_topic_message_applied_before_its_acknowledgement_test() {
+  let sent = test_support.new_shared([])
+  let #(record, recorded) = wire_support.recorder()
+  let builder =
+    test_support.topic_builder()
+    |> server.observe(fn(event, _app) {
+      case event {
+        server.TopicMessageApplied(..) ->
+          record(list.contains(
+            test_support.get_shared(sent),
+            transport.Acknowledge(
+              target: transport.Topic("chat"),
+              sequence: 1,
+              id: 0,
+            ),
+          ))
+        _ -> Nil
+      }
+    })
+  let app = test_support.start_server(builder)
+  let assert Ok(connection) =
+    server.connect_as(
+      app,
+      origin: option.None,
+      send: fn(bytes) {
+        test_support.set_shared(sent, [
+          wire_support.decode(bytes),
+          ..test_support.get_shared(sent)
+        ])
+      },
+      client_id: "c1",
+      seed: [],
+      watch: server.Unwatched,
+    )
+  wire_support.subscribe(connection, "chat")
+
+  wire_support.topic_message(connection, "chat", Increment)
+
+  wire_support.settle(app)
+  recorded()
+  |> should.equal([False])
+  test_support.get_shared(sent)
+  |> list.contains(transport.Acknowledge(
+    target: transport.Topic("chat"),
+    sequence: 1,
+    id: 0,
+  ))
+  |> should.be_true
+}
+
+pub fn observers_see_a_topic_dispatch_applied_with_no_client_test() {
+  let #(app, events) = observed_server()
+  let _ = events()
+
+  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+
+  events()
+  |> should.equal([
+    server.TopicMessageApplied(
+      client_id: option.None,
+      topic_id: "chat",
+      message: Increment,
+      model: test_support.Model(..test_support.initial_model(), count: 1),
+    ),
+  ])
+}
+
+pub fn observers_see_no_topic_message_applied_when_update_crashes_test() {
+  let #(builder, events) =
+    wire_support.observed(server.new(
+      test_support.crashing_topic_store(),
+      origins: server.AnyOrigin,
+    ))
+  let app = test_support.start_server(builder)
+  let connection = connect_quiet(app, "c1")
+  wire_support.subscribe(connection, "chat")
+  let _ = events(app)
+
+  wire_support.topic_message(connection, "chat", test_support.Decrement)
+
+  events(app)
+  |> list.any(fn(event) {
+    case event {
+      server.TopicMessageApplied(..) -> True
+      _ -> False
+    }
+  })
+  |> should.be_false
+}
+
+pub fn observers_crashing_on_a_topic_message_still_let_the_acknowledgement_out_test() {
+  let app =
+    test_support.topic_builder()
+    |> server.observe(fn(event, _app) {
+      case event {
+        server.TopicMessageApplied(..) -> panic as "observer blew up"
+        _ -> Nil
+      }
+    })
+    |> test_support.start_server
+  let #(connection, frames) = wire_support.open(app, "c1")
+  wire_support.subscribe(connection, "chat")
+  let _ = frames()
+
+  wire_support.topic_message(connection, "chat", Increment)
+
+  frames()
+  |> should.equal([
+    transport.Acknowledge(target: transport.Topic("chat"), sequence: 1, id: 0),
   ])
 }
 

@@ -355,10 +355,10 @@ function connectDevReload(
         changed = [];
       }
       if (changed.length > 0) {
-        log("info", `lily_dev: rebuilt ${changed.join(", ")}`);
+        log("info", `lily: rebuilt ${changed.join(", ")}`);
       }
       if (reloadedTooRecently(guardMilliseconds)) {
-        log("warn", "lily_dev: reload suppressed (storm guard)");
+        log("warn", "lily: reload suppressed (storm guard)");
         return;
       }
       stashModelForReload(getModel());
@@ -496,11 +496,10 @@ const PRIMITIVE_TYPES = new Set(["string", "number", "boolean"]);
 const PROTOCOL_RELOAD_KEY = "lily_protocol_reload";
 
 // when the dev server last reloaded the page
-const RELOAD_GUARD_KEY = "lily_dev_last_reload";
+const RELOAD_GUARD_KEY = "lily_hot_reload_last";
 
-const RELOAD_STASH_KEY = "lily_dev_reload_state";
+const RELOAD_STASH_KEY = "lily_hot_reload_state";
 
-// never a page of the app's, whatever scheme it's served from
 const UNSAFE_PROTOCOLS = new Set([
   "blob:",
   "data:",

@@ -7,6 +7,7 @@
 
 import gleam/bit_array
 import gleam/list
+import gleam/option
 
 import gleeunit/should
 
@@ -39,18 +40,22 @@ fn open_server() -> server.Server(Model, Message) {
 pub fn open_serialiser_round_trips_every_frame_test() {
   let model = test_support.Model(..test_support.initial_model(), count: 3)
   [
-    transport.Acknowledge(target: transport.Session, sequence: 1),
-    transport.Acknowledge(target: transport.Topic("chat"), sequence: 2),
-    transport.Connected(client_id: "abc"),
-    transport.Dropped(target: transport.Session),
-    transport.Dropped(target: transport.Topic("chat")),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
+    transport.Acknowledge(target: transport.Topic("chat"), sequence: 2, id: 0),
+    transport.Connected(client_id: "abc", resume: "", answered: 0),
+    transport.Dropped(target: transport.Session, id: 0),
+    transport.Dropped(target: transport.Topic("chat"), id: 0),
     transport.Rejected(topic_id: "t", reason: transport.AccessDenied),
-    transport.Resync(cursors: [
-      transport.Unknown(transport.Session),
-      transport.Unknown(transport.Topic("a")),
-    ]),
-    transport.Resync(cursors: []),
-    transport.SessionMessage(payload: Increment),
+    transport.Resync(
+      cursors: [
+        transport.Unknown(transport.Session),
+        transport.Unknown(transport.Topic("a")),
+      ],
+      resume: option.None,
+      delivered: 0,
+    ),
+    transport.Resync(cursors: [], resume: option.None, delivered: 0),
+    transport.SessionMessage(id: 1, payload: Increment),
     transport.SessionUpdate(sequence: 4, payload: SetName("x")),
     transport.Snapshot(
       target: transport.Session,
@@ -65,7 +70,7 @@ pub fn open_serialiser_round_trips_every_frame_test() {
       state: model,
     ),
     transport.Subscribe(topic_id: "chat"),
-    transport.TopicMessage(topic_id: "chat", payload: Increment),
+    transport.TopicMessage(topic_id: "chat", id: 1, payload: Increment),
     transport.TopicUpdate(topic_id: "chat", sequence: 6, payload: SetName("y")),
     transport.Unsubscribe(topic_id: "chat"),
     transport.Version(hash: "v1", protocol: 1),
@@ -75,11 +80,11 @@ pub fn open_serialiser_round_trips_every_frame_test() {
 
 pub fn open_serialiser_writes_json_text_test() {
   transport.encode(
-    transport.Connected(client_id: "abc"),
+    transport.Connected(client_id: "abc", resume: "", answered: 0),
     serialiser: test_support.custom_serialiser(),
   )
   |> should.equal(bit_array.from_string(
-    "{\"type\":\"connected\",\"client_id\":\"abc\"}",
+    "{\"type\":\"connected\",\"client_id\":\"abc\",\"resume\":\"\",\"answered\":0}",
   ))
 }
 
@@ -111,14 +116,14 @@ pub fn open_serialiser_server_acknowledges_a_session_message_test() {
   server.incoming(
     connection,
     bytes: transport.encode(
-      transport.SessionMessage(payload: Increment),
+      transport.SessionMessage(id: 1, payload: Increment),
       serialiser: test_support.custom_serialiser(),
     ),
   )
 
   frames()
   |> should.equal([
-    transport.Acknowledge(target: transport.Session, sequence: 1),
+    transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
   ])
 }
 
@@ -128,7 +133,7 @@ pub fn open_serialiser_server_answers_a_resync_with_a_snapshot_test() {
   server.incoming(
     connection,
     bytes: transport.encode(
-      transport.SessionMessage(payload: Increment),
+      transport.SessionMessage(id: 1, payload: Increment),
       serialiser: test_support.custom_serialiser(),
     ),
   )
@@ -137,7 +142,11 @@ pub fn open_serialiser_server_answers_a_resync_with_a_snapshot_test() {
   server.incoming(
     connection,
     bytes: transport.encode(
-      transport.Resync(cursors: [transport.Unknown(transport.Session)]),
+      transport.Resync(
+        cursors: [transport.Unknown(transport.Session)],
+        resume: option.None,
+        delivered: 0,
+      ),
       serialiser: test_support.custom_serialiser(),
     ),
   )
@@ -169,6 +178,6 @@ pub fn open_serialiser_server_greets_a_connection_test() {
   let #(_connection, frames) = wire_support.open_recording(app, "c9", [])
 
   frames()
-  |> list.contains(transport.Connected(client_id: "c9"))
+  |> list.contains(transport.Connected(client_id: "c9", resume: "", answered: 0))
   |> should.be_true
 }

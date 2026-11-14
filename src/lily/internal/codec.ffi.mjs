@@ -109,6 +109,19 @@ export function refuseString() {
   );
 }
 
+/**
+ * Registers the module namespaces a bundle imports, keyed by
+ * `"<package>/<path>"`. Requests for them then register synchronously and any
+ * other request is reported, a bundle has no module files to import.
+ */
+export function registerBundled(namespaces) {
+  inBundle = true;
+  for (const key in namespaces) {
+    bundledModules.add(key);
+    registerModule(namespaces[key]);
+  }
+}
+
 /** Registers every custom-type class a module exports, for `modules:`. */
 export function registerModule(moduleNamespace) {
   for (const key in moduleNamespace) {
@@ -121,6 +134,18 @@ export function registerModule(moduleNamespace) {
 
 /** The import relies on this file's fixed depth in the build output. */
 export function requestModule(packageName, path) {
+  const key = `${packageName}/${path}`;
+  if (bundledModules.has(key)) return;
+  if (inBundle) {
+    if (requestedModules.has(key)) return;
+    requestedModules.add(key);
+    log(
+      "error",
+      `lily: ${key} is not in the bundle, so its types won't decode, ` +
+        "pass its namespace to registerBundled",
+    );
+    return;
+  }
   const url = new URL(`../../../${packageName}/${path}.mjs`, import.meta.url);
   if (requestedModules.has(url.href)) return;
   requestedModules.add(url.href);
@@ -353,6 +378,9 @@ function tupleHead(name, lookup) {
 // keys still held by a built-in constructor
 const builtinKeys = new Set();
 
+// "<package>/<path>" keys registerBundled has registered
+const bundledModules = new Set();
+
 const constructorRegistry = new Map();
 
 // classes seen by reflectDataMessage, only data messages decode from it
@@ -360,6 +388,9 @@ const dataMessageRegistry = new Map();
 
 // the stdlib's opaque class, by identity, a user type named Set is another
 const GleamSet = setNew().constructor;
+
+// set by registerBundled, module files can't be imported from a bundle
+let inBundle = false;
 
 const LONE_SURROGATE =
   /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;

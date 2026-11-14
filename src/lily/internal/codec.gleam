@@ -23,6 +23,13 @@ import gleam/string
 // INTERNAL TYPES
 // =============================================================================
 
+/// A scalar at the head of a frame, from [`leading_fields`](#leading_fields).
+@internal
+pub type Leading {
+  LeadingInt(Int)
+  LeadingString(String)
+}
+
 @internal
 pub type MessagePackValue {
   ValueNil
@@ -237,11 +244,10 @@ pub fn json_int(value: Int) -> Json {
   }
 }
 
-/// The leading string pairs of a MessagePack map, at most `limit`, stopping at
-/// the first value that isn't a string. Reads nothing past them, so a frame's
-/// payload is never parsed.
+/// The first `limit` key and value pairs of a MessagePack map whose values are
+/// strings or ints, read from the front so nothing after them is decoded.
 @internal
-pub fn leading_strings(bytes: BitArray, limit: Int) -> List(#(String, String)) {
+pub fn leading_fields(bytes: BitArray, limit: Int) -> List(#(String, Leading)) {
   case bytes {
     <<marker, rest:bytes>> if marker >= 0x80 && marker <= 0x8f ->
       leading_pairs(rest, int.min(marker - 0x80, limit), [])
@@ -715,16 +721,25 @@ fn json_to_reflected(value: Dynamic, remaining: Int) -> Result(Reflected, Nil) {
 fn leading_pairs(
   bytes: BitArray,
   remaining: Int,
-  pairs: List(#(String, String)),
-) -> List(#(String, String)) {
+  pairs: List(#(String, Leading)),
+) -> List(#(String, Leading)) {
   let pair = {
     use #(key, rest) <- result.try(leading_string(bytes))
-    use #(value, rest) <- result.map(leading_string(rest))
+    use #(value, rest) <- result.map(leading_scalar(rest))
     #(#(key, value), rest)
   }
   case remaining, pair {
     0, _ | _, Error(Nil) -> list.reverse(pairs)
     _, Ok(#(pair, rest)) -> leading_pairs(rest, remaining - 1, [pair, ..pairs])
+  }
+}
+
+// a depth of 0 refuses a container
+fn leading_scalar(bytes: BitArray) -> Result(#(Leading, BitArray), Nil) {
+  case decode_at(bytes, 0, 0) {
+    Ok(#(ValueString(text), rest)) -> Ok(#(LeadingString(text), rest))
+    Ok(#(ValueInteger(value), rest)) -> Ok(#(LeadingInt(value), rest))
+    Ok(_) | Error(Nil) -> Error(Nil)
   }
 }
 

@@ -39,7 +39,7 @@ fn decode_payload(
 ) -> Result(transport.Protocol(Nil, message), Nil) {
   transport.decode(
     bit_array.from_string(
-      "{\"type\":\"session_message\",\"payload\":" <> json <> "}",
+      "{\"type\":\"session_message\",\"id\":1,\"payload\":" <> json <> "}",
     ),
     serialiser: transport.automatic(
       format: transport.Json,
@@ -58,23 +58,23 @@ pub fn auto_js_json_decodes_a_registered_constructor_test() {
   test_support.register_fixtures()
 
   decode_payload("{\"_\":\"SetName\",\"0\":\"JsonPath\"}")
-  |> should.equal(Ok(SessionMessage(payload: SetName("JsonPath"))))
+  |> should.equal(Ok(SessionMessage(id: 1, payload: SetName("JsonPath"))))
 }
 
 @target(javascript)
 pub fn auto_js_decodes_option_without_registration_test() {
   decode_payload("{\"_\":\"Some\",\"0\":1}")
-  |> should.equal(Ok(SessionMessage(payload: Some(1))))
+  |> should.equal(Ok(SessionMessage(id: 1, payload: Some(1))))
   decode_payload("{\"_\":\"None\"}")
-  |> should.equal(Ok(SessionMessage(payload: None)))
+  |> should.equal(Ok(SessionMessage(id: 1, payload: None)))
 }
 
 @target(javascript)
 pub fn auto_js_decodes_prelude_result_without_registration_test() {
   decode_payload("{\"_\":\"Ok\",\"0\":1}")
-  |> should.equal(Ok(SessionMessage(payload: Ok(1))))
+  |> should.equal(Ok(SessionMessage(id: 1, payload: Ok(1))))
   decode_payload("{\"_\":\"Error\",\"0\":1}")
-  |> should.equal(Ok(SessionMessage(payload: Error(1))))
+  |> should.equal(Ok(SessionMessage(id: 1, payload: Error(1))))
 }
 
 // =============================================================================
@@ -86,9 +86,9 @@ pub fn auto_js_registry_tells_same_name_apart_by_arity_test() {
   register_this_module()
 
   decode_payload("{\"_\":\"Error\"}")
-  |> should.equal(Ok(SessionMessage(payload: verdict_fixture.Error)))
+  |> should.equal(Ok(SessionMessage(id: 1, payload: verdict_fixture.Error)))
   decode_payload("{\"_\":\"Error\",\"0\":1}")
-  |> should.equal(Ok(SessionMessage(payload: Error(1))))
+  |> should.equal(Ok(SessionMessage(id: 1, payload: Error(1))))
 }
 
 @target(javascript)
@@ -157,7 +157,10 @@ pub fn auto_js_by_host_writes_json_on_a_local_page_test() {
       modules: [],
     )
 
-  transport.encode(transport.Connected(client_id: "c1"), serialiser:)
+  transport.encode(
+    transport.Connected(client_id: "c1", resume: "", answered: 0),
+    serialiser:,
+  )
   |> transport.frame_format(serialiser:)
   |> should.equal(Ok(transport.Json))
 }
@@ -173,7 +176,7 @@ pub fn auto_js_resolve_for_page_settles_by_host_to_json_test() {
     |> transport.resolve_for_page
 
   transport.encode_as(
-    transport.Connected(client_id: "c1"),
+    transport.Connected(client_id: "c1", resume: "", answered: 0),
     serialiser:,
     format: transport.server_format(serialiser),
   )

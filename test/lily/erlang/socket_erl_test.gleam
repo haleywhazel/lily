@@ -175,7 +175,9 @@ pub fn socket_attach_yields_the_greeting_and_dispatched_frames_test() {
 
   let assert Frame(transport.Version(..)) = next(received)
   next(received)
-  |> should.equal(Frame(transport.Connected(client_id:)))
+  |> should.equal(
+    Frame(transport.Connected(client_id:, resume: "", answered: 0)),
+  )
 
   server.dispatch_to(app, client_id:, message: IncrementSecondary)
 
@@ -244,7 +246,9 @@ pub fn socket_open_as_seeds_the_session_test() {
 
   let assert Frame(transport.Version(..)) = next(received)
   next(received)
-  |> should.equal(Frame(transport.Connected(client_id: "u1")))
+  |> should.equal(
+    Frame(transport.Connected(client_id: "u1", resume: "", answered: 0)),
+  )
   let assert Frame(transport.SessionUpdate(payload: IncrementSecondary, ..)) =
     next(received)
   Nil
@@ -436,11 +440,11 @@ pub fn socket_a_shed_message_frame_gets_dropped_test() {
   let received = frames()
   let #(acknowledged, dropped) =
     list.split_while(received, fn(frame) {
-      frame != transport.Dropped(target: transport.Session)
+      frame != transport.Dropped(target: transport.Session, id: 0)
     })
   // the drops come from the server, after the acks for the frames before them
   list.all(dropped, fn(frame) {
-    frame == transport.Dropped(target: transport.Session)
+    frame == transport.Dropped(target: transport.Session, id: 0)
   })
   |> should.be_true
   {
@@ -468,7 +472,10 @@ pub fn socket_a_shed_frame_on_a_handle_rebuilt_from_an_id_gets_dropped_test() {
     |> list.map(fn(_) {
       server.incoming(
         handle,
-        bytes: wire_support.encode(transport.SessionMessage(Increment)),
+        bytes: wire_support.encode(transport.SessionMessage(
+          id: wire_support.unique_id(),
+          payload: Increment,
+        )),
       )
     })
   let _ = resume(pid)
@@ -477,7 +484,7 @@ pub fn socket_a_shed_frame_on_a_handle_rebuilt_from_an_id_gets_dropped_test() {
   let dropped =
     frames()
     |> list.count(fn(frame) {
-      frame == transport.Dropped(target: transport.Session)
+      frame == transport.Dropped(target: transport.Session, id: 0)
     })
   { shed > 0 && dropped == shed }
   |> should.be_true
@@ -517,7 +524,13 @@ pub fn socket_a_control_past_the_held_cap_closes_the_socket_test() {
   let assert Frame(transport.Version(..)) = next(received)
   let assert Frame(transport.Connected(..)) = next(received)
 
-  wire_support.send(connection, transport.SessionMessage(IncrementSecondary))
+  wire_support.send(
+    connection,
+    transport.SessionMessage(
+      id: wire_support.unique_id(),
+      payload: IncrementSecondary,
+    ),
+  )
   let assert Frame(transport.Acknowledge(..)) = next(received)
   list.each(["a", "b", "c"], fn(topic_id) {
     wire_support.send(connection, transport.Subscribe(topic_id:))

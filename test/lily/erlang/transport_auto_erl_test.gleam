@@ -34,7 +34,7 @@ pub fn auto_erl_modules_do_not_change_the_wire_on_the_server_test() {
       max_decode_depth: 128,
       modules: [],
     )
-  let frame = Acknowledge(target: Session, sequence: 4)
+  let frame = Acknowledge(target: Session, sequence: 4, id: 0)
 
   transport.encode(frame, serialiser: with_modules)
   |> should.equal(transport.encode(frame, serialiser: plain))
@@ -63,8 +63,8 @@ pub fn auto_erl_decoded_strings_do_not_retain_the_frame_test() {
   referenced_byte_size(topic_id)
   |> should.equal(200)
 
-  let assert Ok(SessionMessage(payload: SetName(name))) =
-    transport.encode(SessionMessage(payload: SetName(long)), serialiser:)
+  let assert Ok(SessionMessage(id: 1, payload: SetName(name))) =
+    transport.encode(SessionMessage(id: 1, payload: SetName(long)), serialiser:)
     |> transport.decode(serialiser:)
   referenced_byte_size(name)
   |> should.equal(200)

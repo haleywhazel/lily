@@ -190,7 +190,11 @@ fn push_frame(
 
 @target(javascript)
 fn open_as(source: Dynamic, client_id: String) -> Nil {
-  push_frame(source, transport.Connected(client_id:), client_id:)
+  push_frame(
+    source,
+    transport.Connected(client_id:, resume: "", answered: 0),
+    client_id:,
+  )
 }
 
 // =============================================================================
@@ -251,7 +255,10 @@ pub fn sse_recipe_posts_under_the_stamped_client_id_test() {
   test_support.get(posted)
   |> list.map(fn(post) { #(post.0, decode_post(post.1)) })
   |> should.equal([
-    #("/messages?client=c1", transport.SessionMessage(payload: Increment)),
+    #(
+      "/messages?client=c1",
+      transport.SessionMessage(id: 1, payload: Increment),
+    ),
   ])
 }
 
@@ -274,7 +281,7 @@ pub fn sse_recipe_queues_until_an_event_names_the_client_test() {
 
   test_support.get(posted)
   |> list.map(fn(post) { decode_post(post.1) })
-  |> list.contains(transport.SessionMessage(payload: Increment))
+  |> list.contains(transport.SessionMessage(id: 1, payload: Increment))
   |> should.be_true
 }
 
