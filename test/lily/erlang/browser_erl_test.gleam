@@ -56,7 +56,7 @@ pub fn runtime_keeps_the_initial_model_test() {
     |> browser.reload_on_new_version
     |> browser.hot_reload
     |> browser.visibility(set: fn(_model, _visible) { 0 })
-    |> browser.network(set: fn(_model, _online) { 0 })
+    |> browser.online(set: fn(_model, _online) { 0 })
     |> browser.viewport(set: fn(_model, _size) { 0 })
     |> browser.confirm_leaving(when: fn(_model) { True })
     |> component.mount(
@@ -76,8 +76,8 @@ pub fn runtime_keeps_the_initial_model_test() {
 @target(erlang)
 pub fn page_functions_do_nothing_test() {
   browser.navigate("/a") |> should.equal(Nil)
-  browser.replace("/b") |> should.equal(Nil)
-  browser.load("/c") |> should.equal(Nil)
+  browser.replace_url("/b") |> should.equal(Nil)
+  browser.load_page("/c") |> should.equal(Nil)
   browser.load_external("https://example.com") |> should.equal(Nil)
   browser.reload() |> should.equal(Nil)
   browser.clear_persisted() |> should.equal(Nil)

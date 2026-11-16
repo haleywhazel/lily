@@ -180,7 +180,7 @@ pub fn component_each_row_nest_updates_on_its_own_test() {
           "<p>"
           <> row.1
           <> nest(
-            component.simple(
+            component.dynamic(
               slice: fn(model: Model) { model.count },
               render: fn(count, _) {
                 "<b class=\"n\">" <> int.to_string(count) <> "</b>"
@@ -225,7 +225,7 @@ fn row_view(_model: Model) -> component.Component(Model, message, String) {
     key: fn(id: Int) { int.to_string(id) },
     render: fn(id, nest) {
       nest(
-        component.simple(slice: fn(_) { id }, render: fn(id, _nest) {
+        component.dynamic(slice: fn(_) { id }, render: fn(id, _nest) {
           "<span>" <> int.to_string(id) <> "</span>"
         }),
       )
@@ -250,7 +250,7 @@ pub fn component_static_renders_content_test() {
 }
 
 @target(javascript)
-pub fn component_static_nested_simple_re_renders_test() {
+pub fn component_static_nested_dynamic_re_renders_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _runtime =
@@ -258,7 +258,7 @@ pub fn component_static_nested_simple_re_renders_test() {
       component.static(fn(nest) {
         "<h1>Title</h1>"
         <> nest(
-          component.simple(
+          component.dynamic(
             slice: fn(model: Model) { model.count },
             render: fn(count, _) {
               "<b class=\"n\">" <> int.to_string(count) <> "</b>"
@@ -308,16 +308,16 @@ pub fn component_mount_clears_previous_test() {
 }
 
 // =============================================================================
-// SIMPLE
+// DYNAMIC
 // =============================================================================
 
 @target(javascript)
-pub fn component_simple_renders_initial_slice_test() {
+pub fn component_dynamic_renders_initial_slice_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _runtime =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { model.count },
         render: fn(count, _) { "count:" <> int.to_string(count) },
       )
@@ -329,12 +329,12 @@ pub fn component_simple_renders_initial_slice_test() {
 }
 
 @target(javascript)
-pub fn component_simple_updates_on_model_change_test() {
+pub fn component_dynamic_updates_on_model_change_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _runtime =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { model.count },
         render: fn(count, _) { "count:" <> int.to_string(count) },
       )
@@ -351,12 +351,12 @@ pub fn component_simple_updates_on_model_change_test() {
 // =============================================================================
 
 @target(javascript)
-pub fn component_simple_morph_keeps_focus_across_rerender_test() {
+pub fn component_dynamic_morph_keeps_focus_across_rerender_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _runtime =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { model.count },
         render: fn(count, _) {
           "<input id=\"field\"><span>" <> int.to_string(count) <> "</span>"
@@ -373,7 +373,7 @@ pub fn component_simple_morph_keeps_focus_across_rerender_test() {
 }
 
 @target(javascript)
-pub fn component_simple_morph_preserves_nested_live_child_test() {
+pub fn component_dynamic_morph_preserves_nested_live_child_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   // nested live child on name, ancestor on count
@@ -385,7 +385,7 @@ pub fn component_simple_morph_preserves_nested_live_child_test() {
     )
   let _runtime =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { model.count },
         render: fn(_count, nest) { "<div>" <> nest(child) <> "</div>" },
       )
@@ -400,12 +400,12 @@ pub fn component_simple_morph_preserves_nested_live_child_test() {
 }
 
 @target(javascript)
-pub fn component_simple_morph_defers_exit_transition_test() {
+pub fn component_dynamic_morph_defers_exit_transition_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _runtime =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { model.transition_item },
         render: fn(item, nest) {
           case item {
@@ -413,7 +413,7 @@ pub fn component_simple_morph_defers_exit_transition_test() {
               nest(
                 component.static(fn(_) { "<div id=\"panel\">p</div>" })
                 |> component.transition(enter: "in", exit: "out")
-                |> component.duration(milliseconds: 200),
+                |> component.transition_duration(milliseconds: 200),
               )
             None -> ""
           }
@@ -523,6 +523,67 @@ pub fn component_live_refuses_unsafe_attribute_patch_test() {
 }
 
 @target(javascript)
+pub fn component_live_refuses_a_style_that_loads_from_another_origin_test() {
+  test_support.reset_dom()
+  let runtime = test_support.new_runtime()
+  let _runtime =
+    mount(runtime, fn(_model) {
+      component.live(
+        slice: fn(model: Model) { model.count },
+        render: fn(_, _) {
+          "<div><i class=\"a\"></i><i class=\"b\"></i><i class=\"c\"></i>"
+          <> "<i class=\"d\"></i><i class=\"e\"></i><i class=\"f\"></i>"
+          <> "<i class=\"g\"></i><i class=\"h\"></i></div>"
+        },
+        patch: fn(_count) {
+          [
+            component.SetStyle(".a", "width", "40%"),
+            component.SetStyle(".b", "background-image", "url(/static/a.png)"),
+            component.SetStyle(
+              ".c",
+              "background-image",
+              "url(https://elsewhere.example/a.png)",
+            ),
+            component.SetStyle(
+              ".d",
+              "background-image",
+              "URL( 'https://elsewhere.example/a.png' )",
+            ),
+            // an escape spells `url` too
+            component.SetStyle(
+              ".e",
+              "background-image",
+              "\\75rl(https://elsewhere.example/a.png)",
+            ),
+            component.SetStyle(
+              ".f",
+              "background-image",
+              "image-set('https://elsewhere.example/a.png' 1x)",
+            ),
+            component.SetAttribute(".g", "style", "color: red"),
+            // a whole style gets no pass for its own origin
+            component.SetAttribute(
+              ".h",
+              "style",
+              "color: red; background-image: url(/static/a.png)",
+            ),
+          ]
+        },
+      )
+    })
+  client.dispatch(runtime)(Increment)
+
+  test_support.get_attribute(".a", "style") |> should.equal("width: 40%;")
+  test_support.get_attribute(".b", "style")
+  |> string.contains("/static/a.png")
+  |> should.be_true
+  list.each([".c", ".d", ".e", ".f", ".h"], fn(target) {
+    test_support.get_attribute(target, "style") |> should.equal("")
+  })
+  test_support.get_attribute(".g", "style") |> should.equal("color: red")
+}
+
+@target(javascript)
 pub fn component_live_refuses_patches_to_runtime_attributes_test() {
   // the patch reaches the component's own root, its marks must hold
   test_support.reset_dom()
@@ -565,7 +626,7 @@ pub fn component_live_root_keeps_nested_children_reactive_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let inner = fn() {
-    component.simple(
+    component.dynamic(
       slice: fn(model: Model) { model.count },
       render: fn(count, _) { "count:" <> int.to_string(count) },
     )
@@ -576,7 +637,7 @@ pub fn component_live_root_keeps_nested_children_reactive_test() {
     })
   }
   let navbar = fn() {
-    component.simple(slice: fn(_model: Model) { "const" }, render: fn(_, nest) {
+    component.dynamic(slice: fn(_model: Model) { "const" }, render: fn(_, nest) {
       "<nav>" <> nest(nav_actions()) <> "</nav>"
     })
   }
@@ -743,7 +804,7 @@ pub fn component_each_survives_its_parent_re_rendering_test() {
   set_rows(runtime, "a,b")
   let _ =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { model.count },
         render: fn(count, nest) {
           "<p>"
@@ -794,14 +855,14 @@ pub fn component_each_live_patch_can_target_the_row_root_test() {
 }
 
 @target(javascript)
-pub fn component_mount_renders_simple_once_test() {
+pub fn component_mount_renders_dynamic_once_test() {
   test_support.reset_dom()
   let renders = test_support.new(0)
   let runtime = test_support.new_runtime()
 
   let _ =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { model.count },
         render: fn(count, _nest) {
           test_support.set(renders, test_support.get(renders) + 1)
@@ -889,7 +950,7 @@ pub fn component_each_keeps_a_row_in_place_while_it_exits_test() {
           nest(
             component.static(fn(_) { "<b>row-" <> int.to_string(id) <> "</b>" })
             |> component.transition(enter: "tx-enter", exit: "tx-exit")
-            |> component.duration(milliseconds: 200),
+            |> component.transition_duration(milliseconds: 200),
           )
         },
       )
@@ -923,13 +984,13 @@ pub fn component_each_uses_a_string_key_as_it_is_test() {
 }
 
 @target(javascript)
-pub fn component_simple_skips_a_rebuilt_slice_with_equal_fields_test() {
+pub fn component_dynamic_skips_a_rebuilt_slice_with_equal_fields_test() {
   test_support.reset_dom()
   let renders = test_support.new(0)
   let runtime = test_support.new_runtime()
   let _ =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { #(model.count, model.name) },
         render: fn(_slice, _nest) {
           test_support.set(renders, test_support.get(renders) + 1)
@@ -950,12 +1011,12 @@ pub fn component_simple_skips_a_rebuilt_slice_with_equal_fields_test() {
 // =============================================================================
 
 @target(javascript)
-pub fn component_simple_tuple_slice_test() {
+pub fn component_dynamic_tuple_slice_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _runtime =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { #(model.count, model.name) },
         render: fn(pair, _) {
           let #(count, name) = pair
@@ -970,16 +1031,16 @@ pub fn component_simple_tuple_slice_test() {
 }
 
 // =============================================================================
-// SIMPLE SWITCHING
+// DYNAMIC SWITCHING
 // =============================================================================
 
 @target(javascript)
-pub fn component_simple_switch_renders_initial_case_test() {
+pub fn component_dynamic_switch_renders_initial_case_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _runtime =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { model.active_tab },
         render: fn(tab, _) {
           case tab {
@@ -996,12 +1057,12 @@ pub fn component_simple_switch_renders_initial_case_test() {
 }
 
 @target(javascript)
-pub fn component_simple_switch_replaces_on_slice_change_test() {
+pub fn component_dynamic_switch_replaces_on_slice_change_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _runtime =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { model.active_tab },
         render: fn(tab, _) {
           case tab {
@@ -1023,17 +1084,17 @@ pub fn component_simple_switch_replaces_on_slice_change_test() {
 }
 
 @target(javascript)
-pub fn component_simple_switch_preserves_identity_when_slice_unchanged_test() {
+pub fn component_dynamic_switch_preserves_identity_when_slice_unchanged_test() {
   // outer slice unchanged, the nested subscription updates on its own
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _runtime =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { model.active_tab },
         render: fn(_tab, nest) {
           nest(
-            component.simple(
+            component.dynamic(
               slice: fn(model: Model) { model.count },
               render: fn(count, _) {
                 "<span class=\"counter\">" <> int.to_string(count) <> "</span>"
@@ -1050,19 +1111,19 @@ pub fn component_simple_switch_preserves_identity_when_slice_unchanged_test() {
 }
 
 @target(javascript)
-pub fn component_simple_switch_cleans_up_old_child_handlers_test() {
+pub fn component_dynamic_switch_cleans_up_old_child_handlers_test() {
   // after switching A to B, messages for A's stale slice must not error
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _runtime =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { model.active_tab },
         render: fn(tab, nest) {
           case tab {
             TabA ->
               nest(
-                component.simple(
+                component.dynamic(
                   slice: fn(model: Model) { model.count },
                   render: fn(count, _) { int.to_string(count) },
                 ),
@@ -1082,20 +1143,20 @@ pub fn component_simple_switch_cleans_up_old_child_handlers_test() {
 }
 
 @target(javascript)
-pub fn component_simple_switch_with_structural_compares_by_value_test() {
+pub fn component_dynamic_switch_with_structural_compares_by_value_test() {
   // equal tuples skip the re-render, a wrapper mutation survives
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _runtime =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) {
           #(model.active_tab, model.secondary_count > 100)
         },
         render: fn(_pair, nest) {
           "<section>"
           <> nest(
-            component.simple(
+            component.dynamic(
               slice: fn(model: Model) { model.count },
               render: fn(count, _) { int.to_string(count) },
             ),
@@ -1119,14 +1180,14 @@ pub fn component_simple_switch_with_structural_compares_by_value_test() {
 }
 
 @target(javascript)
-pub fn component_simple_switch_inside_fragment_test() {
+pub fn component_dynamic_switch_inside_fragment_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _runtime =
     mount(runtime, fn(_model) {
       component.fragment([
         component.static(fn(_) { "<header>top</header>" }),
-        component.simple(
+        component.dynamic(
           slice: fn(model: Model) { model.active_tab },
           render: fn(tab, _) {
             case tab {
@@ -1166,7 +1227,7 @@ pub fn component_event_on_fragment_root_test() {
         }),
       ])
       |> event.on_click(message: Increment)
-      |> event.selector("#frag")
+      |> event.bind_to("#frag")
     })
   test_support.click("#frag")
 
@@ -1186,7 +1247,7 @@ pub fn component_event_on_nested_child_of_live_test() {
           "<button id=\"nested\" data-lily-message=\"go\">+</button>"
         })
         |> event.on_click(message: Increment)
-        |> event.selector("#nested")
+        |> event.bind_to("#nested")
       component.live(
         slice: fn(_model: Model) { 0 },
         render: fn(_, nest) {
@@ -1275,7 +1336,7 @@ pub fn component_event_inside_a_removed_each_row_is_dropped_test() {
             nest(
               component.static(fn(_) { "<i>row</i>" })
               |> event.on_click(message: Increment)
-              |> event.selector(".go"),
+              |> event.bind_to(".go"),
             )
           },
         ),
@@ -1300,7 +1361,7 @@ pub fn component_multi_mount_appends_handlers_test() {
   let runtime = test_support.new_runtime()
   let _runtime =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { model.count },
         render: fn(count, _) { "main:" <> int.to_string(count) },
       )
@@ -1312,7 +1373,7 @@ pub fn component_multi_mount_appends_handlers_test() {
       to_html: test_support.to_html,
       to_placeholder: test_support.to_placeholder,
       view: fn(_model) {
-        component.simple(
+        component.dynamic(
           slice: fn(model: Model) { model.secondary_count },
           render: fn(count, _) { "overlay:" <> int.to_string(count) },
         )
@@ -1336,14 +1397,14 @@ pub fn component_multi_mount_remount_same_selector_replaces_test() {
   let runtime = test_support.new_runtime()
   let _runtime =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { model.count },
         render: fn(count, _) { "A:" <> int.to_string(count) },
       )
     })
   let _r2 =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { model.count },
         render: fn(count, _) { "B:" <> int.to_string(count) },
       )
@@ -1377,7 +1438,7 @@ pub fn component_multi_mount_events_globally_delegated_test() {
       view: fn(_model) {
         component.static(fn(_) { "" })
         |> event.on_click(message: Increment)
-        |> event.selector("#global-btn")
+        |> event.bind_to("#global-btn")
       },
     )
   test_support.click("#global-btn")
@@ -1407,7 +1468,7 @@ pub fn component_transition_enter_class_applied_on_mount_test() {
               "<span>item " <> int.to_string(id) <> "</span>"
             })
             |> component.transition(enter: "fade-enter", exit: "fade-exit")
-            |> component.duration(milliseconds: 10),
+            |> component.transition_duration(milliseconds: 10),
           )
         },
       )
@@ -1435,7 +1496,7 @@ pub fn component_transition_exit_defers_removal_test() -> promise.Promise(Nil) {
               "<span class=\"item-" <> int.to_string(id) <> "\"></span>"
             })
             |> component.transition(enter: "tx-enter", exit: "tx-exit")
-            |> component.duration(milliseconds: 20),
+            |> component.transition_duration(milliseconds: 20),
           )
         },
       )
@@ -1476,7 +1537,7 @@ pub fn component_transition_re_add_mid_exit_cancels_test() -> promise.Promise(
               "<span class=\"keep-" <> int.to_string(id) <> "\"></span>"
             })
             |> component.transition(enter: "tx2-enter", exit: "tx2-exit")
-            |> component.duration(milliseconds: 50),
+            |> component.transition_duration(milliseconds: 50),
           )
         },
       )
@@ -1629,7 +1690,7 @@ fn one_sided_view(
             "<span class=\"side\">" <> int.to_string(id) <> "</span>"
           })
           |> component.transition(enter:, exit:)
-          |> component.duration(milliseconds: 50),
+          |> component.transition_duration(milliseconds: 50),
         )
       },
     )
@@ -1671,7 +1732,10 @@ pub fn component_transition_exiting_element_is_inert_test() {
   let runtime = test_support.new_runtime()
   client.dispatch(runtime)(AddTransitionItem(1))
   let _runtime =
-    mount(runtime, exiting_item_view(component.duration(_, milliseconds: 50)))
+    mount(
+      runtime,
+      exiting_item_view(component.transition_duration(_, milliseconds: 50)),
+    )
   client.dispatch(runtime)(RemoveTransitionItem(1))
   let html = test_support.inner_html("#app")
 
@@ -1685,7 +1749,10 @@ pub fn component_duration_sets_the_custom_property_test() {
   let runtime = test_support.new_runtime()
   client.dispatch(runtime)(AddTransitionItem(1))
   let _runtime =
-    mount(runtime, exiting_item_view(component.duration(_, milliseconds: 400)))
+    mount(
+      runtime,
+      exiting_item_view(component.transition_duration(_, milliseconds: 400)),
+    )
 
   test_support.get_attribute(".gone-1", "style")
   |> should.equal("--lily-transition-duration: 400ms;")
@@ -1708,7 +1775,7 @@ pub fn component_transition_inside_each_keeps_item_attribute_test() {
               "<span>item " <> int.to_string(id) <> "</span>"
             })
             |> component.transition(enter: "in", exit: "out")
-            |> component.duration(milliseconds: 10),
+            |> component.transition_duration(milliseconds: 10),
           )
         },
       )
@@ -1732,9 +1799,9 @@ pub fn component_transition_events_on_outer_wrapper_test() {
         "<button id=\"tx-btn\" data-lily-message=\"go\">+</button>"
       })
       |> component.transition(enter: "fade", exit: "fade-out")
-      |> component.duration(milliseconds: 10)
+      |> component.transition_duration(milliseconds: 10)
       |> event.on_click(message: Increment)
-      |> event.selector("#tx-btn")
+      |> event.bind_to("#tx-btn")
     })
   test_support.click("#tx-btn")
 
@@ -1747,20 +1814,20 @@ pub fn component_transition_events_on_outer_wrapper_test() {
 // =============================================================================
 
 @target(javascript)
-pub fn component_simple_nested_child_added_later_renders_the_current_model_test() {
+pub fn component_dynamic_nested_child_added_later_renders_the_current_model_test() {
   // first appears on a re-render, must use that render's model
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _runtime =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { model.active_tab },
         render: fn(tab, nest) {
           case tab {
             TabA -> "<p>hidden</p>"
             TabB ->
               nest(
-                component.simple(
+                component.dynamic(
                   slice: fn(model: Model) { model.count },
                   render: fn(count, _) {
                     "<b id=\"late\">" <> int.to_string(count) <> "</b>"
@@ -1792,14 +1859,14 @@ pub fn component_each_removed_row_drops_children_added_after_it_rendered_test() 
         key: fn(id: Int) { id },
         render: fn(_id, nest) {
           nest(
-            component.simple(
+            component.dynamic(
               slice: fn(model: Model) { model.active_tab },
               render: fn(tab, nest) {
                 case tab {
                   TabA -> ""
                   TabB ->
                     nest(
-                      component.simple(
+                      component.dynamic(
                         slice: fn(model: Model) {
                           test_support.set(slices, test_support.get(slices) + 1)
                           model.count
@@ -1827,14 +1894,14 @@ pub fn component_each_removed_row_drops_children_added_after_it_rendered_test() 
 // =============================================================================
 
 @target(javascript)
-pub fn component_simple_value_change_reaches_an_edited_input_test() {
+pub fn component_dynamic_value_change_reaches_an_edited_input_test() {
   // after typing, the value attribute is dead, set the property
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   client.dispatch(runtime)(SetName("seed"))
   let _runtime =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { model.name },
         render: fn(name, _) { "<input id=\"field\" value=\"" <> name <> "\">" },
       )
@@ -1846,12 +1913,12 @@ pub fn component_simple_value_change_reaches_an_edited_input_test() {
 }
 
 @target(javascript)
-pub fn component_simple_rerender_keeps_typing_when_the_value_did_not_change_test() {
+pub fn component_dynamic_rerender_keeps_typing_when_the_value_did_not_change_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _runtime =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { #(model.name, model.count) },
         render: fn(slice, _) {
           "<input id=\"field\" value=\""
@@ -1869,13 +1936,13 @@ pub fn component_simple_rerender_keeps_typing_when_the_value_did_not_change_test
 }
 
 @target(javascript)
-pub fn component_simple_checked_change_reaches_a_toggled_checkbox_test() {
+pub fn component_dynamic_checked_change_reaches_a_toggled_checkbox_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   client.dispatch(runtime)(Increment)
   let _runtime =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { model.count > 0 },
         render: fn(on, _) {
           case on {
@@ -1924,7 +1991,7 @@ pub fn component_selector_listener_stops_when_its_component_leaves_test() {
     mount(runtime, fn(_model) {
       component.fragment([
         component.static(fn(_) { "<button id=\"far\">+</button>" }),
-        component.simple(
+        component.dynamic(
           slice: fn(model: Model) { model.active_tab },
           render: fn(tab, nest) {
             case tab {
@@ -1932,7 +1999,7 @@ pub fn component_selector_listener_stops_when_its_component_leaves_test() {
                 nest(
                   component.static(fn(_) { "<i>listening</i>" })
                   |> event.on_click(message: Increment)
-                  |> event.selector("#far"),
+                  |> event.bind_to("#far"),
                 )
               TabB -> "<i>gone</i>"
             }
@@ -1956,7 +2023,7 @@ pub fn component_selector_listener_fires_once_after_its_parent_rerenders_test() 
     mount(runtime, fn(_model) {
       component.fragment([
         component.static(fn(_) { "<button id=\"far\">+</button>" }),
-        component.simple(
+        component.dynamic(
           slice: fn(model: Model) { model.secondary_count },
           render: fn(count, nest) {
             "<i>"
@@ -1965,7 +2032,7 @@ pub fn component_selector_listener_fires_once_after_its_parent_rerenders_test() 
             <> nest(
               component.static(fn(_) { "" })
               |> event.on_click(message: Increment)
-              |> event.selector("#far"),
+              |> event.bind_to("#far"),
             )
           },
         ),
@@ -1987,7 +2054,7 @@ pub fn component_remount_drops_selector_listeners_of_the_previous_mount_test() {
     mount(runtime, fn(_model) {
       component.static(fn(_) { "<p>first</p>" })
       |> event.on_click(message: Increment)
-      |> event.selector("#far")
+      |> event.bind_to("#far")
     })
   let _runtime =
     mount(runtime, fn(_model) { component.static(fn(_) { "<p>second</p>" }) })
@@ -2014,7 +2081,7 @@ pub fn component_mount_on_a_missing_selector_logs_and_renders_nothing_test() {
           to_html: test_support.to_html,
           to_placeholder: test_support.to_placeholder,
           view: fn(_model) {
-            component.simple(
+            component.dynamic(
               slice: fn(model: Model) { model.count },
               render: fn(_, _) {
                 test_support.set(renders, test_support.get(renders) + 1)
@@ -2037,7 +2104,7 @@ pub fn component_two_runtimes_keep_their_components_apart_test() {
   let second = test_support.new_runtime()
   let _runtime =
     mount(first, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { model.count },
         render: fn(count, _) { "first:" <> int.to_string(count) },
       )
@@ -2049,7 +2116,7 @@ pub fn component_two_runtimes_keep_their_components_apart_test() {
       to_html: test_support.to_html,
       to_placeholder: test_support.to_placeholder,
       view: fn(_model) {
-        component.simple(
+        component.dynamic(
           slice: fn(model: Model) { model.count },
           render: fn(count, _) { "second:" <> int.to_string(count) },
         )
@@ -2121,7 +2188,7 @@ pub fn component_transition_exit_ignores_a_child_animation_end_test() -> promise
           nest(
             component.static(fn(_) { "<span class=\"spinner\"></span>" })
             |> component.transition(enter: "tx3-enter", exit: "tx3-exit")
-            |> component.duration(milliseconds: 40),
+            |> component.transition_duration(milliseconds: 40),
           )
         },
       )
@@ -2229,12 +2296,12 @@ pub fn component_live_item_in_a_list_is_its_own_root_test() {
 }
 
 @target(javascript)
-pub fn component_simple_with_several_roots_gets_a_contents_wrapper_test() {
+pub fn component_dynamic_with_several_roots_gets_a_contents_wrapper_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _ =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { model.count },
         render: fn(count, _) {
           "<i class=\"a\">" <> int.to_string(count) <> "</i><i>!</i>"
@@ -2252,12 +2319,12 @@ pub fn component_simple_with_several_roots_gets_a_contents_wrapper_test() {
 }
 
 @target(javascript)
-pub fn component_simple_with_only_text_gets_a_contents_wrapper_test() {
+pub fn component_dynamic_with_only_text_gets_a_contents_wrapper_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _ =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { model.count },
         render: fn(count, _) { int.to_string(count) },
       )
@@ -2270,12 +2337,12 @@ pub fn component_simple_with_only_text_gets_a_contents_wrapper_test() {
 }
 
 @target(javascript)
-pub fn component_simple_going_from_empty_to_one_root_takes_the_root_test() {
+pub fn component_dynamic_going_from_empty_to_one_root_takes_the_root_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _ =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { model.count },
         render: fn(count, _) {
           case count {
@@ -2303,13 +2370,13 @@ pub fn component_simple_going_from_empty_to_one_root_takes_the_root_test() {
 fn nest_only_row(
   open: Bool,
 ) -> component.Component(Model, test_support.Message, String) {
-  component.simple(
+  component.dynamic(
     slice: fn(model: Model) { model.active_tab },
     render: fn(tab, nest) {
       case tab, open {
         TabA, _ | TabB, True ->
           nest(
-            component.simple(
+            component.dynamic(
               slice: fn(model: Model) { model.count },
               render: fn(count, _) {
                 "<tr class=\"c\"><td>" <> int.to_string(count) <> "</td></tr>"
@@ -2379,7 +2446,7 @@ pub fn component_nest_only_render_switching_to_markup_test() {
 fn toggled_panel_view(
   _model: Model,
 ) -> component.Component(Model, test_support.Message, String) {
-  component.simple(
+  component.dynamic(
     slice: fn(model: Model) { model.transition_item },
     render: fn(item, nest) {
       case item {
@@ -2387,7 +2454,7 @@ fn toggled_panel_view(
           nest(
             component.static(fn(_) { "<div id=\"panel\">p</div>" })
             |> component.transition(enter: "in", exit: "out")
-            |> component.duration(milliseconds: 200),
+            |> component.transition_duration(milliseconds: 200),
           )
         None -> ""
       }
@@ -2442,7 +2509,7 @@ pub fn component_resize_listener_follows_a_replaced_root_test() -> promise.Promi
 
 @target(javascript)
 fn tab_view() -> component.Component(Model, test_support.Message, String) {
-  component.simple(
+  component.dynamic(
     slice: fn(model: Model) { model.active_tab },
     render: fn(tab, _) {
       case tab {
@@ -2455,7 +2522,7 @@ fn tab_view() -> component.Component(Model, test_support.Message, String) {
 }
 
 @target(javascript)
-pub fn component_simple_root_tag_change_replaces_the_root_test() {
+pub fn component_dynamic_root_tag_change_replaces_the_root_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _ = mount(runtime, fn(_) { tab_view() })
@@ -2472,7 +2539,7 @@ pub fn component_simple_root_tag_change_replaces_the_root_test() {
 }
 
 @target(javascript)
-pub fn component_simple_root_tag_change_inside_an_each_row_test() {
+pub fn component_dynamic_root_tag_change_inside_an_each_row_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   set_rows(runtime, "a")
@@ -2504,12 +2571,12 @@ pub fn component_simple_root_tag_change_inside_an_each_row_test() {
 }
 
 @target(javascript)
-pub fn component_simple_with_a_transition_keeps_its_id_test() {
+pub fn component_dynamic_with_a_transition_keeps_its_id_test() {
   test_support.reset_dom()
   let runtime = test_support.new_runtime()
   let _ =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { model.count },
         render: fn(count, _) {
           "<b class=\"c\">" <> int.to_string(count) <> "</b>"
@@ -2630,7 +2697,7 @@ pub fn component_transition_exit_and_cancel_keep_a_roots_own_aria_hidden_test() 
               "<span class=\"own\" aria-hidden=\"true\">x</span>"
             })
             |> component.transition(enter: "in", exit: "out")
-            |> component.duration(milliseconds: 50),
+            |> component.transition_duration(milliseconds: 50),
           )
         },
       )
@@ -2743,7 +2810,7 @@ pub fn component_ids_are_not_guessable_test() {
   let runtime = test_support.new_runtime()
   let _ =
     mount(runtime, fn(_model) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { model.count },
         render: fn(_, _) { "<p id=\"p\">x</p>" },
       )
@@ -2760,7 +2827,7 @@ pub fn component_a_throwing_renderer_does_not_wedge_later_renders_test() {
   let runtime = test_support.new_runtime()
   let _ =
     mount(runtime, fn(_) {
-      component.simple(
+      component.dynamic(
         slice: fn(model: Model) { model.count },
         render: fn(count, _) {
           "<p id=\"count\">" <> int.to_string(count) <> "</p>"
@@ -2785,7 +2852,7 @@ pub fn component_a_throwing_component_does_not_stop_its_siblings_test() {
   let _ =
     mount(runtime, fn(_) {
       component.fragment([
-        component.simple(
+        component.dynamic(
           slice: fn(model: Model) { model.count },
           render: fn(count, _) {
             case count {
@@ -2794,7 +2861,7 @@ pub fn component_a_throwing_component_does_not_stop_its_siblings_test() {
             }
           },
         ),
-        component.simple(
+        component.dynamic(
           slice: fn(model: Model) { model.count },
           render: fn(count, _) {
             "<p id=\"good\">" <> int.to_string(count) <> "</p>"

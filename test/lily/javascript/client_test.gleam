@@ -58,7 +58,7 @@ fn chat_client() -> #(
     |> store.subscriptions(fn(_) { ["chat"] })
     |> client.start
   let #(handler, sent) = test_support.connect_capturing(runtime)
-  handler.opened()
+  test_support.open(handler)
   let _ = sent()
   #(runtime, handler, sent)
 }
@@ -179,7 +179,7 @@ pub fn client_message_the_rule_refuses_is_neither_applied_nor_sent_test() {
     })
     |> client.start
   let #(handler, sent) = test_support.connect_capturing(runtime)
-  handler.opened()
+  test_support.open(handler)
   let _ = sent()
 
   client.dispatch(runtime)(test_support.Decrement)
@@ -301,7 +301,7 @@ pub fn client_hydrate_keeps_a_script_closing_tag_in_the_model_test() {
   test_support.reset_dom()
   let hostile = "</script><img src=x onerror=alert(1)>"
   let embed =
-    store.initial_snapshot(
+    store.embed(
       test_support.local_store(),
       model: test_support.Model(..test_support.initial_model(), name: hostile),
     )
@@ -429,15 +429,15 @@ pub fn client_reconnect_resyncs_with_the_last_resume_token_test() {
   test_support.reset_mocks()
   let runtime = test_support.new_synced_runtime()
   let #(handler, sent) = test_support.connect_capturing(runtime)
-  handler.opened()
+  test_support.open(handler)
   receive(
     handler,
-    transport.Connected(client_id: "c1", resume: "t1", answered: 0),
+    transport.Connected(client_id: "c1", resume: "t1", answered: 0, owner: ""),
   )
   let _ = sent()
 
   handler.closed()
-  handler.opened()
+  test_support.open(handler)
 
   sent()
   |> should.equal([
@@ -467,11 +467,11 @@ pub fn client_resume_assigns_the_resumed_sessions_id_test() {
 
   receive(
     handler,
-    transport.Connected(client_id: "c2", resume: "t2", answered: 0),
+    transport.Connected(client_id: "c2", resume: "t2", answered: 0, owner: ""),
   )
   receive(
     handler,
-    transport.Connected(client_id: "c1", resume: "t2", answered: 0),
+    transport.Connected(client_id: "c1", resume: "t2", answered: 0, owner: ""),
   )
 
   recorded() |> should.equal(["c2", "c1"])
@@ -489,7 +489,7 @@ pub fn client_resume_settles_what_the_server_answered_without_replaying_it_test(
   // the first landed before the link died, the second didn't
   receive(
     handler,
-    transport.Connected(client_id: "c1", resume: "t1", answered: 1),
+    transport.Connected(client_id: "c1", resume: "t1", answered: 1, owner: ""),
   )
   receive(
     handler,
@@ -511,7 +511,7 @@ pub fn client_open_resyncs_the_session_and_every_wanted_topic_test() {
   client.update_model(runtime, with: wanting("chat,room:1"))
   let #(handler, sent) = test_support.connect_capturing(runtime)
 
-  handler.opened()
+  test_support.open(handler)
 
   sent()
   |> should.equal([
@@ -537,7 +537,7 @@ pub fn client_connector_that_opens_inside_connect_still_resyncs_test() {
   let connector =
     transport.connector(fn(handler: transport.ConnectorHandler) {
       // ready before connect returns, like a synchronous transport
-      handler.opened()
+      test_support.open(handler)
       transport.Channel(
         send: fn(bytes) {
           test_support.set(sent, [bytes, ..test_support.get(sent)])
@@ -621,7 +621,7 @@ pub fn client_protocol_mismatch_closes_for_good_test() {
   ))
 
   // a later open or dispatch sends nothing, frames may be misread
-  handler.opened()
+  test_support.open(handler)
   client.dispatch(runtime)(Increment)
   test_support.get(sent) |> should.equal([])
 }
@@ -633,7 +633,7 @@ pub fn client_open_with_no_subscriptions_resyncs_only_the_session_test() {
   let runtime = subscribing_runtime()
   let #(handler, sent) = test_support.connect_capturing(runtime)
 
-  handler.opened()
+  test_support.open(handler)
 
   sent()
   |> should.equal([
@@ -651,7 +651,7 @@ pub fn client_subscribes_when_the_model_starts_wanting_a_topic_test() {
   test_support.reset_mocks()
   let runtime = subscribing_runtime()
   let #(handler, sent) = test_support.connect_capturing(runtime)
-  handler.opened()
+  test_support.open(handler)
   let _ = sent()
 
   client.update_model(runtime, with: wanting("chat"))
@@ -667,7 +667,7 @@ pub fn client_unsubscribes_when_the_model_stops_wanting_a_topic_test() {
   let runtime = subscribing_runtime()
   client.update_model(runtime, with: wanting("chat"))
   let #(handler, sent) = test_support.connect_capturing(runtime)
-  handler.opened()
+  test_support.open(handler)
   let _ = sent()
 
   client.update_model(runtime, with: wanting(""))
@@ -683,7 +683,7 @@ pub fn client_sends_only_the_difference_between_subscription_sets_test() {
   let runtime = subscribing_runtime()
   client.update_model(runtime, with: wanting("chat,room:1"))
   let #(handler, sent) = test_support.connect_capturing(runtime)
-  handler.opened()
+  test_support.open(handler)
   let _ = sent()
 
   client.update_model(runtime, with: wanting("room:1,room:2"))
@@ -704,7 +704,7 @@ pub fn client_sends_nothing_when_the_subscriptions_do_not_change_test() {
   test_support.reset_mocks()
   let runtime = subscribing_runtime()
   let #(handler, sent) = test_support.connect_capturing(runtime)
-  handler.opened()
+  test_support.open(handler)
   client.update_model(runtime, with: wanting("chat"))
   let _ = sent()
 
@@ -731,7 +731,7 @@ pub fn client_sends_no_subscription_frames_while_offline_test() {
   |> should.equal([])
 
   // opened, then dropped
-  handler.opened()
+  test_support.open(handler)
   let _ = sent()
   handler.closed()
   client.update_model(runtime, with: wanting("chat,room:1"))
@@ -760,7 +760,7 @@ pub fn client_reconnect_names_the_state_a_topic_was_confirmed_at_test() {
   )
 
   handler.closed()
-  handler.opened()
+  test_support.open(handler)
 
   sent()
   |> should.equal([
@@ -786,7 +786,7 @@ pub fn client_reconnect_after_an_unanswered_edit_asks_for_a_snapshot_test() {
   let _ = sent()
 
   handler.closed()
-  handler.opened()
+  test_support.open(handler)
 
   sent()
   |> list.first
@@ -849,7 +849,7 @@ pub fn client_unchanged_keeps_the_slice_and_says_so_test() {
     wire_support.chat_snapshot(Model(..test_support.initial_model(), count: 2)),
   )
   handler.closed()
-  handler.opened()
+  test_support.open(handler)
   let _ = sent()
 
   receive(handler, transport.Unchanged(transport.Topic("chat")))
@@ -872,13 +872,13 @@ pub fn client_reconnect_resyncs_everything_currently_wanted_test() {
   let runtime = subscribing_runtime()
   let #(handler, sent) = test_support.connect_capturing(runtime)
   client.update_model(runtime, with: wanting("chat"))
-  handler.opened()
+  test_support.open(handler)
   let _ = sent()
   handler.closed()
   // changed while the connection was down
   client.update_model(runtime, with: wanting("room:7"))
 
-  handler.opened()
+  test_support.open(handler)
 
   sent()
   |> should.equal([
@@ -902,7 +902,7 @@ pub fn client_does_not_resubscribe_after_a_resync_covers_the_topic_test() {
   client.update_model(runtime, with: wanting("chat"))
   let #(handler, sent) = test_support.connect_capturing(runtime)
 
-  handler.opened()
+  test_support.open(handler)
 
   list.any(sent(), fn(frame) {
     case frame {
@@ -1205,7 +1205,7 @@ pub fn client_dropped_while_closed_waits_for_the_reconnect_test() {
     transport.TopicMessage(topic_id: "chat", id: 2, payload: Increment),
   ])
 
-  handler.opened()
+  test_support.open(handler)
 
   sent()
   |> should.equal([
@@ -1229,7 +1229,7 @@ pub fn client_reconnect_snapshot_does_not_replay_a_delivered_message_test() {
   client.dispatch(runtime)(Increment)
   handler.closed()
 
-  handler.opened()
+  test_support.open(handler)
   receive(
     handler,
     wire_support.chat_snapshot(Model(..test_support.initial_model(), count: 1)),
@@ -1264,13 +1264,13 @@ pub fn client_snapshot_does_not_fire_message_applied_for_replayed_messages_test(
 // =============================================================================
 
 @target(javascript)
-pub fn client_by_host_store_writes_json_on_localhost_test() {
+pub fn client_json_on_localhost_store_writes_json_on_localhost_test() {
   test_support.reset_dom()
   test_support.reset_mocks()
   let runtime = client.start(test_support.automatic_topic_store())
   let #(handler, sent) = test_support.connect_raw(runtime)
 
-  handler.opened()
+  test_support.open(handler)
 
   sent()
   |> list.map(transport.frame_format(
@@ -1288,7 +1288,7 @@ pub fn client_forced_message_pack_writes_message_pack_on_localhost_test() {
     client.start(test_support.automatic_session_store(transport.MessagePack))
   let #(handler, sent) = test_support.connect_raw(runtime)
 
-  handler.opened()
+  test_support.open(handler)
 
   sent()
   |> should.equal([
@@ -1323,7 +1323,7 @@ pub fn client_json_store_reads_message_pack_frames_test() {
   let message_pack = test_support.message_pack_serialiser()
 
   handler.received(transport.encode(
-    transport.Connected(client_id: "c1", resume: "", answered: 0),
+    transport.Connected(client_id: "c1", resume: "", answered: 0, owner: ""),
     serialiser: message_pack,
   ))
   handler.received(transport.encode(

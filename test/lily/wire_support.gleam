@@ -281,7 +281,7 @@ pub fn resync_topic(
 }
 
 pub fn send(connection: Connection(Model, Message), frame: Frame) -> Nil {
-  let _ = server.incoming(connection, bytes: encode(frame))
+  let _ = server.receive(connection, bytes: encode(frame))
   Nil
 }
 
@@ -293,7 +293,7 @@ pub fn send_in(
 ) -> Nil {
   let serialiser = test_support.automatic_serialiser(format)
   let _ =
-    server.incoming(connection, bytes: transport.encode(frame, serialiser:))
+    server.receive(connection, bytes: transport.encode(frame, serialiser:))
   Nil
 }
 
@@ -420,7 +420,8 @@ fn settle_round(app: Server(Model, Message)) -> Nil {
 fn steady(frame: Frame) -> Frame {
   case frame {
     transport.Snapshot(..) -> transport.Snapshot(..frame, epoch: 0)
-    transport.Connected(..) -> transport.Connected(..frame, resume: "")
+    transport.Connected(..) ->
+      transport.Connected(..frame, resume: "", owner: "")
     transport.Acknowledge(..) -> transport.Acknowledge(..frame, id: 0)
     transport.Dropped(..) -> transport.Dropped(..frame, id: 0)
     _ -> frame

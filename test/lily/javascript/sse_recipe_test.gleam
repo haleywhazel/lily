@@ -110,7 +110,7 @@ fn receive_post(
   use bytes <- result.map(bit_array.base64_decode(body))
   let _ =
     server.connection(app, client_id:)
-    |> server.incoming(bytes:)
+    |> server.receive(bytes:)
   Nil
 }
 
@@ -192,7 +192,7 @@ fn push_frame(
 fn open_as(source: Dynamic, client_id: String) -> Nil {
   push_frame(
     source,
-    transport.Connected(client_id:, resume: "", answered: 0),
+    transport.Connected(client_id:, resume: "", answered: 0, owner: ""),
     client_id:,
   )
 }

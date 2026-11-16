@@ -197,7 +197,7 @@ pub fn origin_refused_client_is_not_registered_test() {
       watch: server.Unwatched,
     )
   // both routes are no-ops for an unregistered client
-  server.incoming(server.connection(app, client_id: "ghost"), bytes: <<>>)
+  server.receive(server.connection(app, client_id: "ghost"), bytes: <<>>)
   server.dispatch_to(app, client_id: "ghost", message: test_support.Increment)
 
   test_support.client_count(app)

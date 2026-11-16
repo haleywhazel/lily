@@ -76,7 +76,7 @@ fn deliver_up(peer: Peer) -> Nil {
   test_support.set(peer.outbox, [])
   case test_support.get(peer.connection) {
     Some(connection) ->
-      list.each(frames, fn(bytes) { server.incoming(connection, bytes:) })
+      list.each(frames, fn(bytes) { server.receive(connection, bytes:) })
     None -> Nil
   }
 }
@@ -317,7 +317,7 @@ pub fn convergence_dropped_message_rolls_back_to_the_server_state_test() {
     })
   let a = new_peer(misrouting, "convergence_misrouted")
   go_online(app, a, "a1")
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
   settle([a])
   model(a).count |> should.equal(1)
 

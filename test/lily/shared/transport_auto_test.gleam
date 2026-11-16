@@ -257,21 +257,21 @@ pub fn auto_frame_format_is_an_error_for_an_open_serialiser_test() {
 }
 
 // =============================================================================
-// BY HOST
+// JSON ON LOCALHOST
 // =============================================================================
 
-pub fn auto_by_host_is_json_on_a_local_host_test() {
+pub fn auto_json_on_localhost_is_json_on_a_local_host_test() {
   list.map(["localhost", "127.0.0.1"], transport.format_for_host(
-    transport.ByHost,
+    transport.JsonOnLocalhost,
     _,
   ))
   |> should.equal([transport.Json, transport.Json])
 }
 
-pub fn auto_by_host_is_message_pack_on_any_other_host_test() {
+pub fn auto_json_on_localhost_is_message_pack_on_any_other_host_test() {
   list.map(
     ["example.com", "localhost.example.com", "10.0.0.1", ""],
-    transport.format_for_host(transport.ByHost, _),
+    transport.format_for_host(transport.JsonOnLocalhost, _),
   )
   |> should.equal([
     transport.MessagePack,
@@ -288,8 +288,10 @@ pub fn auto_explicit_format_ignores_the_host_test() {
   |> should.equal(transport.MessagePack)
 }
 
-pub fn auto_by_host_is_message_pack_on_the_server_test() {
-  transport.server_format(test_support.automatic_serialiser(transport.ByHost))
+pub fn auto_json_on_localhost_is_message_pack_on_the_server_test() {
+  transport.server_format(test_support.automatic_serialiser(
+    transport.JsonOnLocalhost,
+  ))
   |> should.equal(transport.MessagePack)
   transport.server_format(test_support.automatic_serialiser(transport.Json))
   |> should.equal(transport.Json)

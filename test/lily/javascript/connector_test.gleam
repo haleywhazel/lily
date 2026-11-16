@@ -15,6 +15,8 @@ import gleam/option
 import gleeunit/should
 
 @target(javascript)
+import lily/browser
+@target(javascript)
 import lily/client
 @target(javascript)
 import lily/store
@@ -22,6 +24,8 @@ import lily/store
 import lily/test_support
 @target(javascript)
 import lily/transport
+@target(javascript)
+import lily/wire_support
 
 // =============================================================================
 // HELPERS
@@ -136,8 +140,13 @@ pub fn offline_queue_replays_in_order_when_the_channel_opens_test() {
   test_support.set(online, True)
   let inner_handler = test_support.get(handler_cell)
   inner_handler.opened()
+  // held until the first frame after the open, the runtime's resync
+  test_support.get(delivered) |> should.equal([])
+  let _ = channel.send(<<0>>)
 
-  test_support.get(delivered) |> list.reverse |> should.equal([<<1>>, <<2>>])
+  test_support.get(delivered)
+  |> list.reverse
+  |> should.equal([<<0>>, <<1>>, <<2>>])
   transport.pending(connector) |> should.equal([])
   test_support.get(opened) |> should.equal(1)
 }
@@ -197,9 +206,10 @@ pub fn offline_queue_keeps_a_later_frame_behind_queued_ones_test() {
   test_support.get(delivered) |> should.equal([])
   let inner_handler = test_support.get(handler_cell)
   inner_handler.opened()
+  let _ = channel.send(<<0>>)
   test_support.get(delivered)
   |> list.reverse
-  |> should.equal([<<1>>, <<2>>])
+  |> should.equal([<<0>>, <<1>>, <<2>>])
 }
 
 @target(javascript)
@@ -259,9 +269,10 @@ pub fn offline_queue_keeps_an_earlier_page_frames_when_a_send_fails_test() {
   test_support.set(online, True)
   let inner_handler = test_support.get(handler_cell)
   inner_handler.opened()
+  let _ = channel.send(<<0>>)
   test_support.get(delivered)
   |> list.reverse
-  |> should.equal([<<1, 2, 3>>, <<4>>])
+  |> should.equal([<<0>>, <<1, 2, 3>>, <<4>>])
 }
 
 @target(javascript)
@@ -305,15 +316,16 @@ pub fn offline_queue_requeue_sends_in_order_on_the_next_open_test() {
   let connector =
     recording_connector(online, delivered, handler_cell)
     |> transport.with_offline_queue(storage_key: "test_queue_requeue_open")
-  let _ = transport.run_connector(connector, quiet_handler())
+  let channel = transport.run_connector(connector, quiet_handler())
 
   transport.requeue(connector, [<<1>>, <<2>>], delivered: 0)
   test_support.set(online, True)
   test_support.get(handler_cell).opened()
+  let _ = channel.send(<<0>>)
 
   test_support.get(delivered)
   |> list.reverse
-  |> should.equal([<<1>>, <<2>>])
+  |> should.equal([<<0>>, <<1>>, <<2>>])
 }
 
 @target(javascript)
@@ -344,6 +356,49 @@ pub fn plain_connector_has_nothing_pending_test() {
   })
   |> transport.pending
   |> should.equal([])
+}
+
+@target(javascript)
+pub fn offline_queue_is_emptied_by_clear_persisted_and_stays_out_of_storage_test() {
+  test_support.reset_dom()
+  test_support.write_session_storage("test_queue_cleared", "")
+  let connector =
+    transport.connector(fn(_handler) {
+      transport.Channel(send: fn(_) { Error(Nil) }, close: fn() { Nil })
+    })
+    |> transport.with_offline_queue(storage_key: "test_queue_cleared")
+  let channel = transport.run_connector(connector, quiet_handler())
+  let _ = channel.send(<<1>>)
+  transport.keep_owner(connector, "alice")
+
+  browser.clear_persisted()
+
+  transport.pending(connector) |> should.equal([])
+  transport.pending_owner(connector) |> should.equal(option.None)
+  test_support.read_session_storage("test_queue_cleared_owner")
+  |> should.equal("")
+
+  // a close on the way out of the page requeues, which mustn't be kept
+  transport.requeue(connector, [<<2>>], delivered: 0)
+  let _ = channel.send(<<3>>)
+  test_support.read_session_storage("test_queue_cleared") |> should.equal("")
+}
+
+@target(javascript)
+pub fn offline_queue_keeps_its_owner_without_any_frames_test() {
+  test_support.reset_dom()
+  let connector = fn() {
+    transport.connector(fn(_handler) {
+      transport.Channel(send: fn(_) { Ok(Nil) }, close: fn() { Nil })
+    })
+    |> transport.with_offline_queue(storage_key: "test_queue_owner")
+  }
+  transport.pending_owner(connector()) |> should.equal(option.None)
+
+  transport.keep_owner(connector(), "alice")
+
+  // read back by the next page
+  transport.pending_owner(connector()) |> should.equal(option.Some("alice"))
 }
 
 // =============================================================================
@@ -379,7 +434,7 @@ pub fn connect_applies_edits_left_in_the_queue_and_sends_them_once_test() {
   test_support.get(delivered) |> should.equal([])
 
   let handler = test_support.get(handler_cell)
-  handler.opened()
+  test_support.open(handler)
 
   // sent exactly once, the replay did not queue it a second time
   test_support.get(delivered)
@@ -407,7 +462,7 @@ pub fn connect_sends_the_resync_ahead_of_edits_queued_offline_test() {
 
   test_support.set(online, True)
   let handler = test_support.get(handler_cell)
-  handler.opened()
+  test_support.open(handler)
 
   test_support.get(delivered)
   |> list.reverse
@@ -459,7 +514,7 @@ pub fn connect_sends_the_resync_ahead_of_a_reloaded_queue_test() {
   let _ = client.connect(runtime, with: connector)
 
   let handler = test_support.get(handler_cell)
-  handler.opened()
+  test_support.open(handler)
 
   test_support.get(delivered)
   |> list.reverse
@@ -508,7 +563,7 @@ pub fn connect_resyncs_with_what_an_earlier_page_put_on_the_wire_test() {
     )
   let _ = client.connect(runtime, with: connector)
 
-  test_support.get(handler_cell).opened()
+  test_support.open(test_support.get(handler_cell))
 
   test_support.get(delivered)
   |> list.reverse
@@ -524,6 +579,209 @@ pub fn connect_resyncs_with_what_an_earlier_page_put_on_the_wire_test() {
       delivered: 3,
     )),
   )
+}
+
+@target(javascript)
+/// A `chat` runtime over a queue holding one stored edit, kept as `owner`.
+fn reloaded(
+  storage_key: String,
+  owner: option.Option(String),
+) -> #(
+  client.Runtime(test_support.Model, test_support.Message, store.Synced),
+  test_support.Ref(transport.ConnectorHandler),
+  fn() -> List(transport.Protocol(test_support.Model, test_support.Message)),
+) {
+  test_support.reset_dom()
+  let frame =
+    encode(transport.TopicMessage(
+      topic_id: "chat",
+      id: 1,
+      payload: test_support.Increment,
+    ))
+  test_support.write_session_storage(
+    storage_key,
+    "{\"protocol\":2,\"frames\":[\""
+      <> bit_array.base64_encode(frame, True)
+      <> "\"]}",
+  )
+  case owner {
+    option.Some(owner) ->
+      test_support.write_session_storage(storage_key <> "_owner", owner)
+    option.None -> Nil
+  }
+  let runtime = chat_runtime()
+  let delivered = test_support.new([])
+  let handler_cell = test_support.new(quiet_handler())
+  let connector =
+    recording_connector(test_support.new(True), delivered, handler_cell)
+    |> transport.with_offline_queue(storage_key:)
+  let _ = client.connect(runtime, with: connector)
+  #(runtime, handler_cell, fn() {
+    test_support.get(delivered) |> list.reverse |> decode_all
+  })
+}
+
+@target(javascript)
+fn is_message(
+  frame: transport.Protocol(test_support.Model, test_support.Message),
+) -> Bool {
+  case frame {
+    transport.TopicMessage(..) | transport.SessionMessage(..) -> True
+    _ -> False
+  }
+}
+
+@target(javascript)
+pub fn connect_waits_for_the_greeting_before_it_sends_anything_test() {
+  let #(runtime, handler_cell, sent) =
+    reloaded("test_queue_waits", option.Some("alice"))
+  let handler = test_support.get(handler_cell)
+
+  handler.opened()
+  client.dispatch(runtime)(test_support.Increment)
+  sent() |> should.equal([])
+
+  handler.received(test_support.greeting(owner: "alice"))
+  case sent() {
+    [transport.Resync(..), ..messages] ->
+      list.map(messages, fn(frame) {
+        case frame {
+          transport.TopicMessage(id:, ..) -> id
+          _ -> 0
+        }
+      })
+      |> should.equal([1, 2])
+    _ -> should.fail()
+  }
+}
+
+@target(javascript)
+pub fn connect_replays_a_queue_its_own_session_left_test() {
+  let #(runtime, handler_cell, sent) =
+    reloaded("test_queue_same_owner", option.Some("alice"))
+  let handler = test_support.get(handler_cell)
+
+  handler.opened()
+  handler.received(test_support.greeting(owner: "alice"))
+
+  sent() |> list.filter(is_message) |> list.length |> should.equal(1)
+  client.model(runtime).count |> should.equal(1)
+}
+
+@target(javascript)
+pub fn connect_discards_a_queue_another_session_left_test() {
+  let #(runtime, handler_cell, sent) =
+    reloaded("test_queue_other_owner", option.Some("alice"))
+  let handler = test_support.get(handler_cell)
+  let #(record, recorded) = wire_support.recorder()
+  let _ =
+    client.observe(runtime, fn(event, _model) {
+      case event {
+        client.Diagnostic(message:, ..) -> record(<<message:utf8>>)
+        _ -> Nil
+      }
+    })
+
+  handler.opened()
+  handler.received(test_support.greeting(owner: "bob"))
+
+  sent() |> list.filter(is_message) |> should.equal([])
+  test_support.read_session_storage("test_queue_other_owner")
+  |> should.equal("")
+  test_support.read_session_storage("test_queue_other_owner_owner")
+  |> should.equal("bob")
+  recorded()
+  |> should.equal([
+    <<
+      "lily: 1 unsent messages were queued under another session, they're discarded":utf8,
+    >>,
+  ])
+
+  // the server's copy replaces the edit that was on screen
+  handler.received(
+    encode(wire_support.chat_snapshot(test_support.initial_model())),
+  )
+  client.model(runtime).count |> should.equal(0)
+}
+
+@target(javascript)
+pub fn connect_discards_what_is_pending_when_a_reconnect_is_someone_else_test() {
+  test_support.reset_dom()
+  test_support.write_session_storage("test_queue_swapped", "")
+  let runtime = chat_runtime()
+  let online = test_support.new(True)
+  let delivered = test_support.new([])
+  let handler_cell = test_support.new(quiet_handler())
+  let connector =
+    recording_connector(online, delivered, handler_cell)
+    |> transport.with_offline_queue(storage_key: "test_queue_swapped")
+  let _ = client.connect(runtime, with: connector)
+  let handler = test_support.get(handler_cell)
+  handler.opened()
+  handler.received(test_support.greeting(owner: "alice"))
+
+  handler.closed()
+  test_support.set(online, False)
+  client.dispatch(runtime)(test_support.Increment)
+  test_support.set(online, True)
+  test_support.set(delivered, [])
+  handler.opened()
+  handler.received(test_support.greeting(owner: "bob"))
+
+  test_support.get(delivered)
+  |> list.reverse
+  |> decode_all
+  |> list.filter(is_message)
+  |> should.equal([])
+}
+
+@target(javascript)
+pub fn connect_keeps_an_unclaimed_queue_where_sessions_have_no_owner_test() {
+  let #(_runtime, handler_cell, sent) =
+    reloaded("test_queue_no_owner", option.None)
+  let handler = test_support.get(handler_cell)
+
+  handler.opened()
+  handler.received(test_support.greeting(owner: ""))
+
+  sent() |> list.filter(is_message) |> list.length |> should.equal(1)
+}
+
+@target(javascript)
+pub fn connect_discards_an_unclaimed_queue_once_sessions_have_owners_test() {
+  // an earlier page that was never greeted can't say whose edits these are
+  let #(_runtime, handler_cell, sent) =
+    reloaded("test_queue_unclaimed", option.None)
+  let handler = test_support.get(handler_cell)
+
+  handler.opened()
+  handler.received(test_support.greeting(owner: "alice"))
+
+  sent() |> list.filter(is_message) |> should.equal([])
+}
+
+@target(javascript)
+pub fn connect_keeps_what_this_page_made_before_its_first_greeting_test() {
+  test_support.reset_dom()
+  let runtime = chat_runtime()
+  let delivered = test_support.new([])
+  let handler_cell = test_support.new(quiet_handler())
+  let connector =
+    recording_connector(test_support.new(True), delivered, handler_cell)
+    |> transport.with_offline_queue(storage_key: "test_queue_own_page")
+  let _ = client.connect(runtime, with: connector)
+  let handler = test_support.get(handler_cell)
+
+  handler.opened()
+  client.dispatch(runtime)(test_support.Increment)
+  handler.received(test_support.greeting(owner: "alice"))
+
+  test_support.get(delivered)
+  |> list.reverse
+  |> decode_all
+  |> list.filter(is_message)
+  |> list.length
+  |> should.equal(1)
 }
 
 @target(javascript)
@@ -551,7 +809,7 @@ pub fn connect_keeps_a_reloaded_edit_on_top_of_the_snapshot_test() {
     |> transport.with_offline_queue(storage_key: "test_queue_reloaded_pending")
   let _ = client.connect(runtime, with: connector)
   let handler = test_support.get(handler_cell)
-  handler.opened()
+  test_support.open(handler)
 
   // the snapshot was taken before the queued edit landed
   handler.received(

@@ -52,7 +52,7 @@ fn chat_epoch_after_one_dispatch(
 ) -> Int {
   let #(c1, raw) = wire_support.open_raw(app, "c1", [])
   wire_support.subscribe(c1, "chat")
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
   let epochs =
     list.filter_map(raw(), fn(bytes) {
       case wire_support.decode_exact(bytes) {
@@ -152,7 +152,7 @@ pub fn topic_starts_on_first_subscribe_test() {
 pub fn topic_starts_on_first_server_dispatch_test() {
   let app = test_support.new_topic_server()
 
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
   wire_support.settle(app)
 
   test_support.subscriber_count(app, "chat")
@@ -180,7 +180,7 @@ pub fn topic_dispatch_to_an_undeclared_topic_is_dropped_with_a_diagnostic_test()
   let #(builder, events) = wire_support.observed(test_support.topic_builder())
   let app = test_support.start_server(builder)
 
-  server.dispatch_topic(app, topic_id: "nowhere", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "nowhere", message: Increment)
 
   events(app)
   |> list.any(is_diagnostic)
@@ -199,7 +199,7 @@ pub fn topic_server_dispatch_emits_topic_update_test() {
   wire_support.subscribe(c1, "chat")
   let _ = frames()
 
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
 
   frames()
   |> should.equal([
@@ -213,8 +213,8 @@ pub fn topic_server_dispatch_increments_sequence_test() {
   wire_support.subscribe(c1, "chat")
   let _ = frames()
 
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
-  server.dispatch_topic(app, topic_id: "chat", message: Decrement)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Decrement)
 
   frames()
   |> should.equal([
@@ -277,9 +277,9 @@ pub fn topic_each_keeps_its_own_sequence_test() {
   wire_support.subscribe(c1, "room:2")
   let _ = frames()
 
-  server.dispatch_topic(app, topic_id: "room:1", message: SetName("room:1"))
-  server.dispatch_topic(app, topic_id: "room:1", message: SetName("room:1"))
-  server.dispatch_topic(app, topic_id: "room:2", message: SetName("room:2"))
+  server.dispatch_to_topic(app, topic_id: "room:1", message: SetName("room:1"))
+  server.dispatch_to_topic(app, topic_id: "room:1", message: SetName("room:1"))
+  server.dispatch_to_topic(app, topic_id: "room:2", message: SetName("room:2"))
 
   let received = frames()
   received
@@ -313,8 +313,8 @@ pub fn topic_each_keeps_its_own_sequence_test() {
 pub fn topic_applies_the_full_update_to_its_own_model_test() {
   // snapshot holds the whole model, letting a late joiner see what was applied
   let app = test_support.new_topic_server()
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
   let #(c1, frames) = wire_support.open(app, "c1")
 
   wire_support.subscribe(c1, "chat")
@@ -343,12 +343,12 @@ pub fn topic_crashing_update_drops_the_message_test() {
   wire_support.subscribe(c1, "chat")
   let _ = frames()
 
-  server.dispatch_topic(app, topic_id: "chat", message: Decrement)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Decrement)
 
   frames()
   |> should.equal([])
   // same topic, still serving, sequence unchanged
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
   frames()
   |> should.equal([
     transport.TopicUpdate(topic_id: "chat", sequence: 1, payload: Increment),
@@ -382,7 +382,7 @@ pub fn topic_snapshot_arrives_before_any_update_test() {
   let #(c1, frames) = wire_support.open(app, "c1")
 
   wire_support.subscribe(c1, "chat")
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
 
   case frames() {
     [transport.Snapshot(..), transport.TopicUpdate(sequence: 1, ..)] -> Nil
@@ -425,7 +425,7 @@ pub fn topic_snapshot_carries_only_the_topic_slice_test() {
       test_support.narrow_store(),
       origins: server.AnyOrigin,
     ))
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
   let #(c1, frames) = wire_support.open(app, "c1")
 
   wire_support.subscribe(c1, "chat")
@@ -446,7 +446,7 @@ pub fn topic_snapshot_with_a_crashing_set_carries_the_whole_copy_test() {
     test_support.narrow_store_with(set: fn(_, _) { panic as "set blew up" })
   let app =
     test_support.start_server(server.new(crashing, origins: server.AnyOrigin))
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
   let #(c1, frames) = wire_support.open(app, "c1")
 
   wire_support.subscribe(c1, "chat")
@@ -607,7 +607,7 @@ pub fn topic_message_from_non_subscriber_is_dropped_test() {
   |> should.equal([])
   frames2()
   |> should.equal([transport.Dropped(target: transport.Topic("chat"), id: 0)])
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
   frames1()
   |> should.equal([
     transport.TopicUpdate(topic_id: "chat", sequence: 1, payload: Increment),
@@ -618,7 +618,7 @@ pub fn topic_server_dispatch_is_not_gated_by_access_test() {
   // access gates clients only, a server dispatch is trusted
   let app = denying_server()
 
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
   wire_support.settle(app)
 
   test_support.subscriber_count(app, "chat")
@@ -923,7 +923,7 @@ pub fn topic_resync_joins_an_allowing_topic_test() {
 
   wire_support.resync_topic(c1, "chat")
   wire_support.settle(app)
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
 
   frames()
   |> should.equal([
@@ -983,7 +983,7 @@ pub fn topic_a_resyncing_client_resubscribes_after_reconnecting_test() {
   test_support.subscriber_count(app, "chat")
   |> should.equal(1)
   // later dispatch still reaches it
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
   second_frames()
   |> should.equal([
     transport.TopicUpdate(topic_id: "chat", sequence: 1, payload: Increment),
@@ -1057,7 +1057,7 @@ pub fn topic_resync_naming_the_current_state_is_answered_unchanged_test() {
   frames()
   |> should.equal([transport.Unchanged(transport.Topic("chat"))])
   // joined all the same
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
   frames()
   |> should.equal([
     transport.TopicUpdate(topic_id: "chat", sequence: 2, payload: Increment),
@@ -1090,7 +1090,7 @@ pub fn topic_resync_naming_a_stopped_topics_epoch_gets_the_snapshot_test() {
   let app = test_support.new_topic_server()
   let epoch = chat_epoch_after_one_dispatch(app)
   wire_support.stop_topic(app, "chat")
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
   let #(c2, frames) = wire_support.open(app, "c2")
 
   wire_support.send(
@@ -1233,7 +1233,7 @@ pub fn topic_stop_tells_subscribers_with_a_final_acknowledge_test() {
   let app = test_support.new_topic_server()
   let #(c1, frames) = wire_support.open(app, "c1")
   wire_support.subscribe(c1, "chat")
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
   let _ = frames()
 
   wire_support.stop_topic(app, "chat")
@@ -1252,7 +1252,7 @@ pub fn topic_a_stopped_topic_rejoins_its_subscribers_when_dispatched_test() {
   wire_support.stop_topic(app, "chat")
   let _ = frames()
 
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
 
   frames()
   |> should.equal([
@@ -1306,7 +1306,7 @@ pub fn topic_a_stopped_topic_rechecks_access_on_rejoin_test() {
   let _ = frames()
   test_support.set_shared(allowed, False)
 
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
 
   // already told it's gone, nothing more
   frames()
@@ -1339,7 +1339,7 @@ pub fn topic_a_stopped_topic_unsubscribe_while_lapsed_is_not_rejoined_test() {
   wire_support.unsubscribe(c1, "chat")
   let _ = frames()
 
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
 
   frames()
   |> should.equal([])
@@ -1363,7 +1363,7 @@ pub fn topic_message_after_stop_is_dropped_test() {
 pub fn topic_subscribing_after_stop_starts_the_topic_afresh_test() {
   let app = test_support.new_topic_server()
   let #(c1, frames) = wire_support.open(app, "c1")
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
   server.stop_topic(app, topic_id: "chat")
 
   wire_support.subscribe(c1, "chat")
@@ -1552,7 +1552,7 @@ pub fn topic_dispatch_skips_the_rule_test() {
   let app = rule_server(fn(_sender, _target, _message) { False })
   let #(_c1, frames) = joined(app, "c1")
 
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
 
   frames()
   |> should.equal([

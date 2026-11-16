@@ -1,4 +1,4 @@
-// server.topic_init and topics_init, a topic loading its starting model,
+// server.load_topic and load_topic_family, a topic loading its starting model,
 // both targets
 
 // =============================================================================
@@ -49,18 +49,18 @@ fn snapshot(
 // LOADING
 // =============================================================================
 
-pub fn topic_init_a_topic_starts_from_its_loaded_model_test() {
+pub fn load_topic_a_topic_starts_from_its_loaded_model_test() {
   test_support.topic_builder()
-  |> server.topics_init(prefix: "room:", init: named)
+  |> server.load_topic_family(prefix: "room:", init: named)
   |> subscribe_and_drain("room:7")
   |> should.equal([snapshot("room:7", named("7"))])
 }
 
-pub fn topic_init_a_combining_mark_after_the_prefix_reaches_the_loader_test() {
+pub fn load_topic_a_combining_mark_after_the_prefix_reaches_the_loader_test() {
   // by graphemes both ids would hand the loader 'x'
   let builder =
     test_support.topic_builder()
-    |> server.topics_init(prefix: "room:", init: named)
+    |> server.load_topic_family(prefix: "room:", init: named)
 
   subscribe_and_drain(builder, "room:\u{0301}x")
   |> should.equal([snapshot("room:\u{0301}x", named("\u{0301}x"))])
@@ -68,18 +68,20 @@ pub fn topic_init_a_combining_mark_after_the_prefix_reaches_the_loader_test() {
   |> should.equal([snapshot("room:x", named("x"))])
 }
 
-pub fn topic_init_a_topic_without_a_loader_starts_from_the_initial_model_test() {
+pub fn load_topic_a_topic_without_a_loader_starts_from_the_initial_model_test() {
   test_support.topic_builder()
-  |> server.topics_init(prefix: "room:", init: named)
+  |> server.load_topic_family(prefix: "room:", init: named)
   |> subscribe_and_drain("chat")
   |> should.equal([snapshot("chat", test_support.initial_model())])
 }
 
-pub fn topic_init_the_longest_loader_prefix_wins_test() {
+pub fn load_topic_the_longest_loader_prefix_wins_test() {
   let builder =
     test_support.topic_builder()
-    |> server.topics_init(prefix: "room:vip:", init: fn(_) { named("vip") })
-    |> server.topics_init(prefix: "room:", init: fn(_) { named("plain") })
+    |> server.load_topic_family(prefix: "room:vip:", init: fn(_) {
+      named("vip")
+    })
+    |> server.load_topic_family(prefix: "room:", init: fn(_) { named("plain") })
 
   subscribe_and_drain(builder, "room:vip:1")
   |> should.equal([snapshot("room:vip:1", named("vip"))])
@@ -87,33 +89,33 @@ pub fn topic_init_the_longest_loader_prefix_wins_test() {
   |> should.equal([snapshot("room:1", named("plain"))])
 }
 
-pub fn topic_init_a_redeclared_loader_prefix_replaces_the_earlier_one_test() {
+pub fn load_topic_a_redeclared_loader_prefix_replaces_the_earlier_one_test() {
   test_support.topic_builder()
-  |> server.topics_init(prefix: "room:", init: fn(_) { named("first") })
-  |> server.topics_init(prefix: "room:", init: fn(_) { named("second") })
+  |> server.load_topic_family(prefix: "room:", init: fn(_) { named("first") })
+  |> server.load_topic_family(prefix: "room:", init: fn(_) { named("second") })
   |> subscribe_and_drain("room:1")
   |> should.equal([snapshot("room:1", named("second"))])
 }
 
-pub fn topic_init_an_exact_id_loads_its_topic_test() {
+pub fn load_topic_an_exact_id_loads_its_topic_test() {
   test_support.topic_builder()
-  |> server.topic_init(id: "chat", init: fn() { named("chat") })
+  |> server.load_topic(id: "chat", init: fn() { named("chat") })
   |> subscribe_and_drain("chat")
   |> should.equal([snapshot("chat", named("chat"))])
 }
 
-pub fn topic_init_an_exact_id_does_not_load_a_longer_id_test() {
+pub fn load_topic_an_exact_id_does_not_load_a_longer_id_test() {
   test_support.topic_builder()
-  |> server.topic_init(id: "room:", init: fn() { named("exact") })
+  |> server.load_topic(id: "room:", init: fn() { named("exact") })
   |> subscribe_and_drain("room:1")
   |> should.equal([snapshot("room:1", test_support.initial_model())])
 }
 
-pub fn topic_init_an_exact_id_beats_a_matching_prefix_test() {
+pub fn load_topic_an_exact_id_beats_a_matching_prefix_test() {
   let builder =
     test_support.topic_builder()
-    |> server.topic_init(id: "room:1", init: fn() { named("exact") })
-    |> server.topics_init(prefix: "room:", init: fn(_) { named("family") })
+    |> server.load_topic(id: "room:1", init: fn() { named("exact") })
+    |> server.load_topic_family(prefix: "room:", init: fn(_) { named("family") })
 
   subscribe_and_drain(builder, "room:1")
   |> should.equal([snapshot("room:1", named("exact"))])
@@ -125,10 +127,12 @@ pub fn topic_init_an_exact_id_beats_a_matching_prefix_test() {
 // A CRASHING LOADER
 // =============================================================================
 
-pub fn topic_init_a_crashing_loader_falls_back_to_the_initial_model_test() {
+pub fn load_topic_a_crashing_loader_falls_back_to_the_initial_model_test() {
   let #(builder, events) =
     test_support.topic_builder()
-    |> server.topics_init(prefix: "room:", init: fn(_) { panic as "no database" })
+    |> server.load_topic_family(prefix: "room:", init: fn(_) {
+      panic as "no database"
+    })
     |> wire_support.observed
   let app = test_support.start_server(builder)
   let #(connection, frames) = wire_support.open(app, "c1")

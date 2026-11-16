@@ -1,4 +1,4 @@
-// `server.open` and `server.attach`, a spawned process stands in for the socket
+// `server.admit` and `server.attach`, a spawned process stands in for the socket
 // no fixed sleeps, tests wait on a message or poll state
 
 // =============================================================================
@@ -56,14 +56,14 @@ fn attach_in_process(
   server.Connection(Model, Message),
   process.Subject(Received),
 ) {
-  let assert Ok(opened) = server.open(app, origin: option.None)
+  let assert Ok(opened) = server.admit(app, origin: option.None)
   attach_opened(opened)
 }
 
 @target(erlang)
 /// [`attach_in_process`](#attach_in_process) for an `Opened` of your own.
 fn attach_opened(
-  opened: server.Opened(Model, Message),
+  opened: server.Admission(Model, Message),
 ) -> #(
   process.Pid,
   server.Connection(Model, Message),
@@ -118,14 +118,14 @@ fn next(received: process.Subject(Received)) -> Received {
 }
 
 // =============================================================================
-// OPEN
+// ADMIT
 // =============================================================================
 
 @target(erlang)
 pub fn socket_open_accepts_an_allowed_origin_without_registering_test() {
   let app = allowlisted()
 
-  server.open(app, origin: option.Some("https://example.com"))
+  server.admit(app, origin: option.Some("https://example.com"))
   |> should.be_ok
 
   wire_support.settle(app)
@@ -137,7 +137,7 @@ pub fn socket_open_accepts_an_allowed_origin_without_registering_test() {
 pub fn socket_open_refuses_a_disallowed_origin_test() {
   let app = allowlisted()
 
-  case server.open(app, origin: option.Some("https://evil.example")) {
+  case server.admit(app, origin: option.Some("https://evil.example")) {
     Ok(_) -> should.fail()
     Error(error) ->
       error
@@ -153,7 +153,7 @@ pub fn socket_open_refuses_a_disallowed_origin_test() {
 pub fn socket_open_refuses_a_missing_origin_test() {
   let app = allowlisted()
 
-  case server.open(app, origin: option.None) {
+  case server.admit(app, origin: option.None) {
     Ok(_) -> should.fail()
     Error(error) -> error |> should.equal(server.OriginMissing)
   }
@@ -176,7 +176,7 @@ pub fn socket_attach_yields_the_greeting_and_dispatched_frames_test() {
   let assert Frame(transport.Version(..)) = next(received)
   next(received)
   |> should.equal(
-    Frame(transport.Connected(client_id:, resume: "", answered: 0)),
+    Frame(transport.Connected(client_id:, resume: "", answered: 0, owner: "")),
   )
 
   server.dispatch_to(app, client_id:, message: IncrementSecondary)
@@ -235,10 +235,10 @@ pub fn socket_attach_yields_one_error_when_the_server_stops_test() {
 // =============================================================================
 
 @target(erlang)
-pub fn socket_open_as_seeds_the_session_test() {
+pub fn socket_admit_as_seeds_the_session_test() {
   let app = test_support.new_server()
   let assert Ok(opened) =
-    server.open_as(app, origin: option.None, client_id: "u1", seed: [
+    server.admit_as(app, origin: option.None, client_id: "u1", seed: [
       IncrementSecondary,
     ])
 
@@ -247,7 +247,12 @@ pub fn socket_open_as_seeds_the_session_test() {
   let assert Frame(transport.Version(..)) = next(received)
   next(received)
   |> should.equal(
-    Frame(transport.Connected(client_id: "u1", resume: "", answered: 0)),
+    Frame(transport.Connected(
+      client_id: "u1",
+      resume: "",
+      answered: 0,
+      owner: "",
+    )),
   )
   let assert Frame(transport.SessionUpdate(payload: IncrementSecondary, ..)) =
     next(received)
@@ -258,13 +263,13 @@ pub fn socket_open_as_seeds_the_session_test() {
 pub fn socket_a_superseded_socket_is_closed_test() {
   let app = test_support.new_server()
   let assert Ok(first) =
-    server.open_as(app, origin: option.None, client_id: "u1", seed: [])
+    server.admit_as(app, origin: option.None, client_id: "u1", seed: [])
   let #(_socket, _connection, received) = attach_opened(first)
   let assert Frame(transport.Version(..)) = next(received)
   let assert Frame(transport.Connected(..)) = next(received)
 
   let assert Ok(second) =
-    server.open_as(app, origin: option.None, client_id: "u1", seed: [])
+    server.admit_as(app, origin: option.None, client_id: "u1", seed: [])
   let _ = attach_opened(second)
 
   next(received)
@@ -275,10 +280,10 @@ pub fn socket_a_superseded_socket_is_closed_test() {
 pub fn socket_a_stale_watch_down_does_not_remove_the_new_client_test() {
   let app = test_support.new_server()
   let assert Ok(first) =
-    server.open_as(app, origin: option.None, client_id: "u1", seed: [])
+    server.admit_as(app, origin: option.None, client_id: "u1", seed: [])
   let #(old_socket, _old, _received) = attach_opened(first)
   let assert Ok(second) =
-    server.open_as(app, origin: option.None, client_id: "u1", seed: [])
+    server.admit_as(app, origin: option.None, client_id: "u1", seed: [])
   let #(_socket, _connection, _received) = attach_opened(second)
   wire_support.settle(app)
 
@@ -292,20 +297,20 @@ pub fn socket_a_stale_watch_down_does_not_remove_the_new_client_test() {
 
 @target(erlang)
 pub fn socket_attach_holds_max_clients_against_handshakes_in_flight_test() {
-  // both pass `open`, only the first to attach gets in
+  // both pass `admit`, only the first to attach gets in
   let app =
     test_support.start_server(
       test_support.session_builder() |> server.max_clients(count: 1),
     )
-  let assert Ok(first) = server.open(app, origin: option.None)
-  let assert Ok(second) = server.open(app, origin: option.None)
+  let assert Ok(first) = server.admit(app, origin: option.None)
+  let assert Ok(second) = server.admit(app, origin: option.None)
 
   let #(_socket, _connection, _received) = attach_opened(first)
   let #(_socket, refused, received) = attach_opened(second)
 
   next(received)
   |> should.equal(Gone(downs: 1))
-  server.incoming(refused, bytes: <<>>)
+  server.receive(refused, bytes: <<>>)
   |> should.equal(server.Closed)
   wire_support.settle(app)
   test_support.client_count(app)
@@ -320,7 +325,7 @@ pub fn socket_open_refuses_past_max_clients_test() {
     )
   let #(_socket, _connection, _received) = attach_in_process(app)
 
-  case server.open(app, origin: option.None) {
+  case server.admit(app, origin: option.None) {
     Ok(_) -> should.fail()
     Error(error) -> error |> should.equal(server.TooManyClients)
   }
@@ -338,7 +343,7 @@ pub fn socket_a_slow_reader_is_disconnected_test() {
     )
   let app = test_support.start_server(builder)
   let assert Ok(opened) =
-    server.open_as(app, origin: option.None, client_id: "slow", seed: [])
+    server.admit_as(app, origin: option.None, client_id: "slow", seed: [])
   // attaches, then never reads its selector
   let attached = process.new_subject()
   let socket =
@@ -375,7 +380,7 @@ pub fn socket_a_reader_past_its_byte_budget_is_disconnected_test() {
     )
   let app = test_support.start_server(builder)
   let assert Ok(opened) =
-    server.open_as(app, origin: option.None, client_id: "slow", seed: [])
+    server.admit_as(app, origin: option.None, client_id: "slow", seed: [])
   let attached = process.new_subject()
   let socket =
     process.spawn_unlinked(fn() {
@@ -405,7 +410,7 @@ pub fn socket_a_reader_past_its_byte_budget_is_disconnected_test() {
 pub fn socket_inbound_frames_are_shed_when_the_server_is_overloaded_test() {
   let app =
     test_support.start_server(
-      test_support.session_builder() |> server.max_inbound_queue(frames: 3),
+      test_support.session_builder() |> server.max_mailbox(frames: 3),
     )
   let #(_socket, connection, received) = attach_in_process(app)
   let assert Frame(transport.Version(..)) = next(received)
@@ -427,7 +432,7 @@ pub fn socket_inbound_frames_are_shed_when_the_server_is_overloaded_test() {
 pub fn socket_a_shed_message_frame_gets_dropped_test() {
   let app =
     test_support.start_server(
-      test_support.session_builder() |> server.max_inbound_queue(frames: 3),
+      test_support.session_builder() |> server.max_mailbox(frames: 3),
     )
   let #(c1, frames) = wire_support.open(app, "c1")
   let pid = wire_support.server_pid(app)
@@ -460,7 +465,7 @@ pub fn socket_a_shed_frame_on_a_handle_rebuilt_from_an_id_gets_dropped_test() {
   // the handle has no way to answer, the server does it on the client's stream
   let app =
     test_support.start_server(
-      test_support.session_builder() |> server.max_inbound_queue(frames: 3),
+      test_support.session_builder() |> server.max_mailbox(frames: 3),
     )
   let #(_c1, frames) = wire_support.open(app, "c1")
   let handle = server.connection(app, client_id: "c1")
@@ -470,7 +475,7 @@ pub fn socket_a_shed_frame_on_a_handle_rebuilt_from_an_id_gets_dropped_test() {
   let answers =
     list.repeat(Nil, 10)
     |> list.map(fn(_) {
-      server.incoming(
+      server.receive(
         handle,
         bytes: wire_support.encode(transport.SessionMessage(
           id: wire_support.unique_id(),
@@ -495,7 +500,7 @@ pub fn socket_a_shed_control_is_still_handled_test() {
   // a resync lost to shedding would leave the client waiting for its snapshot
   let app =
     test_support.start_server(
-      test_support.session_builder() |> server.max_inbound_queue(frames: 3),
+      test_support.session_builder() |> server.max_mailbox(frames: 3),
     )
   let #(c1, frames) = wire_support.open(app, "c1")
   let pid = wire_support.server_pid(app)

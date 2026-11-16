@@ -42,7 +42,7 @@ pub fn open_serialiser_round_trips_every_frame_test() {
   [
     transport.Acknowledge(target: transport.Session, sequence: 1, id: 0),
     transport.Acknowledge(target: transport.Topic("chat"), sequence: 2, id: 0),
-    transport.Connected(client_id: "abc", resume: "", answered: 0),
+    transport.Connected(client_id: "abc", resume: "", answered: 0, owner: ""),
     transport.Dropped(target: transport.Session, id: 0),
     transport.Dropped(target: transport.Topic("chat"), id: 0),
     transport.Rejected(topic_id: "t", reason: transport.AccessDenied),
@@ -80,11 +80,11 @@ pub fn open_serialiser_round_trips_every_frame_test() {
 
 pub fn open_serialiser_writes_json_text_test() {
   transport.encode(
-    transport.Connected(client_id: "abc", resume: "", answered: 0),
+    transport.Connected(client_id: "abc", resume: "", answered: 0, owner: ""),
     serialiser: test_support.custom_serialiser(),
   )
   |> should.equal(bit_array.from_string(
-    "{\"type\":\"connected\",\"client_id\":\"abc\",\"resume\":\"\",\"answered\":0}",
+    "{\"type\":\"connected\",\"client_id\":\"abc\",\"resume\":\"\",\"answered\":0,\"owner\":\"\"}",
   ))
 }
 
@@ -113,7 +113,7 @@ pub fn open_serialiser_server_acknowledges_a_session_message_test() {
   let app = open_server()
   let #(connection, frames) = wire_support.open(app, "c1")
 
-  server.incoming(
+  server.receive(
     connection,
     bytes: transport.encode(
       transport.SessionMessage(id: 1, payload: Increment),
@@ -130,7 +130,7 @@ pub fn open_serialiser_server_acknowledges_a_session_message_test() {
 pub fn open_serialiser_server_answers_a_resync_with_a_snapshot_test() {
   let app = open_server()
   let #(connection, frames) = wire_support.open(app, "c1")
-  server.incoming(
+  server.receive(
     connection,
     bytes: transport.encode(
       transport.SessionMessage(id: 1, payload: Increment),
@@ -139,7 +139,7 @@ pub fn open_serialiser_server_answers_a_resync_with_a_snapshot_test() {
   )
   let _ = frames()
 
-  server.incoming(
+  server.receive(
     connection,
     bytes: transport.encode(
       transport.Resync(
@@ -166,7 +166,7 @@ pub fn open_serialiser_server_drops_a_frame_it_cannot_decode_test() {
   let app = open_server()
   let #(connection, frames) = wire_support.open(app, "c1")
 
-  server.incoming(connection, bytes: bit_array.from_string("{\"type\":\"x\"}"))
+  server.receive(connection, bytes: bit_array.from_string("{\"type\":\"x\"}"))
 
   frames()
   |> should.equal([])
@@ -178,6 +178,11 @@ pub fn open_serialiser_server_greets_a_connection_test() {
   let #(_connection, frames) = wire_support.open_recording(app, "c9", [])
 
   frames()
-  |> list.contains(transport.Connected(client_id: "c9", resume: "", answered: 0))
+  |> list.contains(transport.Connected(
+    client_id: "c9",
+    resume: "",
+    answered: 0,
+    owner: "",
+  ))
   |> should.be_true
 }

@@ -36,20 +36,20 @@
 ////       "http://localhost:8080",
 ////     ]))
 ////     |> server.observe(log_events)
-////     |> server.start_supervised
+////     |> server.start_under_supervisor
 //// }
 //// ```
 ////
-//// Using [`start_supervised`](#start_supervised) rather than [`start`](#start)
-//// ensures that the server and the topics are placed in an OTP supervision
-//// tree so the crash can be isolated and restarted rather than taking the node
-//// down with it.
+//// Using [`start_under_supervisor`](#start_under_supervisor) rather than
+//// [`start`](#start) ensures that the server and the topics are placed in an
+//// OTP supervision tree so the crash can be isolated and restarted rather than
+//// taking the node down with it.
 ////
 //// The server doesn't import `mist` or `wisp` or `ewe`, it's completely
 //// transport-agnostic (the same way Lustre leaves the transport to you),
 //// leaving you to wire it into whatever WebSocket or HTTP handler you're
 //// running. Open a [`Connection`](#Connection) with [`connect`](#connect),
-//// feed every inbound frame to [`incoming`](#incoming), and call
+//// feed every inbound frame to [`receive`](#receive), and call
 //// [`disconnect`](#disconnect) when the socket closes:
 ////
 //// ```gleam
@@ -61,7 +61,7 @@
 ////   )
 ////
 //// // for every frame the socket receives
-//// case server.incoming(connection, bytes:) {
+//// case server.receive(connection, bytes:) {
 ////   server.Closed -> close_socket()
 ////   _ -> Nil
 //// }
@@ -92,23 +92,24 @@
 ////
 //// When the server itself needs to change state, rather than react to
 //// something a client sent, use [`dispatch_to`](#dispatch_to) for a single
-//// client's session or [`dispatch_topic`](#dispatch_topic) for a shared topic.
-//// Both are safe to call from any process (an observer included) where they
-//// apply once the current event is done. Thus an observer can answer a client
-//// joining straight away, and something slow can be spawned and dispatch when
-//// it's ready.
+//// client's session or [`dispatch_to_topic`](#dispatch_to_topic) for a shared
+//// topic. Both are safe to call from any process (an observer included) where
+//// they apply once the current event is done. Thus an observer can answer a
+//// client joining straight away, and something slow can be spawned and
+//// dispatch when it's ready.
 ////
-//// A topic whose state lives somewhere else, like a database, can load it
-//// with [`topic_init`](#topic_init), or a whole family of them with
-//// [`topics_init`](#topics_init). Running inside the topic itself when it
-//// starts and every time it restarts, a slow loader only holds up that topic.
+//// A topic whose state lives somewhere else, like a database, can load it with
+//// [`load_topic`](#load_topic), or a whole family of them with
+//// [`load_topic_family`](#load_topic_family). Running inside the topic itself
+//// when it starts and every time it restarts, a slow loader only holds up that
+//// topic.
 ////
 //// Write it back from `TopicMessageApplied`, which also runs in the topic,
 //// before the sender's `Acknowledge`, and in no order with the server's own
 //// events.
 ////
 //// The server treats every client as possibly hostile. A frame is decoded in
-//// the process that calls [`incoming`](#incoming), refused past
+//// the process that calls [`receive`](#receive), refused past
 //// [`max_frame_bytes`](#max_frame_bytes), and each client is held to a
 //// [`rate_limit`](#rate_limit), where a frame past it waits its turn rather
 //// than being refused. One client may hold
@@ -117,7 +118,7 @@
 //// whole caps [`max_clients`](#max_clients) and [`max_topics`](#max_topics).
 //// On Erlang a socket from [`attach`](#attach) that reads too slowly is cut
 //// off past [`max_outbound_queue`](#max_outbound_queue), and frames are shed
-//// past [`max_inbound_queue`](#max_inbound_queue), a shed message still
+//// past [`max_mailbox`](#max_mailbox), a shed message still
 //// answered with a `Dropped`.
 //// [`stop_idle_topics`](#stop_idle_topics) stops the topics nobody holds.
 ////
@@ -145,13 +146,13 @@
 ////       shared.store(),
 ////       origins: server.AllowedOrigins(["http://localhost:8080"]),
 ////     )
-////     |> server.start_supervised
+////     |> server.start_under_supervisor
 ////
 ////   let assert Ok(_) =
 ////     mist.new(fn(http_request) {
 ////       let origin =
 ////         request.get_header(http_request, "origin") |> option.from_result
-////       case server.open(app, origin:) {
+////       case server.admit(app, origin:) {
 ////         Error(_) ->
 ////           response.new(403)
 ////           |> response.set_body(mist.Bytes(bytes_tree.new()))
@@ -166,7 +167,7 @@
 ////             handler: fn(connection, message, socket) {
 ////               case message {
 ////                 mist.Binary(bytes) ->
-////                   case server.incoming(connection, bytes:) {
+////                   case server.receive(connection, bytes:) {
 ////                     server.Closed -> mist.stop()
 ////                     _ -> mist.continue(connection)
 ////                   }
@@ -222,6 +223,19 @@ import lily/transport.{
 // PUBLIC TYPES
 // =============================================================================
 
+@target(erlang)
+/// A request whose origin [`admit`](#admit) has accepted, waiting for its
+/// socket to [`attach`](#attach).
+///
+/// Erlang only.
+pub opaque type Admission(model, message) {
+  Admission(
+    server: Server(model, message),
+    client_id: String,
+    seed: List(message),
+  )
+}
+
 /// Description of the server before starting, construct from [`new`](#new).
 pub opaque type Builder(model, message) {
   Builder(
@@ -231,8 +245,8 @@ pub opaque type Builder(model, message) {
     topic_inits: List(#(store.TopicMatch, fn(String) -> model)),
     max_clients: Int,
     max_frame_bytes: Int,
-    max_held_bytes: HeldBytes,
-    max_inbound_queue: Int,
+    max_throttled_bytes: HeldBytes,
+    max_mailbox: Int,
     max_outbound_bytes: Int,
     max_outbound_queue: Int,
     max_subscriptions: Int,
@@ -242,7 +256,7 @@ pub opaque type Builder(model, message) {
     eviction: Eviction,
     diagnostic_budget: RateLimit,
     topic_restarts: RestartLimit,
-    restart_tolerance: Tolerance,
+    server_restarts: RestartLimit,
     clock: fn() -> Int,
     idle_after: Option(Int),
     session_grace: Int,
@@ -295,15 +309,6 @@ pub type EvictionReason {
   Superseded
 }
 
-@target(erlang)
-/// A request whose origin [`open`](#open) has accepted, waiting for its socket
-/// to [`attach`](#attach).
-///
-/// Erlang only.
-pub opaque type Opened(model, message) {
-  Opened(server: Server(model, message), client_id: String, seed: List(message))
-}
-
 /// Which browser origins may open a connection to this server.
 ///
 /// Passed to [`new`](#new) and evaluated by [`connect`](#connect) and
@@ -312,12 +317,16 @@ pub opaque type Opened(model, message) {
 /// ```gleam
 /// server.AllowedOrigins(["https://example.com", "http://localhost:8080"])
 /// ```
+///
+/// `AnyOrigin` lets a page on any site connect with the user's cookies, so
+/// keep it for a server that doesn't sign clients in by cookie. It's logged at
+/// start-up.
 pub type Origins {
   AllowedOrigins(List(String))
   AnyOrigin
 }
 
-/// What [`incoming`](#incoming) did with a frame. A WebSocket transport only
+/// What [`receive`](#receive) did with a frame. A WebSocket transport only
 /// needs `Closed`, an HTTP one can answer the others with a status.
 pub type Received {
   /// Handed to the server, where it may wait its turn under the client's
@@ -325,7 +334,7 @@ pub type Received {
   Accepted
   /// Over [`max_frame_bytes`](#max_frame_bytes), refused unread, a 413
   TooLarge
-  /// The server's mailbox is past [`max_inbound_queue`](#max_inbound_queue)
+  /// The server's mailbox is past [`max_mailbox`](#max_mailbox)
   /// and the frame was shed, a 503. A message still gets its `Dropped`, so
   /// the client's edit rolls back
   Overloaded
@@ -359,7 +368,7 @@ pub type ServerEvent(model, message) {
   /// A session message was applied (`model` is the client's model after it)
   SessionMessageApplied(client_id: String, message: message, model: model)
   /// A topic applied a message, from a client or `None` for
-  /// [`dispatch_topic`](#dispatch_topic), `model` being the topic's after it
+  /// [`dispatch_to_topic`](#dispatch_to_topic), with the topic's model after it
   TopicMessageApplied(
     client_id: Option(String),
     topic_id: String,
@@ -385,14 +394,62 @@ pub type ServerEvent(model, message) {
 // =============================================================================
 
 @target(erlang)
-/// Registers a WebSocket with the server from inside its socket process, once
-/// [`open`](#open) or [`open_as`](#open_as) has accepted the request. Erlang
-/// only.
+/// Checks a WebSocket request's origin before upgrading it, returning an
+/// error for a refused one that you answer with a 403, and refuses with
+/// `TooManyClients` once the server holds [`max_clients`](#max_clients).
+/// Erlang only. Pass the result to [`attach`](#attach) once the socket is up.
 ///
-/// Give it the `Opened` value. You get back the connection and a selector that
-/// yields `Ok(bytes)` for each frame to send, and `Error(Nil)` when the socket
-/// should close, because the server restarted or cut this client off, or was
-/// already full when it attached.
+/// ```gleam
+/// case server.admit(app, origin:) {
+///   Ok(opened) -> upgrade(request, opened)
+///   Error(_) -> forbidden()
+/// }
+/// ```
+pub fn admit(
+  server: Server(model, message),
+  origin origin: Option(String),
+) -> Result(Admission(model, message), ConnectError) {
+  admit_as(server, origin:, client_id: generate_client_id(), seed: [])
+}
+
+@target(erlang)
+/// Like [`admit`](#admit), choosing the client's id and seeding its session,
+/// for a socket you've authenticated. Erlang only. Pass the result to
+/// [`attach`](#attach).
+///
+/// `seed` is applied before anything the client sends, the place for who
+/// signed in. A connected id is taken over, as with
+/// [`connect_as`](#connect_as).
+///
+/// ```gleam
+/// case server.admit_as(app, origin:, client_id:, seed: [SignedInAs(user)]) {
+///   Ok(opened) -> upgrade(request, opened)
+///   Error(_) -> forbidden()
+/// }
+/// ```
+pub fn admit_as(
+  server: Server(model, message),
+  origin origin: Option(String),
+  client_id client_id: String,
+  seed seed: List(message),
+) -> Result(Admission(model, message), ConnectError) {
+  use Nil <- result.try(validate_origin(server.origins, origin))
+  // only a check, `attach` reserves the place once the socket is up
+  case client_count(server.gate) >= server.gate.max_clients {
+    True -> Error(TooManyClients)
+    False -> Ok(Admission(server:, client_id:, seed:))
+  }
+}
+
+@target(erlang)
+/// Registers a WebSocket with the server from inside its socket process, once
+/// [`admit`](#admit) or [`admit_as`](#admit_as) has accepted the request.
+/// Erlang only.
+///
+/// Give it the `Admission` value. You get back the connection and a selector
+/// that yields `Ok(bytes)` for each frame to send, and `Error(Nil)` when the
+/// socket should close, because the server restarted or cut this client off, or
+/// was already full when it attached.
 ///
 /// ```gleam
 /// on_init: fn(_socket) {
@@ -401,7 +458,7 @@ pub type ServerEvent(model, message) {
 /// },
 /// ```
 pub fn attach(
-  opened: Opened(model, message),
+  opened: Admission(model, message),
 ) -> #(Connection(model, message), process.Selector(Result(BitArray, Nil))) {
   let server = opened.server
   // monitor before joining, a restart in between still closes the socket
@@ -438,7 +495,7 @@ pub fn attach(
       }
     }
   }
-  // `open` only checked the cap, two handshakes at once could both pass it
+  // `admit` only checked the cap, two handshakes at once could both pass it
   let connection = case reserve_client(server.gate) {
     True ->
       register(
@@ -508,8 +565,9 @@ pub fn client_id(connection: Connection(model, message)) -> String {
 /// Give it the request's `Origin` header and a `send` function that delivers a
 /// frame to this client. `send` runs inside the server and its topics, so it
 /// must not block and should bound what it queues itself. The client is
-/// disconnected if the calling process dies. With mist or ewe, [`open`](#open)
-/// and [`attach`](#attach) are simpler and bound the queue for you.
+/// disconnected if the calling process dies. With mist or ewe,
+/// [`admit`](#admit) and [`attach`](#attach) are simpler and bound the queue
+/// for you.
 ///
 /// ```gleam
 /// let assert Ok(connection) =
@@ -535,8 +593,9 @@ pub fn connect(
 ///
 /// `seed` is a list of messages applied to a new session before anything it
 /// sends, such as who signed in, and a client resuming its session must come
-/// back with the same seed (see [`session_grace`](#session_grace)). Use
-/// `watch: Unwatched` for short-lived HTTP requests.
+/// back with the same seed (see [`session_grace`](#session_grace)). A tab
+/// greeted under another seed than last time discards the messages it had
+/// queued offline. Use `watch: Unwatched` for short-lived HTTP requests.
 ///
 /// An id that's already connected is taken over. The old connection is
 /// unsubscribed from everything and reported as
@@ -587,11 +646,11 @@ pub fn connect_as(
 /// rather than the connection.
 ///
 /// It reaches whichever connection holds the id now, a newer one included.
-/// It can't tell the transport the client was cut off, so `incoming` only
+/// It can't tell the transport the client was cut off, so `receive` only
 /// says `Closed` after a restart.
 ///
 /// ```gleam
-/// case server.connection(app, client_id:) |> server.incoming(bytes:) {
+/// case server.connection(app, client_id:) |> server.receive(bytes:) {
 ///   server.Closed -> close_stream()
 ///   _ -> Nil
 /// }
@@ -683,9 +742,9 @@ pub fn dispatch_to_all(
 /// with a `Diagnostic`.
 ///
 /// ```gleam
-/// server.dispatch_topic(app, topic_id: "chat", message: Chat(Notice(text)))
+/// server.dispatch_to_topic(app, topic_id: "chat", message: Chat(Notice(text)))
 /// ```
-pub fn dispatch_topic(
+pub fn dispatch_to_topic(
   server: Server(model, message),
   topic_id topic_id: String,
   message message: message,
@@ -721,55 +780,53 @@ pub fn generate_client_id() -> String {
   random_hex(byte_count: 16)
 }
 
-/// Passes a frame the client sent to the server. Call it for every binary frame
-/// the socket receives, and close the socket when it says `Closed`.
+/// Loads the starting model of the topic with this exact `id`, for state kept
+/// somewhere else like a database. Pipe it from [`new`](#new), matching a
+/// [`store.topic`](./store.html#topic) declaration.
+///
+/// `init` runs again if the topic restarts. If it crashes, the topic starts
+/// from the store's initial model instead.
 ///
 /// ```gleam
-/// case server.incoming(connection, bytes:) {
-///   server.Closed -> close_socket()
-///   _ -> Nil
-/// }
+/// server.new(shared.store(), origins: server.AnyOrigin)
+/// |> server.load_topic(id: "lobby", init: fn() {
+///   Model(..shared.initial_model(), lobby: database.load_lobby())
+/// })
+/// |> server.start
 /// ```
-pub fn incoming(
-  connection: Connection(model, message),
-  bytes bytes: BitArray,
-) -> Received {
-  case live_token(connection) {
-    Error(Nil) -> Closed
-    Ok(token) -> {
-      let gate = connection.server.gate
-      let size = bit_array.byte_size(bytes)
-      // decoded here so a hostile frame costs its own process
-      let #(inbound, received) = case size > gate.max_frame_bytes {
-        True -> #(Oversized(message: transport.peek_message(bytes)), TooLarge)
-        False ->
-          case
-            transport.decode_inbound(
-              bytes,
-              serialiser: gate.serialiser,
-              conform: gate.conform,
-              from_client: True,
-            )
-          {
-            Ok(#(frame, format)) -> #(Decoded(frame:, format:), Accepted)
-            Error(failure) -> #(Undecodable(failure:), Accepted)
-          }
-      }
-      let client_id = connection.client_id
-      case overloaded(connection.server) {
-        False -> {
-          cast(connection.server, Incoming(client_id:, token:, inbound:, size:))
-          received
-        }
-        True -> shed(connection, token, inbound, size, received)
-      }
-    }
-  }
+pub fn load_topic(
+  builder: Builder(model, message),
+  id id: String,
+  init init: fn() -> model,
+) -> Builder(model, message) {
+  add_topic_init(builder, store.ExactId(id), fn(_) { init() })
+}
+
+/// Loads the starting model of every topic whose id starts with `prefix`,
+/// matching a [`store.topic_family`](./store.html#topic_family) declaration.
+/// Mirrors [`load_topic`](#load_topic).
+///
+/// `init` gets the rest of the id after the prefix. An exact `load_topic` id
+/// beats any prefix, then the longest prefix wins.
+///
+/// ```gleam
+/// server.new(shared.store(), origins: server.AnyOrigin)
+/// |> server.load_topic_family(prefix: "room:", init: fn(room) {
+///   Model(..shared.initial_model(), room: database.load_room(room))
+/// })
+/// |> server.start
+/// ```
+pub fn load_topic_family(
+  builder: Builder(model, message),
+  prefix prefix: String,
+  init init: fn(String) -> model,
+) -> Builder(model, message) {
+  add_topic_init(builder, store.IdPrefix(prefix), init)
 }
 
 /// Caps how many clients may be connected at once, 10,000 by default. Past
-/// it [`connect`](#connect), [`connect_as`](#connect_as), [`open`](#open) and
-/// [`open_as`](#open_as) refuse with `TooManyClients`.
+/// it [`connect`](#connect), [`connect_as`](#connect_as), [`admit`](#admit) and
+/// [`admit_as`](#admit_as) refuse with `TooManyClients`.
 ///
 /// ```gleam
 /// server.new(shared.store(), origins: server.AnyOrigin)
@@ -798,30 +855,10 @@ pub fn max_frame_bytes(
   Builder(..builder, max_frame_bytes: bytes)
 }
 
-/// Caps what frames waiting under the [`rate_limit`](#rate_limit) may take,
-/// `per_client` bytes for one client and `total` across every client, 256 KiB
-/// and 64 MiB by default. A message that doesn't fit gets a `Dropped`. Raise
-/// `per_client` for an app whose offline replays carry big edits, and `total`
-/// alongside [`max_clients`](#max_clients). Both are clamped to at least 0.
-///
-/// ```gleam
-/// server.new(shared.store(), origins: server.AnyOrigin)
-/// |> server.max_held_bytes(per_client: 1_048_576, total: 268_435_456)
-/// ```
-pub fn max_held_bytes(
-  builder: Builder(model, message),
-  per_client per_client: Int,
-  total total: Int,
-) -> Builder(model, message) {
-  let max_held_bytes =
-    HeldBytes(per_client: int.max(per_client, 0), total: int.max(total, 0))
-  Builder(..builder, max_held_bytes:)
-}
-
 /// Caps how many frames may wait in the server's mailbox, 10,000 by default.
 /// Erlang only, a JavaScript server handles each frame as it arrives.
 ///
-/// Past it [`incoming`](#incoming) sheds the frame instead of queueing work
+/// Past it [`receive`](#receive) sheds the frame instead of queueing work
 /// for it. A connection from [`attach`](#attach) is closed, the client
 /// reconnects with backoff and resyncs. Otherwise a message frame is answered
 /// with a `Dropped`, in order behind the client's earlier answers, rolling
@@ -831,13 +868,13 @@ pub fn max_held_bytes(
 ///
 /// ```gleam
 /// server.new(shared.store(), origins: server.AnyOrigin)
-/// |> server.max_inbound_queue(frames: 50_000)
+/// |> server.max_mailbox(frames: 50_000)
 /// ```
-pub fn max_inbound_queue(
+pub fn max_mailbox(
   builder: Builder(model, message),
   frames frames: Int,
 ) -> Builder(model, message) {
-  Builder(..builder, max_inbound_queue: frames)
+  Builder(..builder, max_mailbox: frames)
 }
 
 /// Caps the bytes that may wait for a socket from [`attach`](#attach) to send
@@ -889,6 +926,26 @@ pub fn max_subscriptions(
   Builder(..builder, max_subscriptions: per_client)
 }
 
+/// Caps what frames waiting under the [`rate_limit`](#rate_limit) may take,
+/// `per_client` bytes for one client and `total` across every client, 256 KiB
+/// and 64 MiB by default. A message that doesn't fit gets a `Dropped`. Raise
+/// `per_client` for an app whose offline replays carry big edits, and `total`
+/// alongside [`max_clients`](#max_clients). Both are clamped to at least 0.
+///
+/// ```gleam
+/// server.new(shared.store(), origins: server.AnyOrigin)
+/// |> server.max_throttled_bytes(per_client: 1_048_576, total: 268_435_456)
+/// ```
+pub fn max_throttled_bytes(
+  builder: Builder(model, message),
+  per_client per_client: Int,
+  total total: Int,
+) -> Builder(model, message) {
+  let max_throttled_bytes =
+    HeldBytes(per_client: int.max(per_client, 0), total: int.max(total, 0))
+  Builder(..builder, max_throttled_bytes:)
+}
+
 /// Caps the length of a topic id a client may subscribe to, 256 bytes by
 /// default.
 ///
@@ -933,13 +990,13 @@ pub fn monitor(server: Server(model, message)) -> process.Monitor {
 
 /// Starts building a server from the synced store your client also uses, and
 /// the origins allowed to connect. Pipe it into [`start`](#start) or
-/// [`start_supervised`](#start_supervised).
+/// [`start_under_supervisor`](#start_under_supervisor).
 ///
 /// ```gleam
 /// server.new(shared.store(), origins: server.AllowedOrigins([
 ///   "https://example.com",
 /// ]))
-/// |> server.start_supervised
+/// |> server.start_under_supervisor
 /// ```
 pub fn new(
   store: Store(model, message, Synced),
@@ -952,8 +1009,8 @@ pub fn new(
     topic_inits: [],
     max_clients: 10_000,
     max_frame_bytes: 1_048_576,
-    max_held_bytes: HeldBytes(per_client: 262_144, total: 67_108_864),
-    max_inbound_queue: 10_000,
+    max_throttled_bytes: HeldBytes(per_client: 262_144, total: 67_108_864),
+    max_mailbox: 10_000,
     max_outbound_bytes: 16_777_216,
     max_outbound_queue: 1000,
     max_subscriptions: 100,
@@ -964,7 +1021,7 @@ pub fn new(
     diagnostic_budget: RateLimit(per_second: 10, burst: 100),
     topic_restarts: RestartLimit(max: 5, within: 60_000),
     // the 2 in 5 default is tight for a client-influenced process
-    restart_tolerance: Tolerance(intensity: 3, period: 10),
+    server_restarts: RestartLimit(max: 3, within: 10_000),
     clock: monotonic_milliseconds,
     idle_after: option.None,
     session_grace: 30_000,
@@ -996,65 +1053,17 @@ pub fn observe(
   Builder(..builder, observers: list.append(builder.observers, [observer]))
 }
 
-@target(erlang)
-/// Checks a WebSocket request's origin before upgrading it, returning an
-/// error for a refused one that you answer with a 403, and refuses with
-/// `TooManyClients` once the server holds [`max_clients`](#max_clients).
-/// Erlang only. Pass the result to [`attach`](#attach) once the socket is up.
-///
-/// ```gleam
-/// case server.open(app, origin:) {
-///   Ok(opened) -> upgrade(request, opened)
-///   Error(_) -> forbidden()
-/// }
-/// ```
-pub fn open(
-  server: Server(model, message),
-  origin origin: Option(String),
-) -> Result(Opened(model, message), ConnectError) {
-  open_as(server, origin:, client_id: generate_client_id(), seed: [])
-}
-
-@target(erlang)
-/// Like [`open`](#open), choosing the client's id and seeding its session,
-/// for a socket you've authenticated. Erlang only. Pass the result to
-/// [`attach`](#attach).
-///
-/// `seed` is applied before anything the client sends, the place for who
-/// signed in. A connected id is taken over, as with
-/// [`connect_as`](#connect_as).
-///
-/// ```gleam
-/// case server.open_as(app, origin:, client_id:, seed: [SignedInAs(user)]) {
-///   Ok(opened) -> upgrade(request, opened)
-///   Error(_) -> forbidden()
-/// }
-/// ```
-pub fn open_as(
-  server: Server(model, message),
-  origin origin: Option(String),
-  client_id client_id: String,
-  seed seed: List(message),
-) -> Result(Opened(model, message), ConnectError) {
-  use Nil <- result.try(validate_origin(server.origins, origin))
-  // only a check, `attach` reserves the place once the socket is up
-  case client_count(server.gate) >= server.gate.max_clients {
-    True -> Error(TooManyClients)
-    False -> Ok(Opened(server:, client_id:, seed:))
-  }
-}
-
 /// Caps how fast one client may send, `per_second` frames on average and up to
 /// `burst` at once, 50 and 500 by default. That's a few times a fast typist,
 /// with room for a reconnect's resync and an offline replay.
 ///
 /// A frame past it waits its turn. Frames are held in arrival order, up to
-/// `burst` messages within [`max_held_bytes`](#max_held_bytes), and run as
-/// the allowance refills. A message that can't wait, because the held queue
-/// is full, gets a `Dropped`, so the client's edit rolls back. A client
+/// `burst` messages within [`max_throttled_bytes`](#max_throttled_bytes), and
+/// run as the allowance refills. A message that can't wait, because the held
+/// queue is full, gets a `Dropped`, so the client's edit rolls back. A client
 /// refused more than [`evict_after`](#evict_after) allows, `burst` frames
-/// within 10 seconds by default, is cut off,
-/// reported as [`ClientEvicted`](#ServerEvent) with `RateLimited`.
+/// within 10 seconds by default, is cut off, reported as
+/// [`ClientEvicted`](#ServerEvent) with `RateLimited`.
 ///
 /// Both values are clamped to between 1 and 1,000,000,000.
 ///
@@ -1071,6 +1080,52 @@ pub fn rate_limit(
   let per_second = int.clamp(per_second, min: 1, max: 1_000_000_000)
   let burst = int.clamp(burst, min: 1, max: 1_000_000_000)
   Builder(..builder, rate_limit: RateLimit(per_second:, burst:))
+}
+
+/// Passes a frame the client sent to the server. Call it for every binary frame
+/// the socket receives, and close the socket when it says `Closed`.
+///
+/// ```gleam
+/// case server.receive(connection, bytes:) {
+///   server.Closed -> close_socket()
+///   _ -> Nil
+/// }
+/// ```
+pub fn receive(
+  connection: Connection(model, message),
+  bytes bytes: BitArray,
+) -> Received {
+  case live_token(connection) {
+    Error(Nil) -> Closed
+    Ok(token) -> {
+      let gate = connection.server.gate
+      let size = bit_array.byte_size(bytes)
+      // decoded here so a hostile frame costs its own process
+      let #(inbound, received) = case size > gate.max_frame_bytes {
+        True -> #(Oversized(message: transport.peek_message(bytes)), TooLarge)
+        False ->
+          case
+            transport.decode_inbound(
+              bytes,
+              serialiser: gate.serialiser,
+              conform: gate.conform,
+              from_client: True,
+            )
+          {
+            Ok(#(frame, format)) -> #(Decoded(frame:, format:), Accepted)
+            Error(failure) -> #(Undecodable(failure:), Accepted)
+          }
+      }
+      let client_id = connection.client_id
+      case overloaded(connection.server) {
+        False -> {
+          cast(connection.server, Incoming(client_id:, token:, inbound:, size:))
+          received
+        }
+        True -> shed(connection, token, inbound, size, received)
+      }
+    }
+  }
 }
 
 /// Checks every topic a client joined against its access rule again, for
@@ -1090,25 +1145,26 @@ pub fn recheck_access(
 }
 
 @target(erlang)
-/// Sets how many times [`start_supervised`](#start_supervised)'s supervisor
-/// restarts the server within `period` seconds before it gives up and exits
-/// itself, 3 in 10 by default. Erlang only. A server in a tree of your own,
-/// from [`supervised`](#supervised), follows your supervisor's tolerance
-/// instead.
+/// Sets how often [`start_under_supervisor`](#start_under_supervisor)'s
+/// supervisor restarts a crashing server before it gives up and exits itself,
+/// `max` crashes within `within` milliseconds, 3 within 10,000 by default.
+/// Erlang only. The window is rounded up to whole seconds. A server in a tree
+/// of your own, from [`supervised`](#supervised), follows your supervisor's
+/// limits instead.
 ///
 /// ```gleam
 /// server.new(shared.store(), origins: server.AnyOrigin)
-/// |> server.restart_tolerance(intensity: 5, period: 30)
-/// |> server.start_supervised
+/// |> server.server_restarts(max: 5, within: 30_000)
+/// |> server.start_under_supervisor
 /// ```
-pub fn restart_tolerance(
+pub fn server_restarts(
   builder: Builder(model, message),
-  intensity intensity: Int,
-  period period: Int,
+  max max: Int,
+  within milliseconds: Int,
 ) -> Builder(model, message) {
-  let restart_tolerance =
-    Tolerance(intensity: int.max(intensity, 0), period: int.max(period, 1))
-  Builder(..builder, restart_tolerance:)
+  let server_restarts =
+    RestartLimit(max: int.max(max, 0), within: int.max(milliseconds, 1))
+  Builder(..builder, server_restarts:)
 }
 
 /// Keeps a session whose connection closed for `milliseconds`, 30,000 by
@@ -1131,7 +1187,8 @@ pub fn session_grace(
 }
 
 /// Starts the server. Pipe it from [`new`](#new). On Erlang,
-/// [`start_supervised`](#start_supervised) is usually the better choice.
+/// [`start_under_supervisor`](#start_under_supervisor) is usually the better
+/// choice.
 ///
 /// ```gleam
 /// let assert Ok(app) =
@@ -1155,9 +1212,9 @@ pub fn start(
 /// ```gleam
 /// let assert Ok(#(_supervisor, app)) =
 ///   server.new(shared.store(), origins: server.AnyOrigin)
-///   |> server.start_supervised
+///   |> server.start_under_supervisor
 /// ```
-pub fn start_supervised(
+pub fn start_under_supervisor(
   builder: Builder(model, message),
 ) -> Result(#(static_supervisor.Supervisor, Server(model, message)), Nil) {
   // start runs in the supervisor, meaning replies go via a caller-owned channel
@@ -1174,8 +1231,8 @@ pub fn start_supervised(
   let tree =
     static_supervisor.new(static_supervisor.OneForAll)
     |> static_supervisor.restart_tolerance(
-      intensity: builder.restart_tolerance.intensity,
-      period: builder.restart_tolerance.period,
+      intensity: builder.server_restarts.max,
+      period: { builder.server_restarts.within + 999 } / 1000,
     )
     |> static_supervisor.add(child)
     |> static_supervisor.start
@@ -1200,7 +1257,7 @@ pub fn stop(server: Server(model, message)) -> Nil {
 }
 
 /// Stops a topic once it has gone `after` milliseconds with no subscribers and
-/// no dispatches, dropping its state until [`topic_init`](#topic_init) loads
+/// no dispatches, dropping its state until [`load_topic`](#load_topic) loads
 /// it again.
 ///
 /// ```gleam
@@ -1248,28 +1305,6 @@ pub fn supervised(
   supervised_as(builder, actor.new_name("lily_server"), fn(_) { Nil })
 }
 
-/// Loads the starting model of the topic with this exact `id`, for state kept
-/// somewhere else like a database. Pipe it from [`new`](#new), matching a
-/// [`store.topic`](./store.html#topic) declaration.
-///
-/// `init` runs again if the topic restarts. If it crashes, the topic starts
-/// from the store's initial model instead.
-///
-/// ```gleam
-/// server.new(shared.store(), origins: server.AnyOrigin)
-/// |> server.topic_init(id: "lobby", init: fn() {
-///   Model(..shared.initial_model(), lobby: database.load_lobby())
-/// })
-/// |> server.start
-/// ```
-pub fn topic_init(
-  builder: Builder(model, message),
-  id id: String,
-  init init: fn() -> model,
-) -> Builder(model, message) {
-  add_topic_init(builder, store.ExactId(id), fn(_) { init() })
-}
-
 /// Sets how often a crashing topic is restarted before the server gives up on
 /// it, `max` crashes each within `within` milliseconds of the last, 5 within
 /// 60,000 by default. A topic given up on rejects its holders with `NotFound`
@@ -1287,28 +1322,6 @@ pub fn topic_restarts(
   let topic_restarts =
     RestartLimit(max: int.max(max, 0), within: int.max(milliseconds, 1))
   Builder(..builder, topic_restarts:)
-}
-
-/// Loads the starting model of every topic whose id starts with `prefix`,
-/// matching a [`store.topics`](./store.html#topics) family. Mirrors
-/// [`topic_init`](#topic_init).
-///
-/// `init` gets the rest of the id after the prefix. An exact `topic_init` id
-/// beats any prefix, then the longest prefix wins.
-///
-/// ```gleam
-/// server.new(shared.store(), origins: server.AnyOrigin)
-/// |> server.topics_init(prefix: "room:", init: fn(room) {
-///   Model(..shared.initial_model(), room: database.load_room(room))
-/// })
-/// |> server.start
-/// ```
-pub fn topics_init(
-  builder: Builder(model, message),
-  prefix prefix: String,
-  init init: fn(String) -> model,
-) -> Builder(model, message) {
-  add_topic_init(builder, store.IdPrefix(prefix), init)
 }
 
 // =============================================================================
@@ -1389,7 +1402,7 @@ type Client(model, message) {
     // the highest message id processed or refused
     answered: Int,
     limiter: Limiter(model, message),
-    // what the connection's `incoming` reads
+    // what the connection's `receive` reads
     mirror: ClientMirror,
     send: fn(BitArray) -> Nil,
     // closes the socket, only a transport that can say so has one
@@ -1429,7 +1442,7 @@ type Gate(model, message) {
     serialiser: Serialiser(model, message),
     conform: transport.Conformer,
     max_frame_bytes: Int,
-    max_inbound_queue: Int,
+    max_mailbox: Int,
     max_outbound_bytes: Int,
     max_outbound_queue: Int,
     max_clients: Int,
@@ -1459,7 +1472,7 @@ type HeldBytes {
   HeldBytes(per_client: Int, total: Int)
 }
 
-// a frame as `incoming` hands it to the server
+// a frame as `receive` hands it to the server
 type Inbound(model, message) {
   Decoded(frame: transport.Protocol(model, message), format: Option(Format))
   // over `max_frame_bytes`, with the target and id read from its head
@@ -1495,7 +1508,7 @@ type InternalEvent(model, message) {
   RetryHeld(client_id: String, token: Int)
   // a parked session's grace ran out
   SessionExpired(client_id: String, park: Int)
-  // a message `incoming` shed past `max_inbound_queue`, refused in order
+  // a message `receive` shed past `max_mailbox`, refused in order
   Shed(
     client_id: String,
     token: ConnectionToken,
@@ -1619,7 +1632,7 @@ type RateLimit {
   RateLimit(per_second: Int, burst: Int)
 }
 
-// how many crashes are tolerated, each `within` milliseconds of the last
+// how many crashes are tolerated within `within` milliseconds
 type RestartLimit {
   RestartLimit(max: Int, within: Int)
 }
@@ -1650,7 +1663,7 @@ type ServerState(model, message) {
     max_subscriptions: Int,
     max_topic_id_bytes: Int,
     max_topics: Int,
-    max_held_bytes: HeldBytes,
+    max_throttled_bytes: HeldBytes,
     eviction: Eviction,
     diagnostic_budget: RateLimit,
     topic_restarts: RestartLimit,
@@ -1709,11 +1722,6 @@ type Teller {
   // the topic, behind its final answers to them
   TopicTells
   ServerTells
-}
-
-// what `start_supervised`'s supervisor takes, in seconds
-type Tolerance {
-  Tolerance(intensity: Int, period: Int)
 }
 
 type TopicActor(model, message) =
@@ -1872,7 +1880,7 @@ fn add_topic_init(
 }
 
 // handles the frame and charges for it
-fn admit(
+fn admit_frame(
   state: ServerState(model, message),
   client_id: String,
   client: Client(model, message),
@@ -1894,6 +1902,38 @@ fn admit(
   }
   handle_inbound(state, client_id, client, inbound)
   |> charge(client_id, client, cost(inbound, size))
+}
+
+// without a grace period every connection is fresh, its first resync says
+// what the page sent before
+fn already_sent(
+  state: ServerState(model, message),
+  client_id: String,
+  delivered: Int,
+) -> ServerState(model, message) {
+  case state.session_grace, dict.get(state.clients, client_id) {
+    0, Ok(client) if client.answered == 0 ->
+      put_client(state, client_id, Client(..client, answered: delivered))
+    _, _ -> state
+  }
+}
+
+// a repeat gets a `Dropped`, never applied twice
+fn answering(
+  state: ServerState(model, message),
+  client_id: String,
+  target: transport.SyncTarget,
+  id: Int,
+  handle: fn(ServerState(model, message)) -> ServerState(model, message),
+) -> ServerState(model, message) {
+  case dict.get(state.clients, client_id) {
+    Error(_) -> state
+    Ok(client) if id <= client.answered ->
+      push_dropped(state, client_id, target, id)
+    Ok(client) ->
+      put_client(state, client_id, Client(..client, answered: id))
+      |> handle
+  }
 }
 
 fn apply_to_session(
@@ -1986,38 +2026,6 @@ fn apply_to_session(
   }
 }
 
-// without a grace period every connection is fresh, its first resync says
-// what the page sent before
-fn already_sent(
-  state: ServerState(model, message),
-  client_id: String,
-  delivered: Int,
-) -> ServerState(model, message) {
-  case state.session_grace, dict.get(state.clients, client_id) {
-    0, Ok(client) if client.answered == 0 ->
-      put_client(state, client_id, Client(..client, answered: delivered))
-    _, _ -> state
-  }
-}
-
-// a repeat gets a `Dropped`, never applied twice
-fn answering(
-  state: ServerState(model, message),
-  client_id: String,
-  target: transport.SyncTarget,
-  id: Int,
-  handle: fn(ServerState(model, message)) -> ServerState(model, message),
-) -> ServerState(model, message) {
-  case dict.get(state.clients, client_id) {
-    Error(_) -> state
-    Ok(client) if id <= client.answered ->
-      push_dropped(state, client_id, target, id)
-    Ok(client) ->
-      put_client(state, client_id, Client(..client, answered: id))
-      |> handle
-  }
-}
-
 // `Error` holds the crash, which refuses too
 fn authorised(
   rule: fn(model, model, message) -> Bool,
@@ -2104,7 +2112,7 @@ fn check_access(
   }
 }
 
-// held plus reserved places, what `open` checks against `max_clients`
+// held plus reserved places, what `admit` checks against `max_clients`
 @target(erlang)
 fn client_count(gate: Gate(model, message)) -> Int {
   gauge_value(gate.registered) + gauge_value(gate.reserved)
@@ -2342,38 +2350,13 @@ fn drain(
         [HeldFrame(inbound:, size:), ..], True -> {
           let state = pop_held(state, client_id, client)
           case dict.get(state.clients, client_id) {
-            Ok(client) -> admit(state, client_id, client, inbound, size)
+            Ok(client) -> admit_frame(state, client_id, client, inbound, size)
             Error(_) -> state
           }
           |> drain(client_id)
         }
         [], _ | [HeldFrame(..), ..], False -> schedule_retry(state, client_id)
       }
-  }
-}
-
-// never reported, its first frame never came
-fn drop_provisional(
-  state: ServerState(model, message),
-  token: Int,
-) -> ServerState(model, message) {
-  case dict.get(state.provisional, token) {
-    Error(Nil) -> state
-    Ok(provisional) -> {
-      let _ =
-        actor.unwatch(
-          state.server.handle,
-          down: ClientLeft(
-            client_id: provisional.client_id,
-            token: Token(token),
-          ),
-        )
-      gauge_set(provisional.mirror.closed, 1)
-      let state =
-        ServerState(..state, provisional: dict.delete(state.provisional, token))
-      count_registered(state)
-      state
-    }
   }
 }
 
@@ -2403,6 +2386,31 @@ fn drop_misrouted(
     "dropped " <> what <> " from " <> shown(client_id) <> why,
   )
   |> push_dropped(client_id, target, id)
+}
+
+// never reported, its first frame never came
+fn drop_provisional(
+  state: ServerState(model, message),
+  token: Int,
+) -> ServerState(model, message) {
+  case dict.get(state.provisional, token) {
+    Error(Nil) -> state
+    Ok(provisional) -> {
+      let _ =
+        actor.unwatch(
+          state.server.handle,
+          down: ClientLeft(
+            client_id: provisional.client_id,
+            token: Token(token),
+          ),
+        )
+      gauge_set(provisional.mirror.closed, 1)
+      let state =
+        ServerState(..state, provisional: dict.delete(state.provisional, token))
+      count_registered(state)
+      state
+    }
+  }
 }
 
 // its holders lapse, rejoining when it starts again, and are told it's gone
@@ -2623,7 +2631,7 @@ fn gate_of(builder: Builder(model, message)) -> Gate(model, message) {
     serialiser: store.serialiser_of(builder.store),
     conform: store.message_conformer(builder.store),
     max_frame_bytes: builder.max_frame_bytes,
-    max_inbound_queue: builder.max_inbound_queue,
+    max_mailbox: builder.max_mailbox,
     max_outbound_bytes: builder.max_outbound_bytes,
     max_outbound_queue: builder.max_outbound_queue,
     max_clients: builder.max_clients,
@@ -2638,11 +2646,16 @@ fn gate_of(builder: Builder(model, message)) -> Gate(model, message) {
 fn greeting(
   state: ServerState(model, message),
   client_id: String,
-  resume: String,
+  provisional: Provisional(model, message),
 ) -> List(transport.Protocol(model, message)) {
   [
     transport.Version(hash: state.boot_id, protocol: transport.protocol_version),
-    transport.Connected(client_id:, resume:, answered: 0),
+    transport.Connected(
+      client_id:,
+      resume: provisional.resume,
+      answered: 0,
+      owner: owner_of(provisional.seed),
+    ),
   ]
 }
 
@@ -2735,7 +2748,7 @@ fn handle_connect(
       count_registered(state)
       gauge_release(state.server.gate.reserved)
       let greeted =
-        list.all(greeting(state, client_id, provisional.resume), fn(frame) {
+        list.all(greeting(state, client_id, provisional), fn(frame) {
           encode_and_send(
             frame,
             state.server.gate.serialiser,
@@ -3034,7 +3047,7 @@ fn handle_incoming(
         Error(_) -> state
         Ok(client) ->
           case client.limiter.allowance > 0 && client.limiter.held.size == 0 {
-            True -> admit(state, client_id, client, inbound, size)
+            True -> admit_frame(state, client_id, client, inbound, size)
             False -> hold(state, client_id, client, inbound, size, now)
           }
       }
@@ -3403,8 +3416,8 @@ fn hold(
   let limiter = client.limiter
   let control = is_control(inbound)
   let fits =
-    limiter.held_bytes + size <= state.max_held_bytes.per_client
-    && state.held_bytes_total + size <= state.max_held_bytes.total
+    limiter.held_bytes + size <= state.max_throttled_bytes.per_client
+    && state.held_bytes_total + size <= state.max_throttled_bytes.total
   let room = case control {
     True -> fits && limiter.held_controls <= state.max_subscriptions
     False ->
@@ -3522,7 +3535,7 @@ fn leave_topic(
   leave_quietly(state, client_id, topic_id, subscription)
 }
 
-// its watch, its alias and what its `incoming` reads
+// its watch, its alias and what its `receive` reads
 fn let_go_of_link(
   state: ServerState(model, message),
   session: String,
@@ -3720,7 +3733,7 @@ fn new_state(
     max_subscriptions: builder.max_subscriptions,
     max_topic_id_bytes: builder.max_topic_id_bytes,
     max_topics: builder.max_topics,
-    max_held_bytes: builder.max_held_bytes,
+    max_throttled_bytes: builder.max_throttled_bytes,
     eviction: builder.eviction,
     diagnostic_budget: builder.diagnostic_budget,
     topic_restarts: builder.topic_restarts,
@@ -3829,9 +3842,17 @@ fn notify_observers(
   })
 }
 
-// the server's mailbox is past `max_inbound_queue`, always False on JavaScript
+// the server's mailbox is past `max_mailbox`, always False on JavaScript
 fn overloaded(server: Server(model, message)) -> Bool {
-  server_queue_length(server) > server.gate.max_inbound_queue
+  server_queue_length(server) > server.gate.max_mailbox
+}
+
+// a fingerprint of the seed, no seed has none
+fn owner_of(seed: List(message)) -> String {
+  case seed {
+    [] -> ""
+    _ -> digest_hex(string.inspect(seed))
+  }
 }
 
 fn park(
@@ -4621,6 +4642,7 @@ fn resume_session(
           client_id: session,
           resume: provisional.resume,
           answered: client.answered,
+          owner: owner_of(client.seed),
         ),
       )
     }
@@ -4855,7 +4877,7 @@ fn start_session(
       // counted as registered before the reservation goes, the cap never dips
       gauge_release(state.server.gate.reserved)
       list.fold(
-        greeting(state, client_id, provisional.resume),
+        greeting(state, client_id, provisional),
         state,
         fn(state, frame) { push(state, client_id, client, frame) },
       )
@@ -5516,7 +5538,12 @@ fn validate_origin(
 // never matches
 fn warn_about_origins(origins: Origins) -> Nil {
   case origins {
-    AnyOrigin -> Nil
+    AnyOrigin ->
+      actor.log(
+        transport.Warning,
+        "lily: AnyOrigin lets a page on any site connect, and a browser sends "
+          <> "your cookies with it, so don't sign clients in by cookie",
+      )
     AllowedOrigins([]) ->
       actor.log(
         transport.Warning,
@@ -5626,6 +5653,10 @@ fn within_limits(
 // =============================================================================
 // PRIVATE FFI
 // =============================================================================
+
+@external(erlang, "lily_server_ffi", "digest_hex")
+@external(javascript, "./server.ffi.mjs", "digestHex")
+fn digest_hex(text: String) -> String
 
 // the count after adding `delta`
 @external(erlang, "lily_server_ffi", "gauge_add")

@@ -148,7 +148,14 @@ function applyPatch(rootElement, patch, matchRoot) {
       setAttribute(element, patch.name, patch.value);
     }
   } else if (patch instanceof SetStyle) {
-    element.style.setProperty(patch.property, patch.value);
+    if (isUnsafeStyle(patch.value, true)) {
+      log(
+        "warn",
+        `lily: refused "${patch.property}" in a live patch, its value loads from another origin`,
+      );
+    } else {
+      element.style.setProperty(patch.property, patch.value);
+    }
   } else if (patch instanceof RemoveAttribute) {
     const lower = patch.name.toLowerCase();
     if (isRuntimeAttribute(lower) || GUARD_ATTRIBUTES.has(lower)) {
@@ -477,6 +484,18 @@ function finiteAnimations(element) {
   );
 }
 
+function isOwnOrigin(url) {
+  try {
+    const resolved = new URL(url, document.baseURI);
+    return (
+      (resolved.protocol === "http:" || resolved.protocol === "https:") &&
+      resolved.origin === globalThis.location.origin
+    );
+  } catch (_error) {
+    return false;
+  }
+}
+
 // this runtime's own marks only, markup from data can carry the attributes
 // marked by the renderer, or a list's own marker, never markup from data
 function isOwned(context, node) {
@@ -519,6 +538,7 @@ function isUnsafeAttribute(element, name, value) {
   if (SVG_ANIMATIONS.has(tag) && SVG_ANIMATION_ATTRIBUTES.has(lower)) {
     return true;
   }
+  if (lower === "style") return isUnsafeStyle(value, false);
   if (URL_ATTRIBUTES.has(lower)) {
     const scheme = String(value)
       .replace(/[\u0000- ]+/g, "")
@@ -532,6 +552,17 @@ function isUnsafeAttribute(element, name, value) {
     }
   }
   return false;
+}
+
+// a value that makes the browser fetch, which tells another origin who's
+// looking, an escape could spell one too. A lone URL on this origin is fine
+// for one property, a whole `style` gets no such pass
+function isUnsafeStyle(value, oneProperty) {
+  const text = String(value);
+  if (text.includes("\\")) return true;
+  const lone = oneProperty ? LONE_STYLE_URL.exec(text) : null;
+  if (lone) return !isOwnOrigin(lone[2]);
+  return STYLE_FETCH.test(text);
 }
 
 /** Consumes `next`. Runtime-owned elements match by position. */
@@ -1310,6 +1341,9 @@ const contexts = new WeakMap();
 // setting or removing one of these changes what an embedded document may do
 const GUARD_ATTRIBUTES = new Set(["allow", "csp", "sandbox"]);
 
+// `url(x)` and nothing else, quoted or bare
+const LONE_STYLE_URL = /^\s*url\(\s*(["']?)([^"'()\s]+)\1\s*\)\s*$/i;
+
 // comment marks around a component that needs an element
 const MARK = "lily-root";
 
@@ -1323,6 +1357,9 @@ const NEST_PATTERN = /<lily-nest[^>]*>\s*<\/lily-nest>/;
 const ROW_SEPARATOR = "lily-row";
 
 let runtimeCount = 0;
+
+// the CSS functions that load something
+const STYLE_FETCH = /(?:url|src|image|image-set)\s*\(/i;
 
 const SVG_ANIMATION_ATTRIBUTES = new Set([
   "attributename",

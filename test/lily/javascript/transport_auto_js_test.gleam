@@ -1,4 +1,4 @@
-// JS auto-serialiser constructor registry and `ByHost` on the jsdom page
+// JS auto-serialiser constructor registry and `JsonOnLocalhost` on the jsdom page
 // (localhost), shared roundtrips in test/lily/shared/transport_auto_test.gleam
 
 // =============================================================================
@@ -140,7 +140,7 @@ pub fn auto_js_replacing_a_built_in_constructor_warns_test() {
 }
 
 // =============================================================================
-// BY HOST
+// JSON ON LOCALHOST
 // =============================================================================
 
 @target(javascript)
@@ -152,13 +152,13 @@ pub fn auto_js_jsdom_page_is_local_test() {
 pub fn auto_js_by_host_writes_json_on_a_local_page_test() {
   let serialiser: transport.Serialiser(Nil, Nil) =
     transport.automatic(
-      format: transport.ByHost,
+      format: transport.JsonOnLocalhost,
       max_decode_depth: 128,
       modules: [],
     )
 
   transport.encode(
-    transport.Connected(client_id: "c1", resume: "", answered: 0),
+    transport.Connected(client_id: "c1", resume: "", answered: 0, owner: ""),
     serialiser:,
   )
   |> transport.frame_format(serialiser:)
@@ -169,14 +169,14 @@ pub fn auto_js_by_host_writes_json_on_a_local_page_test() {
 pub fn auto_js_resolve_for_page_settles_by_host_to_json_test() {
   let serialiser: transport.Serialiser(Nil, Nil) =
     transport.automatic(
-      format: transport.ByHost,
+      format: transport.JsonOnLocalhost,
       max_decode_depth: 128,
       modules: [],
     )
     |> transport.resolve_for_page
 
   transport.encode_as(
-    transport.Connected(client_id: "c1", resume: "", answered: 0),
+    transport.Connected(client_id: "c1", resume: "", answered: 0, owner: ""),
     serialiser:,
     format: transport.server_format(serialiser),
   )

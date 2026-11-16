@@ -208,7 +208,7 @@ pub fn observers_see_a_topic_dispatch_applied_with_no_client_test() {
   let #(app, events) = observed_server()
   let _ = events()
 
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
 
   events()
   |> should.equal([
@@ -402,7 +402,7 @@ pub fn observers_see_an_undecodable_frame_as_a_diagnostic_test() {
   let connection = connect_quiet(app, "c1")
   let _ = events()
 
-  server.incoming(connection, bytes: <<"nonsense":utf8>>)
+  server.receive(connection, bytes: <<"nonsense":utf8>>)
 
   events()
   |> should.equal([

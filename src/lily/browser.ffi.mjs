@@ -118,7 +118,7 @@ export function listenLocation(apply) {
   onPage(window, LOCATION_EVENT, () => apply());
 }
 
-export function listenNetwork(runtime, apply) {
+export function listenOnline(runtime, apply) {
   if (typeof window === "undefined") return runtime;
   const report = () => apply(navigator.onLine !== false);
   onPage(window, "online", report);
@@ -156,21 +156,6 @@ export function listenVisibility(runtime, apply) {
   return runtime;
 }
 
-/** This origin only, `javascript:` and other sites are refused. */
-export function load(path) {
-  if (typeof window === "undefined") return;
-  const url = sameOriginUrl(path);
-  if (!url) {
-    log(
-      "warn",
-      `lily: browser.load refused ${JSON.stringify(path)}, it only loads ` +
-        "pages on this origin, use browser.load_external for another site",
-    );
-    return;
-  }
-  window.location.assign(url.href);
-}
-
 /** Any origin, but only an absolute http or https URL. */
 export function loadExternal(address) {
   if (typeof window === "undefined") return;
@@ -185,6 +170,21 @@ export function loadExternal(address) {
       "warn",
       `lily: browser.load_external refused ${JSON.stringify(address)}, it ` +
         "only loads an absolute http or https URL",
+    );
+    return;
+  }
+  window.location.assign(url.href);
+}
+
+/** This origin only, `javascript:` and other sites are refused. */
+export function loadPage(path) {
+  if (typeof window === "undefined") return;
+  const url = sameOriginUrl(path);
+  if (!url) {
+    log(
+      "warn",
+      `lily: browser.load_page refused ${JSON.stringify(path)}, it only loads ` +
+        "pages on this origin, use browser.load_external for another site",
     );
     return;
   }
@@ -288,7 +288,7 @@ export function reloadForVersion() {
   reload();
 }
 
-export function replace(path) {
+export function replaceUrl(path) {
   changeHistory("replaceState", path);
 }
 

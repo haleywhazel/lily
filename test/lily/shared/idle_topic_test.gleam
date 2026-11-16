@@ -71,7 +71,7 @@ pub fn idle_topic_with_a_subscriber_keeps_running_test() -> Later {
 pub fn idle_topic_started_by_a_dispatch_stops_test() -> Later {
   let app = idle_server(ttl)
 
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
   wire_support.settle(app)
 
   is_running(app)
@@ -111,13 +111,13 @@ pub fn idle_topic_is_not_stopped_without_the_option_test() -> Later {
   |> should.equal(0)
 }
 
-pub fn idle_topic_reloads_through_topic_init_on_the_next_subscribe_test() -> Later {
+pub fn idle_topic_reloads_through_load_topic_on_the_next_subscribe_test() -> Later {
   let loads = test_support.new_shared(0)
   let app =
     test_support.start_server(
       test_support.topic_builder()
       |> server.stop_idle_topics(after: ttl)
-      |> server.topic_init(id: "chat", init: fn() {
+      |> server.load_topic(id: "chat", init: fn() {
         let count = test_support.get_shared(loads) + 1
         test_support.set_shared(loads, count)
         test_support.Model(..test_support.initial_model(), count: count * 10)

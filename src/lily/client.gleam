@@ -239,7 +239,7 @@ pub fn observe(
 ///
 /// Only a store passed through [`store.sync`](./store.html#sync) can
 /// [`connect`](#connect) to a server. A page with an
-/// [`initial_snapshot`](./store.html#initial_snapshot) starts from that model.
+/// [`store.embed`](./store.html#embed) starts from that model.
 ///
 /// ```gleam
 /// let runtime = client.start(shared.store())
@@ -303,6 +303,16 @@ type Confirmed {
 }
 
 @target(javascript)
+type Owner {
+  // from the last `Connected` this tab saw
+  Owned(String)
+  // an earlier page left a queue and this tab was never greeted
+  Unclaimed
+  // nothing to go by yet, what's pending was made on this page
+  Unseen
+}
+
+@target(javascript)
 type PendingMessage(message) {
   // `delivered` when sent on the current connection
   PendingMessage(id: Int, message: message, delivered: Bool)
@@ -346,6 +356,8 @@ type SyncState(model, message) {
     channel: Option(transport.Channel),
     // sent before the channel exists
     waiting: List(BitArray),
+    // the link is up and the server's greeting isn't in, nothing goes out
+    awaiting: Bool,
     open: Bool,
     // the id of the offline queue frame being replayed
     replaying: Option(Int),
@@ -372,6 +384,8 @@ type SyncState(model, message) {
     warned_no_session: Bool,
     // from the last `Connected`
     resume: Option(String),
+    // whose session the pending messages were made in
+    owner: Owner,
   )
 }
 
@@ -477,12 +491,13 @@ fn connect_with(
   let sync =
     SyncSession(
       runtime:,
-      // `ByHost` resolves once, decoding reads both
+      // `JsonOnLocalhost` resolves once, decoding reads both
       serialiser: transport.resolve_for_page(serialiser),
       queues: transport.queues(connector),
       state: actor.box_new(SyncState(
         channel: None,
         waiting: [],
+        awaiting: False,
         open: False,
         replaying: None,
         next_id: 1,
@@ -498,6 +513,14 @@ fn connect_with(
         stopped: False,
         warned_no_session: False,
         resume: None,
+        owner: case transport.pending_owner(connector) {
+          Some(owner) -> Owned(owner)
+          None ->
+            case transport.pending(connector) {
+              [] -> Unseen
+              _ -> Unclaimed
+            }
+        },
       )),
     )
 
@@ -526,11 +549,17 @@ fn connect_with(
         codec.when_registered(fn() {
           handle_incoming(
             sync,
+            connector,
             transport.decode(bytes, serialiser: sync.serialiser),
           )
         })
       },
-      opened: fn() { handle_opened(sync) },
+      // the resync waits for the greeting, which says whose session this is
+      opened: fn() {
+        use <- bool.guard(when: sync_state(sync).stopped, return: Nil)
+        update_state(sync, fn(state) { SyncState(..state, awaiting: True) })
+        emit(sync.runtime.handle, ConnectionOpened)
+      },
       closed: fn() { handle_closed(sync, connector) },
     )
   let connected = transport.run_connector(connector, handler)
@@ -556,6 +585,27 @@ fn connect_with(
   _connector: transport.Connector,
 ) -> Runtime(model, message, Synced) {
   runtime
+}
+
+// their slices go back to the server's, which the resync asks for
+@target(javascript)
+fn discard_pending(sync: SyncSession(model, message)) -> Nil {
+  let pending = all_pending(sync)
+  use <- bool.guard(when: pending == [], return: Nil)
+  let targets = list.map(pending, fn(entry) { entry.target })
+  update_state(sync, fn(state) {
+    SyncState(
+      ..state,
+      pending: dict.new(),
+      confirmed: dict.drop(state.confirmed, targets),
+    )
+  })
+  let message =
+    "lily: "
+    <> int.to_string(list.length(pending))
+    <> " unsent messages were queued under another session, they're discarded"
+  actor.log(transport.Warning, message)
+  emit(sync.runtime.handle, Diagnostic(level: transport.Warning, message:))
 }
 
 fn embedded_snapshot(
@@ -589,6 +639,7 @@ fn handle_closed(
       })
     SyncState(
       ..state,
+      awaiting: False,
       open: False,
       confirmed: dict.drop(state.confirmed, dict.keys(unsure)),
     )
@@ -602,8 +653,35 @@ fn handle_closed(
 }
 
 @target(javascript)
+fn handle_greeting(
+  sync: SyncSession(model, message),
+  connector: transport.Connector,
+  owner: String,
+) -> Nil {
+  let known = sync_state(sync).owner
+  update_state(sync, fn(state) {
+    SyncState(..state, awaiting: False, owner: Owned(owner))
+  })
+  // queued as someone else, sending them now would sign them with this session,
+  // and a queue nobody claimed can't be vouched for once sessions have owners
+  case known {
+    Owned(known) if known != owner -> discard_pending(sync)
+    Unclaimed if owner != "" -> discard_pending(sync)
+    Owned(_) | Unclaimed | Unseen -> Nil
+  }
+  transport.keep_owner(connector, owner)
+  // what was dispatched while waiting never reached the queue
+  case sync.queues {
+    True -> requeue(sync, connector)
+    False -> Nil
+  }
+  resync_everything(sync)
+}
+
+@target(javascript)
 fn handle_incoming(
   sync: SyncSession(model, message),
+  connector: transport.Connector,
   frame: Result(transport.Protocol(model, message), Nil),
 ) -> Nil {
   use <- bool.guard(when: sync_state(sync).stopped, return: Nil)
@@ -619,9 +697,15 @@ fn handle_incoming(
     Ok(transport.Dropped(target:, id:)) ->
       run_effect(handle, fn() { settle(sync, target, id, dropped: True) })
 
-    // again on a resume, ahead of its snapshots
-    Ok(transport.Connected(client_id:, resume:, answered:)) ->
+    // the first on a connection is the greeting, the resync answers it with
+    // the token before this one, and it comes again on a resume, ahead of its
+    // snapshots
+    Ok(transport.Connected(client_id:, resume:, answered:, owner:)) ->
       run_effect(handle, fn() {
+        case sync_state(sync).awaiting {
+          True -> handle_greeting(sync, connector, owner)
+          False -> Nil
+        }
         update_state(sync, fn(state) {
           case resume {
             "" -> state
@@ -703,58 +787,6 @@ fn handle_incoming(
         ),
       )
   }
-}
-
-@target(javascript)
-fn handle_opened(sync: SyncSession(model, message)) -> Nil {
-  use <- bool.guard(when: sync_state(sync).stopped, return: Nil)
-  let model = get_model(sync.runtime.handle)
-  let wanted = wanted_topics(sync.runtime.store, model)
-  // a reconnect asks again for refused topics and outstanding resyncs
-  update_state(sync, fn(state) {
-    SyncState(
-      ..state,
-      open: True,
-      subscribed: wanted,
-      subscribed_for: Some(model),
-      rejected: set.new(),
-      resyncing: set.new(),
-    )
-  })
-  // first frame after an open, the offline queue flushes right behind it, a
-  // slice still at its confirmed state may be answered `Unchanged`
-  let confirmed = sync_state(sync).confirmed
-  let cursor = fn(target) {
-    case dict.get(confirmed, target) {
-      Ok(Confirmed(epoch:, sequence:)) ->
-        transport.Known(target:, epoch:, sequence:)
-      Error(Nil) -> transport.Unknown(target:)
-    }
-  }
-  let state = sync_state(sync)
-  let _ =
-    send(
-      sync,
-      transport.Resync(
-        cursors: [
-          cursor(transport.Session),
-          ..list.map(wanted, fn(topic_id) { cursor(transport.Topic(topic_id)) })
-        ],
-        resume: state.resume,
-        delivered: state.delivered,
-      ),
-    )
-  // the queue flushes behind the resync
-  let flushed =
-    list.fold(all_pending(sync), state.delivered, fn(highest, entry) {
-      int.max(highest, entry.id)
-    })
-  update_state(sync, fn(state) { SyncState(..state, delivered: flushed) })
-  update_pending(
-    sync,
-    list.map(_, fn(entry) { PendingMessage(..entry, delivered: True) }),
-  )
-  emit(sync.runtime.handle, ConnectionOpened)
 }
 
 // updates made meanwhile, a route or persisted field, wait and land on top of
@@ -964,6 +996,57 @@ fn requeue(
   |> transport.requeue(connector, _, delivered: sync_state(sync).delivered)
 }
 
+@target(javascript)
+fn resync_everything(sync: SyncSession(model, message)) -> Nil {
+  use <- bool.guard(when: sync_state(sync).stopped, return: Nil)
+  let model = get_model(sync.runtime.handle)
+  let wanted = wanted_topics(sync.runtime.store, model)
+  // a reconnect asks again for refused topics and outstanding resyncs
+  update_state(sync, fn(state) {
+    SyncState(
+      ..state,
+      open: True,
+      subscribed: wanted,
+      subscribed_for: Some(model),
+      rejected: set.new(),
+      resyncing: set.new(),
+    )
+  })
+  // first frame after an open, the offline queue flushes right behind it, a
+  // slice still at its confirmed state may be answered `Unchanged`
+  let confirmed = sync_state(sync).confirmed
+  let cursor = fn(target) {
+    case dict.get(confirmed, target) {
+      Ok(Confirmed(epoch:, sequence:)) ->
+        transport.Known(target:, epoch:, sequence:)
+      Error(Nil) -> transport.Unknown(target:)
+    }
+  }
+  let state = sync_state(sync)
+  let _ =
+    send(
+      sync,
+      transport.Resync(
+        cursors: [
+          cursor(transport.Session),
+          ..list.map(wanted, fn(topic_id) { cursor(transport.Topic(topic_id)) })
+        ],
+        resume: state.resume,
+        delivered: state.delivered,
+      ),
+    )
+  // the queue flushes behind the resync
+  let flushed =
+    list.fold(all_pending(sync), state.delivered, fn(highest, entry) {
+      int.max(highest, entry.id)
+    })
+  update_state(sync, fn(state) { SyncState(..state, delivered: flushed) })
+  update_pending(
+    sync,
+    list.map(_, fn(entry) { PendingMessage(..entry, delivered: True) }),
+  )
+}
+
 // waits until every edit is answered, an earlier snapshot would miss some
 @target(javascript)
 fn resync_if_settled(
@@ -1031,7 +1114,8 @@ fn send_frame(
   sync: SyncSession(model, message),
   frame: transport.Protocol(model, message),
 ) -> Sending {
-  use <- bool.guard(when: sync_state(sync).stopped, return: Unsent)
+  let state = sync_state(sync)
+  use <- bool.guard(when: state.stopped || state.awaiting, return: Unsent)
   case
     actor.rescue(fn() { transport.encode(frame, serialiser: sync.serialiser) })
   {

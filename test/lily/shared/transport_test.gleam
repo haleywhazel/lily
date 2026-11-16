@@ -38,11 +38,11 @@ fn message_pack_capped(depth: Int) -> transport.Serialiser(Model, Message) {
 
 pub fn encode_connected_test() {
   transport.encode(
-    Connected(client_id: "abc123", resume: "r1", answered: 3),
+    Connected(client_id: "abc123", resume: "r1", answered: 3, owner: ""),
     serialiser: test_support.custom_serialiser(),
   )
   |> should.equal(bit_array.from_string(
-    "{\"type\":\"connected\",\"client_id\":\"abc123\",\"resume\":\"r1\",\"answered\":3}",
+    "{\"type\":\"connected\",\"client_id\":\"abc123\",\"resume\":\"r1\",\"answered\":3,\"owner\":\"\"}",
   ))
 }
 
@@ -136,11 +136,13 @@ pub fn decode_connected_test() {
   test_support.register_fixtures()
   transport.decode(
     bit_array.from_string(
-      "{\"type\":\"connected\",\"client_id\":\"abc123\",\"resume\":\"r1\",\"answered\":3}",
+      "{\"type\":\"connected\",\"client_id\":\"abc123\",\"resume\":\"r1\",\"answered\":3,\"owner\":\"\"}",
     ),
     serialiser: test_support.custom_serialiser(),
   )
-  |> should.equal(Ok(Connected(client_id: "abc123", resume: "r1", answered: 3)))
+  |> should.equal(
+    Ok(Connected(client_id: "abc123", resume: "r1", answered: 3, owner: "")),
+  )
 }
 
 pub fn decode_json_deeper_than_the_cap_fails_test() {
@@ -408,7 +410,7 @@ pub fn open_serialiser_embeds_a_snapshot_test() {
 
   store.new(init: test_support.initial_model(), update: test_support.update)
   |> store.sync_with(route: fn(_) { store.Session }, serialiser: open)
-  |> store.initial_snapshot(model: test_support.initial_model())
+  |> store.embed(model: test_support.initial_model())
   |> string.starts_with("<script")
   |> should.be_true
 }

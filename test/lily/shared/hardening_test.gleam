@@ -153,7 +153,7 @@ pub fn hardening_a_frame_is_decoded_once_in_the_callers_process_test() {
   let #(c1, frames) = wire_support.open(app, "c1")
 
   wire_support.session_message(c1, Increment)
-  server.incoming(c1, bytes: <<"not a frame">>)
+  server.receive(c1, bytes: <<"not a frame">>)
 
   frames()
   |> should.equal([
@@ -202,7 +202,7 @@ pub fn hardening_a_payload_the_json_parser_refuses_is_still_dropped_test() {
   let #(c1, raw) = wire_support.open_raw(app, "c1", [])
   let _ = raw()
 
-  let _ = server.incoming(c1, bytes: session_message("1e400"))
+  let _ = server.receive(c1, bytes: session_message("1e400"))
 
   raw()
   |> list.map(wire_support.decode_automatic)
@@ -246,7 +246,7 @@ pub fn hardening_an_undecodable_payload_without_a_schema_is_dropped_test() {
   let _ = raw()
   let _ = events(app)
 
-  server.incoming(
+  server.receive(
     c1,
     bytes: session_message("{\"_\":\"NoSuchConstructorAnywhere\"}"),
   )
@@ -330,7 +330,7 @@ pub fn hardening_a_pending_topics_repeat_subscribe_is_ignored_test() {
         test_support.topic_store_with([#("room:", access)]),
         origins: server.AnyOrigin,
       )
-      |> server.topics_init(prefix: "room:", init: fn(_) {
+      |> server.load_topic_family(prefix: "room:", init: fn(_) {
         slow_initial_model()
       }),
     )
@@ -827,7 +827,7 @@ pub fn hardening_a_quiet_clients_big_edit_is_decoded_after_it_refilled_test() {
 
   advance(time, 10_000)
   let big = string.repeat("x", 70_000)
-  server.incoming(
+  server.receive(
     c1,
     bytes: wire_support.encode(transport.SessionMessage(
       id: wire_support.unique_id(),
@@ -891,7 +891,7 @@ pub fn hardening_a_big_topic_snapshot_is_charged_to_the_subscriber_test() {
     clocked(
       test_support.topic_builder()
       |> server.rate_limit(1, burst: 5)
-      |> server.topics_init(prefix: "room:", init: fn(_) {
+      |> server.load_topic_family(prefix: "room:", init: fn(_) {
         test_support.Model(
           ..test_support.initial_model(),
           name: string.repeat("x", 40_000),
@@ -940,13 +940,13 @@ pub fn hardening_held_frames_past_the_byte_cap_are_dropped_in_order_test() -> La
   ])
 }
 
-pub fn hardening_max_held_bytes_lets_bigger_edits_wait_test() -> Later {
+pub fn hardening_max_throttled_bytes_lets_bigger_edits_wait_test() -> Later {
   // the same five 60 KiB edits as above, all held under a 1 MiB budget
   let #(builder, time) =
     clocked(
       test_support.session_builder()
       |> server.rate_limit(per_second: 1000, burst: 30)
-      |> server.max_held_bytes(per_client: 1_048_576, total: 1_048_576),
+      |> server.max_throttled_bytes(per_client: 1_048_576, total: 1_048_576),
     )
   let app = test_support.start_server(builder)
   let #(c1, frames) = wire_support.open(app, "c1")
@@ -1046,7 +1046,7 @@ pub fn hardening_a_topic_that_finds_a_dead_send_disconnects_the_client_test() {
   wire_support.subscribe(broken, "chat")
   wire_support.settle(app)
 
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
 
   wire_support.settle(app)
   test_support.client_count(app)
@@ -1065,7 +1065,7 @@ pub fn hardening_diagnostics_are_throttled_per_client_test() {
   let _ = events(app)
 
   list.repeat(Nil, 5)
-  |> list.each(fn(_) { server.incoming(c1, bytes: <<"junk">>) })
+  |> list.each(fn(_) { server.receive(c1, bytes: <<"junk">>) })
   events(app)
   |> should.equal([
     server.Diagnostic(
@@ -1075,7 +1075,7 @@ pub fn hardening_diagnostics_are_throttled_per_client_test() {
   ])
 
   advance(time, 10_000)
-  server.incoming(c1, bytes: <<"junk">>)
+  server.receive(c1, bytes: <<"junk">>)
   events(app)
   |> should.equal([
     server.Diagnostic(
@@ -1092,7 +1092,7 @@ pub fn hardening_a_diagnostic_escapes_and_truncates_the_client_id_test() {
   let #(connection, _frames) = wire_support.open(app, client_id)
   let _ = events(app)
 
-  server.incoming(connection, bytes: <<"junk">>)
+  server.receive(connection, bytes: <<"junk">>)
 
   let shown = "\"a\\n" <> string.repeat("x", 62) <> "\""
   events(app)
@@ -1130,10 +1130,10 @@ pub fn hardening_a_crashing_topic_update_is_diagnosed_through_the_server_test() 
 // RECEIVED
 // =============================================================================
 
-pub fn hardening_incoming_says_closed_once_the_id_is_taken_test() {
+pub fn hardening_receive_says_closed_once_the_id_is_taken_test() {
   let app = test_support.new_server()
   let #(old, _old_frames) = wire_support.open(app, "c1")
-  server.incoming(
+  server.receive(
     old,
     bytes: wire_support.encode(transport.Resync(
       cursors: [],
@@ -1146,7 +1146,7 @@ pub fn hardening_incoming_says_closed_once_the_id_is_taken_test() {
   let _ = wire_support.open(app, "c1")
   wire_support.settle(app)
 
-  server.incoming(
+  server.receive(
     old,
     bytes: wire_support.encode(transport.Resync(
       cursors: [],
@@ -1157,13 +1157,13 @@ pub fn hardening_incoming_says_closed_once_the_id_is_taken_test() {
   |> should.equal(server.Closed)
 }
 
-pub fn hardening_incoming_says_closed_once_the_server_stops_test() {
+pub fn hardening_receive_says_closed_once_the_server_stops_test() {
   let app = test_support.new_server()
   let #(c1, _frames) = wire_support.open(app, "c1")
 
   wire_support.stop(app)
 
-  server.incoming(
+  server.receive(
     c1,
     bytes: wire_support.encode(transport.Resync(
       cursors: [],
@@ -1174,7 +1174,7 @@ pub fn hardening_incoming_says_closed_once_the_server_stops_test() {
   |> should.equal(server.Closed)
 }
 
-pub fn hardening_incoming_says_too_large_and_accepts_a_throttled_frame_test() {
+pub fn hardening_receive_says_too_large_and_accepts_a_throttled_frame_test() {
   // a frame over the rate limit is taken and waits, nothing to tell the
   // transport
   let #(builder, _time) =
@@ -1191,10 +1191,10 @@ pub fn hardening_incoming_says_too_large_and_accepts_a_throttled_frame_test() {
       payload: Increment,
     ))
 
-  server.incoming(c1, bytes: <<0:size(1000)-unit(8)>>)
+  server.receive(c1, bytes: <<0:size(1000)-unit(8)>>)
   |> should.equal(server.TooLarge)
   wire_support.settle(app)
-  server.incoming(c1, bytes: message)
+  server.receive(c1, bytes: message)
   |> should.equal(server.Accepted)
 }
 
@@ -1206,7 +1206,7 @@ pub fn hardening_the_automatic_serialiser_refuses_server_tags_unread_test() {
     "{\"type\":\"snapshot\",\"target\":{\"kind\":\"session\"},\"sequence\":1,\"state\":{\"_\":\"NoSuchConstructorAnywhere\"}}",
     "{\"type\":\"version\",\"hash\":\"x\",\"protocol\":1}",
     "{\"type\":\"acknowledge\",\"target\":{\"kind\":\"session\"},\"sequence\":1,\"id\":1}",
-    "{\"type\":\"connected\",\"client_id\":\"x\",\"resume\":\"\",\"answered\":0}",
+    "{\"type\":\"connected\",\"client_id\":\"x\",\"resume\":\"\",\"answered\":0,\"owner\":\"\"}",
   ]
   list.each(frames, fn(frame) {
     transport.decode_inbound(
@@ -1277,7 +1277,7 @@ pub fn hardening_a_dispatched_unheld_topic_moves_to_the_back_test() {
   wire_support.unsubscribe(c1, "room:1")
   wire_support.subscribe(c1, "room:2")
   wire_support.unsubscribe(c1, "room:2")
-  server.dispatch_topic(app, topic_id: "room:1", message: SetName("room:1"))
+  server.dispatch_to_topic(app, topic_id: "room:1", message: SetName("room:1"))
   let _ = frames()
 
   wire_support.subscribe(c1, "room:3")
@@ -1320,7 +1320,7 @@ pub fn hardening_a_resync_rechecks_a_pending_topic_test() {
         ]),
         origins: server.AnyOrigin,
       )
-      |> server.topics_init(prefix: "room:", init: fn(_) {
+      |> server.load_topic_family(prefix: "room:", init: fn(_) {
         slow_initial_model()
       }),
     )
@@ -1353,6 +1353,30 @@ pub fn hardening_start_up_warns_once_without_a_schema_test() {
     wire_support.settle(app)
   })
   |> should.equal(1)
+}
+
+pub fn hardening_start_up_warns_about_any_origin_test() {
+  logged("AnyOrigin lets a page on any site connect", fn() {
+    let app =
+      test_support.start_server(server.new(
+        test_support.session_store(),
+        origins: server.AnyOrigin,
+      ))
+    wire_support.settle(app)
+  })
+  |> should.equal(1)
+}
+
+pub fn hardening_start_up_says_nothing_of_an_allowlist_test() {
+  logged("AnyOrigin", fn() {
+    let app =
+      test_support.start_server(server.new(
+        test_support.session_store(),
+        origins: server.AllowedOrigins(["https://example.com"]),
+      ))
+    wire_support.settle(app)
+  })
+  |> should.equal(0)
 }
 
 pub fn hardening_start_up_warns_when_a_schema_meets_a_custom_serialiser_test() {

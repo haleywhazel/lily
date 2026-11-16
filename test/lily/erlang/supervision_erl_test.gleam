@@ -360,9 +360,9 @@ pub fn supervision_a_dying_topic_is_respawned_test() {
 // =============================================================================
 
 @target(erlang)
-pub fn supervision_start_supervised_serves_and_owns_a_topic_supervisor_test() {
+pub fn supervision_start_under_supervisor_serves_and_owns_a_topic_supervisor_test() {
   let assert Ok(#(_tree, app)) =
-    server.start_supervised(test_support.topic_builder())
+    server.start_under_supervisor(test_support.topic_builder())
   let #(c1, frames) = wire_support.open(app, "c1")
 
   // a full round trip through the supervised server
@@ -378,7 +378,7 @@ pub fn supervision_start_supervised_serves_and_owns_a_topic_supervisor_test() {
 pub fn supervision_stopping_the_tree_stops_every_process_test() {
   let #(tree, ready) = start_tree()
   let assert Ok(app) = process.receive(ready, within: 2000)
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
   wire_support.settle(app)
   let chat = topic_pid(app, "chat")
   let assert option.Some(supervisor) =
@@ -396,7 +396,7 @@ pub fn supervision_stopping_the_tree_stops_every_process_test() {
 pub fn supervision_a_server_crash_restarts_the_tree_test() {
   let #(tree, ready) = start_tree()
   let assert Ok(first) = process.receive(ready, within: 2000)
-  server.dispatch_topic(first, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(first, topic_id: "chat", message: Increment)
   wire_support.settle(first)
   let first_chat = topic_pid(first, "chat")
   // snapshot, the handle resolves the name and follows the restart
@@ -412,7 +412,7 @@ pub fn supervision_a_server_crash_restarts_the_tree_test() {
   |> should.be_true
   // old topics died with the old server, the new one redeclares them
   wire_support.await_down(first_chat)
-  server.dispatch_topic(second, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(second, topic_id: "chat", message: Increment)
   wire_support.settle(second)
   process.is_alive(topic_pid(second, "chat")) |> should.be_true
 
@@ -446,9 +446,9 @@ pub fn supervision_a_handle_from_before_a_restart_still_serves_test() {
 @target(erlang)
 pub fn supervision_topic_children_are_temporary_test() {
   let assert Ok(#(_tree, app)) =
-    server.start_supervised(test_support.topic_builder())
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
-  server.dispatch_topic(
+    server.start_under_supervisor(test_support.topic_builder())
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(
     app,
     topic_id: "room:1",
     message: test_support.SetName("room:1"),
@@ -474,9 +474,9 @@ pub fn supervision_a_restarted_topic_reattaches_subscribers_test() {
   wire_support.subscribe(c1, "chat")
   wire_support.subscribe(c2, "chat")
   // reach sequence 3, then drain what that produced
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
   let _ = frames1()
   let _ = frames2()
 
@@ -523,7 +523,7 @@ pub fn supervision_subscribed_does_not_refire_on_reattach_test() {
 @target(erlang)
 pub fn supervision_restarted_topic_starts_from_the_declared_initial_model_test() {
   let app = test_support.new_topic_server()
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
   wire_support.settle(app)
 
   kill_and_await_respawn(app, "chat")
@@ -572,7 +572,7 @@ pub fn supervision_a_forgotten_topic_rejoins_its_subscribers_when_it_starts_agai
     Ok(transport.Rejected(topic_id: "chat", reason: transport.NotFound)),
   )
 
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
 
   frames()
   |> should.equal([
@@ -622,7 +622,7 @@ pub fn supervision_a_restarted_topic_loads_its_model_again_test() {
   let loaded = test_support.Model(..test_support.initial_model(), count: 42)
   let app =
     test_support.topic_builder()
-    |> server.topic_init(id: "chat", init: fn() {
+    |> server.load_topic(id: "chat", init: fn() {
       record(Nil)
       loaded
     })
@@ -645,7 +645,7 @@ pub fn supervision_a_slow_loader_holds_up_its_topic_and_not_the_server_test() {
   let gate = process.new_subject()
   let app =
     test_support.topic_builder()
-    |> server.topic_init(id: "chat", init: fn() {
+    |> server.load_topic(id: "chat", init: fn() {
       let release = process.new_subject()
       process.send(gate, release)
       let _ = process.receive(release, within: 5000)

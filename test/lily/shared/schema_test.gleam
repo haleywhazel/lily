@@ -43,7 +43,7 @@ fn message_schema() -> transport.Schema {
     message: Custom(module:, name: "Message", parameters: []),
     model: Anything,
     types: [
-      transport.custom(module:, name: "Message", constructors: [
+      transport.custom_type(module:, name: "Message", constructors: [
         transport.constructor(name: "AddTransitionItem", fields: [IntType]),
         transport.constructor(name: "Claim", fields: [StringType]),
         transport.constructor(name: "Decrement", fields: []),
@@ -57,7 +57,7 @@ fn message_schema() -> transport.Schema {
           Custom(module:, name: "Tab", parameters: []),
         ]),
       ]),
-      transport.custom(module:, name: "Tab", constructors: [
+      transport.custom_type(module:, name: "Tab", constructors: [
         transport.constructor(name: "TabA", fields: []),
         transport.constructor(name: "TabB", fields: []),
       ]),
@@ -70,10 +70,14 @@ fn option_schema(inner: WireType) -> transport.Schema {
     message: Custom(module: "gleam/option", name: "Option", parameters: [inner]),
     model: Anything,
     types: [
-      transport.custom(module: "gleam/option", name: "Option", constructors: [
-        transport.constructor(name: "None", fields: []),
-        transport.constructor(name: "Some", fields: [Variable(0)]),
-      ]),
+      transport.custom_type(
+        module: "gleam/option",
+        name: "Option",
+        constructors: [
+          transport.constructor(name: "None", fields: []),
+          transport.constructor(name: "Some", fields: [Variable(0)]),
+        ],
+      ),
     ],
   )
 }
@@ -221,7 +225,7 @@ pub fn schema_checks_message_pack_payloads_test() {
       message: Custom(module:, name: "Message", parameters: []),
       model: Anything,
       types: [
-        transport.custom(module:, name: "Message", constructors: [
+        transport.custom_type(module:, name: "Message", constructors: [
           transport.constructor(name: "AddTransitionItem", fields: [StringType]),
         ]),
       ],
@@ -281,9 +285,9 @@ pub fn server_drops_a_session_message_that_fails_the_schema_test() {
   let #(c1, raw) = wire_support.open_raw(app, "c1", [])
   let _ = raw()
 
-  server.incoming(c1, bytes: session_message("{\"_\":\"SetName\",\"0\":1}"))
-  server.incoming(c1, bytes: session_message("{\"_\":\"Ok\",\"0\":1}"))
-  server.incoming(c1, bytes: session_message("{\"_\":\"SetName\",\"0\":\"a\"}"))
+  server.receive(c1, bytes: session_message("{\"_\":\"SetName\",\"0\":1}"))
+  server.receive(c1, bytes: session_message("{\"_\":\"Ok\",\"0\":1}"))
+  server.receive(c1, bytes: session_message("{\"_\":\"SetName\",\"0\":\"a\"}"))
 
   raw()
   |> list.map(wire_support.decode_automatic)
@@ -311,7 +315,7 @@ pub fn server_drops_a_topic_message_that_fails_the_schema_test() {
   let _ = raw()
   let _ = events(app)
 
-  server.incoming(
+  server.receive(
     c1,
     bytes: topic_message("chat", "{\"_\":\"Increment\",\"0\":\"x\"}"),
   )
@@ -340,7 +344,7 @@ pub fn server_without_a_schema_accepts_any_shape_test() {
   let #(c1, raw) = wire_support.open_raw(app, "c1", [])
   let _ = raw()
 
-  server.incoming(c1, bytes: session_message("{\"_\":\"Noop\"}"))
+  server.receive(c1, bytes: session_message("{\"_\":\"Noop\"}"))
 
   raw()
   |> list.map(wire_support.decode_automatic)

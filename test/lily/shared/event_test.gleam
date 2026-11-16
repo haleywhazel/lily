@@ -76,7 +76,7 @@ pub fn event_modifiers_do_not_change_server_rendered_markup_test() {
     |> event.prevent_default
     |> event.stop_propagation
     |> event.reset_form
-    |> event.selector("button")
+    |> event.bind_to("button")
   }
   let render = fn(view) {
     component.render_to_string(

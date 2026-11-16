@@ -6,6 +6,7 @@
 // =============================================================================
 
 import gleam/bit_array
+import gleam/int
 import gleam/list
 import gleam/option
 import gleam/result
@@ -15,7 +16,7 @@ import gleeunit/should
 
 import lily/server
 import lily/store
-import lily/test_support.{Increment, SetName}
+import lily/test_support.{type Message, Increment, SetName}
 import lily/transport
 import lily/wire_support
 
@@ -80,6 +81,7 @@ pub fn server_connect_sends_version_then_connected_test() {
         client_id: "c1",
         resume: "",
         answered: 0,
+        owner: "",
       ))
     }
     _ -> should.fail()
@@ -118,6 +120,7 @@ pub fn server_connect_announces_its_own_id_in_the_connected_frame_test() {
         client_id: server.client_id(connection),
         resume: "",
         answered: 0,
+        owner: "",
       ))
     _ -> should.fail()
   }
@@ -291,6 +294,46 @@ pub fn server_session_state_is_per_connection_test() {
 // =============================================================================
 // SESSION SEEDING
 // =============================================================================
+
+/// The `owner` each `Connected` named, one per seed, each on its own client.
+fn owners(seeds: List(List(Message))) -> List(String) {
+  let app = test_support.new_server()
+  list.index_map(seeds, fn(seed, index) {
+    let #(record, recorded) = wire_support.recorder()
+    let assert Ok(_) =
+      server.connect_as(
+        app,
+        origin: option.None,
+        send: record,
+        client_id: "c" <> int.to_string(index),
+        seed:,
+        watch: server.Unwatched,
+      )
+    wire_support.settle(app)
+    list.find_map(recorded(), fn(bytes) {
+      case wire_support.decode_exact(bytes) {
+        transport.Connected(owner:, ..) -> Ok(owner)
+        _ -> Error(Nil)
+      }
+    })
+    |> should.be_ok
+  })
+}
+
+pub fn server_connected_names_no_owner_without_a_seed_test() {
+  owners([[]]) |> should.equal([""])
+}
+
+pub fn server_connected_names_the_same_owner_for_the_same_seed_test() {
+  let assert [first, second, other] =
+    owners([[SetName("Alice")], [SetName("Alice")], [SetName("Bob")]])
+
+  first |> should.equal(second)
+  { first != other } |> should.be_true
+  { first != "" } |> should.be_true
+  // never the seed itself
+  string.contains(first, "Alice") |> should.be_false
+}
 
 pub fn server_connect_streams_the_seed_back_to_the_client_test() {
   // client needs the seeds to stay in step
@@ -701,10 +744,10 @@ pub fn server_a_fresh_session_drops_what_the_page_sent_before_test() {
 }
 
 // =============================================================================
-// INVALID INCOMING
+// INVALID FRAMES
 // =============================================================================
 
-pub fn server_incoming_from_unknown_client_test() {
+pub fn server_receive_from_unknown_client_test() {
   // c1 not connected, ack goes nowhere and the server carries on
   let app = test_support.new_server()
 
@@ -717,27 +760,27 @@ pub fn server_incoming_from_unknown_client_test() {
   |> should.equal(0)
 }
 
-pub fn server_incoming_invalid_json_test() {
+pub fn server_receive_invalid_json_test() {
   let app = test_support.new_server()
   let #(c1, frames) = wire_support.open(app, "c1")
 
-  server.incoming(c1, bytes: bit_array.from_string("not json at all"))
+  server.receive(c1, bytes: bit_array.from_string("not json at all"))
 
   frames()
   |> should.equal([])
 }
 
-pub fn server_incoming_unknown_protocol_type_test() {
+pub fn server_receive_unknown_protocol_type_test() {
   let app = test_support.new_server()
   let #(c1, frames) = wire_support.open(app, "c1")
 
-  server.incoming(c1, bytes: bit_array.from_string("{\"type\":\"unknown\"}"))
+  server.receive(c1, bytes: bit_array.from_string("{\"type\":\"unknown\"}"))
 
   frames()
   |> should.equal([])
 }
 
-pub fn server_incoming_payload_its_route_cannot_match_is_dropped_test() {
+pub fn server_receive_payload_its_route_cannot_match_is_dropped_test() {
   // any constructor decodes, the store's route is a case it can crash
   test_support.register_fixtures()
   let app =
@@ -747,9 +790,7 @@ pub fn server_incoming_payload_its_route_cannot_match_is_dropped_test() {
     ))
   let #(c1, frames) = wire_support.open_raw(app, "c1", [])
   let _ = frames()
-  let send = fn(text) {
-    server.incoming(c1, bytes: bit_array.from_string(text))
-  }
+  let send = fn(text) { server.receive(c1, bytes: bit_array.from_string(text)) }
 
   send(
     "{\"type\":\"session_message\",\"id\":1,\"payload\":{\"_\":\"Ok\",\"0\":1}}",

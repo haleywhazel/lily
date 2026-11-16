@@ -36,16 +36,18 @@
 ////
 //// Lily does client-side routing, though it is opt-in and deliberately not a
 //// router. [`url`](#url) mirrors the location into your model through a
-//// setter, [`navigate`](#navigate) and [`replace`](#replace) move around, and
-//// [`intercept_links`](#intercept_links) lets ordinary `<a href>` links do so
-//// without a page reload. Use [`load`](#load) when the server has to handle
-//// the path, and [`load_external`](#load_external) for another site.
+//// setter, [`navigate`](#navigate) and [`replace_url`](#replace_url) move
+//// around, and [`intercept_links`](#intercept_links) lets ordinary `<a href>`
+//// links do so without a page reload. Use [`load_page`](#load_page) when the
+//// server has to handle the path, and [`load_external`](#load_external) for
+//// another site.
 ////
 //// State that should outlive a reload is described with
 //// [`persisted_field`](#persisted_field) and switched on with
 //// [`persist`](#persist). Each field is hydrated from localStorage and
-//// mirrored back whenever it changes, under the `lily_session_` key prefix.
-//// [`clear_persisted`](#clear_persisted) wipes them, say on logout.
+//// mirrored back whenever it changes, under the `lily_persisted_` key prefix.
+//// [`clear_persisted`](#clear_persisted) wipes them, and what the offline
+//// queue holds, say on logout.
 ////
 //// For deploys, [`reload_on_new_version`](#reload_on_new_version) reloads the
 //// page when the server announces a new build. For development,
@@ -55,7 +57,7 @@
 ////
 //// Three page signals mirror the browser into your model the same way.
 //// [`visibility`](#visibility) tracks whether the tab is showing,
-//// [`network`](#network) whether the browser is online and
+//// [`online`](#online) whether the browser is online and
 //// [`viewport`](#viewport) the window's size. Separately,
 //// [`confirm_leaving`](#confirm_leaving) asks before the page is closed with
 //// unsaved changes.
@@ -99,15 +101,19 @@ pub opaque type PersistedField(model) {
 // PUBLIC FUNCTIONS
 // =============================================================================
 
-/// Removes every value [`persist`](#persist) stored, say on logout. Other
-/// `localStorage` keys stay.
+/// Removes every value [`persist`](#persist) stored and every message still
+/// waiting in an offline queue, say on logout. Other `localStorage` keys stay.
+///
+/// The queues keep nothing more in storage until the page reloads, so follow
+/// it with a [`load_page`](#load_page).
 ///
 /// ```gleam
 /// browser.clear_persisted()
-/// browser.load("/login")
+/// browser.load_page("/login")
 /// ```
 pub fn clear_persisted() -> Nil {
-  clear_stored(storage_prefix)
+  let Nil = clear_stored(storage_prefix)
+  transport.discard_offline_queues()
 }
 
 /// Asks the user to confirm before they close or leave the page while `when`
@@ -206,6 +212,17 @@ pub fn intercept_links_with(
   intercept_links_in_page(runtime, within, opt_out_attribute)
 }
 
+/// Full page navigation to another site, such as a payment page. Any origin,
+/// but only an absolute `http` or `https` URL, anything else is refused with a
+/// warning.
+///
+/// ```gleam
+/// browser.load_external("https://pay.example.com/checkout")
+/// ```
+pub fn load_external(url: String) -> Nil {
+  ffi_load_external(url)
+}
+
 /// Full page navigation, leaving the app. Counterpart to
 /// [`navigate`](#navigate).
 ///
@@ -217,21 +234,10 @@ pub fn intercept_links_with(
 /// script. Use [`load_external`](#load_external) for another site.
 ///
 /// ```gleam
-/// browser.load("/logout")
+/// browser.load_page("/logout")
 /// ```
-pub fn load(path: String) -> Nil {
+pub fn load_page(path: String) -> Nil {
   ffi_load(path)
-}
-
-/// Full page navigation to another site, such as a payment page. Any origin,
-/// but only an absolute `http` or `https` URL, anything else is refused with a
-/// warning.
-///
-/// ```gleam
-/// browser.load_external("https://pay.example.com/checkout")
-/// ```
-pub fn load_external(url: String) -> Nil {
-  ffi_load_external(url)
 }
 
 /// Pushes a history entry and tells the [`url`](#url) setter, letting the model
@@ -252,9 +258,9 @@ pub fn navigate(path: String) -> Nil {
 ///
 /// ```gleam
 /// runtime
-/// |> browser.network(set: fn(model, online) { Model(..model, online:) })
+/// |> browser.online(set: fn(model, online) { Model(..model, online:) })
 /// ```
-pub fn network(
+pub fn online(
   runtime: Runtime(model, message, mode),
   set set: fn(model, Bool) -> model,
 ) -> Runtime(model, message, mode) {
@@ -281,7 +287,7 @@ pub fn persist(
 }
 
 /// Describes one persisted value, stored in `localStorage` as JSON under
-/// `lily_session_` followed by the key.
+/// `lily_persisted_` followed by the key.
 ///
 /// `get` and `set` move the value in and out of the model, `encode` and
 /// `decode` handle its JSON.
@@ -369,17 +375,17 @@ pub fn reload_on_new_version(
 /// Only a path on this origin, anything else is refused with a warning.
 ///
 /// ```gleam
-/// browser.replace("/projects?sort=newest")
+/// browser.replace_url("/projects?sort=newest")
 /// ```
-pub fn replace(path: String) -> Nil {
+pub fn replace_url(path: String) -> Nil {
   ffi_replace(path)
 }
 
 /// Tracks the browser location in the model. `set` receives the parsed
 /// [`Uri`](https://hexdocs.pm/gleam_stdlib/gleam/uri.html) to map onto your own
 /// route type. The initial location is applied straight away, then every back
-/// or forward, [`navigate`](#navigate) and [`replace`](#replace) applies it
-/// again.
+/// or forward, [`navigate`](#navigate) and [`replace_url`](#replace_url)
+/// applies it again.
 ///
 /// ```gleam
 /// runtime
@@ -437,7 +443,7 @@ type LeaveGuard
 // =============================================================================
 
 // what stored values are keyed under, changing it would orphan them
-const storage_prefix = "lily_session_"
+const storage_prefix = "lily_persisted_"
 
 @target(javascript)
 fn confirm_leaving_in_page(
@@ -624,7 +630,7 @@ fn clear_stored(_prefix: String) -> Nil {
 @external(javascript, "./browser.ffi.mjs", "forgetProtocolReload")
 fn ffi_forget_protocol_reload() -> Nil
 
-@external(javascript, "./browser.ffi.mjs", "load")
+@external(javascript, "./browser.ffi.mjs", "loadPage")
 fn ffi_load(_path: String) -> Nil {
   Nil
 }
@@ -657,7 +663,7 @@ fn ffi_reload_for_protocol(server: Int, client: Int) -> Nil
 @external(javascript, "./browser.ffi.mjs", "reloadForVersion")
 fn ffi_reload_for_version() -> Nil
 
-@external(javascript, "./browser.ffi.mjs", "replace")
+@external(javascript, "./browser.ffi.mjs", "replaceUrl")
 fn ffi_replace(_path: String) -> Nil {
   Nil
 }
@@ -687,7 +693,7 @@ fn install_link_interception(
 @external(javascript, "./browser.ffi.mjs", "listenLocation")
 fn listen_location(apply: fn() -> Nil) -> Nil
 
-@external(javascript, "./browser.ffi.mjs", "listenNetwork")
+@external(javascript, "./browser.ffi.mjs", "listenOnline")
 fn listen_network(
   runtime: Runtime(model, message, mode),
   _apply: fn(Bool) -> Nil,

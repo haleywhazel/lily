@@ -76,7 +76,7 @@ pub fn open_serialiser_client_reports_the_client_id_test() {
   let #(handler, _sent) = test_support.connect_capturing(runtime)
 
   handler.received(transport.encode(
-    transport.Connected(client_id: "abc", resume: "", answered: 0),
+    transport.Connected(client_id: "abc", resume: "", answered: 0, owner: ""),
     serialiser: test_support.custom_serialiser(),
   ))
 

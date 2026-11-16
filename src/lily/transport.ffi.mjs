@@ -10,6 +10,7 @@
 // =============================================================================
 
 import { BitArray, Error as GleamError, Ok, toList } from "../gleam.mjs";
+import { None, Some } from "../../gleam_stdlib/gleam/option.mjs";
 import { log } from "./internal/actor.ffi.mjs";
 
 // re-exported for user FFIs, the registry lives in codec
@@ -19,11 +20,17 @@ export { registerModule } from "./internal/codec.ffi.mjs";
 // EXPORT FUNCTIONS
 // =============================================================================
 
+/** Empties every queue on the page and keeps them out of storage from here. */
+export function discardOfflineQueues() {
+  for (const queue of liveQueues) queue.discard();
+}
+
 /**
  * `queue` is from `offlineQueue`, and `makeConnectorHandler` and `makeChannel`
  * are passed-in Gleam constructors. The first frame sent after an open goes
  * ahead of the queue, which flushes right behind it. The runtime sends its
- * `Resync` there, and never queues it, the next open sends a fresh one.
+ * `Resync` there once the server has greeted it, and never queues it, the
+ * next open sends a fresh one.
  */
 export function offlineConnect(
   connect,
@@ -60,11 +67,6 @@ export function offlineConnect(
         leading = true;
         open = true;
         handler.opened();
-        // nothing was sent while opening, flush anyway
-        if (leading && channel) {
-          leading = false;
-          flush();
-        }
       },
       () => {
         leading = false;
@@ -100,6 +102,16 @@ export function offlineDelivered(storageKey, protocol) {
   return readStored(storageKey, protocol).delivered;
 }
 
+export function offlineKeepOwner(queue, owner) {
+  queue.keepOwner(owner);
+}
+
+/** The owner this tab last kept, `None` before its first `Connected`. */
+export function offlineOwner(queue) {
+  const owner = queue.owner;
+  return owner === null ? new None() : new Some(owner);
+}
+
 export function offlinePending(storageKey, protocol) {
   return toList(
     readQueue(storageKey, protocol).map((frame) => new BitArray(frame)),
@@ -111,7 +123,9 @@ export function offlinePending(storageKey, protocol) {
  * stored as `protocol`, are dropped, they'd be read as something else.
  */
 export function offlineQueue(storageKey, protocol) {
-  return createOfflineQueue(storageKey, protocol);
+  const queue = createOfflineQueue(storageKey, protocol);
+  liveQueues.add(queue);
+  return queue;
 }
 
 /**
@@ -252,9 +266,13 @@ function base64ToFrame(text) {
 // seeded from storage, letting early frames join an earlier page's queue
 function createOfflineQueue(storageKey, protocol) {
   let { frames: pending, delivered } = readStored(storageKey, protocol);
+  let owner = readOwner(storageKey);
   let persistScheduled = false;
+  // after `discard`, a close on the way out mustn't write the queue back
+  let discarded = false;
 
   function persist() {
+    if (discarded) return;
     try {
       sessionStorage.setItem(
         storageKey,
@@ -279,8 +297,34 @@ function createOfflineQueue(storageKey, protocol) {
     all() {
       return [...pending];
     },
+    get owner() {
+      return owner;
+    },
     get size() {
       return pending.length;
+    },
+    discard() {
+      pending = [];
+      delivered = 0;
+      owner = null;
+      discarded = true;
+      try {
+        sessionStorage.removeItem(storageKey);
+        sessionStorage.removeItem(storageKey + OWNER_SUFFIX);
+      } catch (_error) {
+        // storage unavailable, nothing was kept
+      }
+    },
+    // kept apart from the frames, an empty queue still has an owner
+    keepOwner(next) {
+      if (next === owner) return;
+      owner = next;
+      if (discarded) return;
+      try {
+        sessionStorage.setItem(storageKey + OWNER_SUFFIX, next);
+      } catch (_error) {
+        // storage unavailable, the owner stays in memory
+      }
     },
     queuePending(frame) {
       const wasEmpty = pending.length === 0;
@@ -346,6 +390,14 @@ function queueOnly(queue, bytes) {
   return new GleamError(undefined);
 }
 
+function readOwner(storageKey) {
+  try {
+    return sessionStorage.getItem(storageKey + OWNER_SUFFIX);
+  } catch (_error) {
+    return null;
+  }
+}
+
 function readQueue(storageKey, protocol) {
   return readStored(storageKey, protocol).frames;
 }
@@ -403,6 +455,11 @@ function sendSafely(channel, bytes) {
 
 // bytes per fromCharCode call
 const BASE64_CHUNK = 0x8000;
+
+// every queue made on this page, for `discardOfflineQueues`
+const liveQueues = new Set();
+
+const OWNER_SUFFIX = "_owner";
 
 const SOCKET_SCHEMES = {
   "http:": "ws:",

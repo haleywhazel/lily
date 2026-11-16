@@ -133,7 +133,7 @@ pub fn browser_replace_does_not_push_history_test() {
   let #(_runtime, captured) = path_recording_runtime()
 
   let history_before = test_support.history_length()
-  browser.replace("/projects?sort=newest")
+  browser.replace_url("/projects?sort=newest")
 
   test_support.history_length() |> should.equal(history_before)
   test_support.get(captured)
@@ -161,7 +161,7 @@ pub fn browser_load_leaves_the_app_test() {
   test_support.reset_dom()
   let before = test_support.navigation_count()
 
-  browser.load("/logout")
+  browser.load_page("/logout")
 
   test_support.navigation_count() |> should.equal(before + 1)
 }
@@ -173,10 +173,10 @@ pub fn browser_load_refuses_a_script_url_or_another_origin_test() {
 
   let logs =
     test_support.capture_logs(fn() {
-      browser.load("javascript:alert(1)")
-      browser.load("data:text/html,<script>alert(1)</script>")
-      browser.load("//evil.example/phish")
-      browser.load("https://evil.example/phish")
+      browser.load_page("javascript:alert(1)")
+      browser.load_page("data:text/html,<script>alert(1)</script>")
+      browser.load_page("//evil.example/phish")
+      browser.load_page("https://evil.example/phish")
     })
 
   test_support.navigation_count() |> should.equal(before)
@@ -188,8 +188,8 @@ pub fn browser_load_accepts_a_relative_path_test() {
   test_support.reset_dom()
   let before = test_support.navigation_count()
 
-  browser.load("settings?tab=2")
-  browser.load("http://localhost:8080/logout")
+  browser.load_page("settings?tab=2")
+  browser.load_page("http://localhost:8080/logout")
 
   test_support.navigation_count() |> should.equal(before + 2)
 }
@@ -361,7 +361,7 @@ pub fn browser_network_tracks_online_test() {
   test_support.set_online(True)
   let runtime =
     test_support.new_runtime()
-    |> browser.network(set: fn(model, online) {
+    |> browser.online(set: fn(model, online) {
       Model(..model, connected: online)
     })
   client.model(runtime).connected |> should.be_true
@@ -421,7 +421,7 @@ pub fn browser_page_signals_share_one_listener_test() {
       let #(width, _) = size
       Model(..model, count: width)
     })
-    |> browser.network(set: fn(model, online) {
+    |> browser.online(set: fn(model, online) {
       Model(..model, connected: online)
     })
   }
@@ -456,7 +456,7 @@ pub fn browser_persist_with_empty_localstorage_keeps_the_model_test() {
 pub fn browser_persist_hydrates_from_localstorage_test() {
   test_support.reset_dom()
   test_support.write_local_storage(
-    "lily_session_name",
+    "lily_persisted_name",
     json.to_string(json.string("Alice")),
   )
   let runtime = test_support.new_runtime()
@@ -470,19 +470,19 @@ pub fn browser_persist_hydrates_from_localstorage_test() {
 @target(javascript)
 pub fn browser_persist_hydration_does_not_write_back_test() {
   test_support.reset_dom()
-  test_support.write_local_storage("lily_session_name", "\"Alice\"")
+  test_support.write_local_storage("lily_persisted_name", "\"Alice\"")
   let runtime = test_support.new_runtime()
   let _runtime = browser.persist(runtime, fields: [name_field(), count_field()])
 
   client.dispatch(runtime)(test_support.Noop)
 
-  test_support.read_local_storage("lily_session_count") |> should.equal("")
+  test_support.read_local_storage("lily_persisted_count") |> should.equal("")
 }
 
 @target(javascript)
 pub fn browser_persist_ignores_invalid_json_test() {
   test_support.reset_dom()
-  test_support.write_local_storage("lily_session_name", "not-valid-json{{")
+  test_support.write_local_storage("lily_persisted_name", "not-valid-json{{")
   let runtime = test_support.new_runtime()
 
   let _runtime = browser.persist(runtime, fields: [name_field()])
@@ -493,7 +493,7 @@ pub fn browser_persist_ignores_invalid_json_test() {
 @target(javascript)
 pub fn browser_persist_ignores_a_value_of_the_wrong_type_test() {
   test_support.reset_dom()
-  test_support.write_local_storage("lily_session_name", "42")
+  test_support.write_local_storage("lily_persisted_name", "42")
   let runtime = test_support.new_runtime()
 
   let _runtime = browser.persist(runtime, fields: [name_field()])
@@ -509,9 +509,9 @@ pub fn browser_persist_writes_only_changed_fields_test() {
 
   client.dispatch(runtime)(test_support.SetName("Alice"))
 
-  test_support.read_local_storage("lily_session_name")
+  test_support.read_local_storage("lily_persisted_name")
   |> should.equal("\"Alice\"")
-  test_support.read_local_storage("lily_session_count") |> should.equal("")
+  test_support.read_local_storage("lily_persisted_count") |> should.equal("")
 }
 
 @target(javascript)
@@ -524,9 +524,9 @@ pub fn browser_persist_writes_again_when_a_field_changes_test() {
   client.dispatch(runtime)(test_support.Increment)
   client.dispatch(runtime)(test_support.SetName("Bob"))
 
-  test_support.read_local_storage("lily_session_name")
+  test_support.read_local_storage("lily_persisted_name")
   |> should.equal("\"Bob\"")
-  test_support.read_local_storage("lily_session_count") |> should.equal("1")
+  test_support.read_local_storage("lily_persisted_count") |> should.equal("1")
 }
 
 @target(javascript)
@@ -537,17 +537,17 @@ pub fn browser_persist_skips_a_write_when_the_field_is_unchanged_test() {
   client.dispatch(runtime)(test_support.SetName("Alice"))
 
   // rewriting the unchanged field would clobber a foreign write
-  test_support.write_local_storage("lily_session_name", "\"Marker\"")
+  test_support.write_local_storage("lily_persisted_name", "\"Marker\"")
   client.dispatch(runtime)(test_support.SetName("Alice"))
 
-  test_support.read_local_storage("lily_session_name")
+  test_support.read_local_storage("lily_persisted_name")
   |> should.equal("\"Marker\"")
 }
 
 @target(javascript)
 pub fn browser_persist_reads_a_value_already_in_local_storage_test() {
   test_support.reset_dom()
-  test_support.write_local_storage("lily_session_name", "\"Legacy\"")
+  test_support.write_local_storage("lily_persisted_name", "\"Legacy\"")
 
   let second = test_support.new_runtime()
   let _ = browser.persist(second, fields: [name_field()])
@@ -558,14 +558,14 @@ pub fn browser_persist_reads_a_value_already_in_local_storage_test() {
 @target(javascript)
 pub fn browser_clear_persisted_removes_prefixed_keys_test() {
   test_support.reset_dom()
-  test_support.write_local_storage("lily_session_name", "\"Bob\"")
-  test_support.write_local_storage("lily_session_token", "\"xyz\"")
+  test_support.write_local_storage("lily_persisted_name", "\"Bob\"")
+  test_support.write_local_storage("lily_persisted_token", "\"xyz\"")
   test_support.write_local_storage("other_key", "keep-me")
 
   browser.clear_persisted()
 
-  test_support.read_local_storage("lily_session_name") |> should.equal("")
-  test_support.read_local_storage("lily_session_token") |> should.equal("")
+  test_support.read_local_storage("lily_persisted_name") |> should.equal("")
+  test_support.read_local_storage("lily_persisted_token") |> should.equal("")
   test_support.read_local_storage("other_key") |> should.equal("keep-me")
 }
 
@@ -721,7 +721,7 @@ pub fn browser_navigate_refuses_another_origin_or_scheme_test() {
     test_support.capture_logs(fn() {
       browser.navigate("javascript:alert(1)")
       browser.navigate("//evil.example/x")
-      browser.replace("https://evil.example/x")
+      browser.replace_url("https://evil.example/x")
     })
 
   test_support.history_length() |> should.equal(before)

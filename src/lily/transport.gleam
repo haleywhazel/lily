@@ -17,7 +17,7 @@
 //// (to give it the same queueing and replay).
 ////
 //// When a connection opens, the server sends `Version` and then `Connected`,
-//// and the client answers with a `Resync` with the session name and every
+//// and the client answers that with a `Resync` with the session name and every
 //// topic it wants to subscribe to, each naming the state it already holds when
 //// it can, and the token from the last `Connected` to resume a session. A
 //// client on another wire protocol stops at `Version` instead. The server
@@ -134,6 +134,9 @@ pub opaque type Connector {
     delivered: fn() -> Int,
     // replaces what's held, a connector without a queue holds nothing
     requeue: fn(List(BitArray), Int) -> Nil,
+    // whose session queued `pending`, kept with what's queued from here on
+    owner: fn() -> Option(String),
+    keep_owner: fn(String) -> Nil,
     queues: Bool,
   )
 }
@@ -165,7 +168,7 @@ pub type Cursor {
 }
 
 /// A custom type's constructors in a [`Schema`](#Schema), from
-/// [`custom`](#custom).
+/// [`custom_type`](#custom_type).
 pub opaque type CustomDefinition {
   CustomDefinition(
     module: String,
@@ -196,7 +199,7 @@ pub type Format {
   MessagePack
   /// JSON when served from `localhost`, `127.0.0.1` or `[::1]`, MessagePack
   /// otherwise.
-  ByHost
+  JsonOnLocalhost
 }
 
 /// A module whose custom types are sent over the wire. Build one with
@@ -219,10 +222,10 @@ pub type Protocol(model, message) {
   Acknowledge(target: SyncTarget, sequence: Int, id: Int)
 
   /// Server, right after a client connects and again when it resumes a
-  /// session, with the session's id, the single-use token that resumes it and
-  /// the highest message id it has answered. A client observer sees it as
-  /// `ClientIdAssigned`.
-  Connected(client_id: String, resume: String, answered: Int)
+  /// session, with the session's id, the single-use token that resumes it,
+  /// the highest message id it has answered and a fingerprint of the session's
+  /// seed, empty without one. A client observer sees it as `ClientIdAssigned`.
+  Connected(client_id: String, resume: String, answered: Int, owner: String)
 
   /// Server, in place of an `Acknowledge` when the `SessionMessage` or
   /// `TopicMessage` with this `id` wasn't applied, such as one for a topic the
@@ -467,6 +470,8 @@ pub fn connector(
     pending: fn() { [] },
     delivered: fn() { 0 },
     requeue: fn(_, _) { Nil },
+    owner: fn() { option.None },
+    keep_owner: fn(_) { Nil },
     queues: False,
   )
 }
@@ -486,11 +491,11 @@ pub fn constructor(
 /// A custom type and its constructors, for a [`Schema`](#Schema).
 ///
 /// ```gleam
-/// transport.custom(module: "shared", name: "Message", constructors: [
+/// transport.custom_type(module: "shared", name: "Message", constructors: [
 ///   transport.constructor(name: "Increment", fields: []),
 /// ])
 /// ```
-pub fn custom(
+pub fn custom_type(
   module module: String,
   name name: String,
   constructors constructors: List(ConstructorDefinition),
@@ -512,7 +517,8 @@ pub fn decode(
 /// Encodes a [`Protocol`](#Protocol) frame into bytes, in the serialiser's
 /// format.
 ///
-/// `ByHost` writes MessagePack where there is no page, such as on the server.
+/// `JsonOnLocalhost` writes MessagePack where there is no page, such as on the
+/// server.
 ///
 /// The automatic serialiser raises for a value it can't write, an `Int` past
 /// the wire range, a non-finite `Float` or a lone surrogate, see
@@ -653,16 +659,17 @@ pub fn websocket_with(
 /// [`Channel`](#Channel)'s `send` must return `Error` for a frame that didn't
 /// go out.
 ///
-/// The first frame sent after the connection opens goes out ahead of the
-/// queue, which follows right behind it. That's where the client sends its
-/// `Resync`, letting the server rejoin your topics before your offline edits
-/// reach them. Messages still unanswered when a connection closes go back in
-/// the queue too.
+/// The first frame sent after the connection opens goes out ahead of the queue,
+/// which follows right behind it. That's the client's `Resync`, sent once the
+/// server has greeted it, letting the server rejoin your topics before your
+/// offline edits reach them. Messages still unanswered when a connection closes
+/// go back in the queue too.
 ///
 /// The queue is the tab's own. Unsent edits survive a reload and a tab the
-/// browser restores, they're lost if the tab is closed for good while offline,
-/// and [`browser.clear_persisted`](./browser.html#clear_persisted) leaves them
-/// alone.
+/// browser restores, and they're lost if the tab is closed for good while
+/// offline. Edits queued under one sign-in are discarded when the server
+/// greets the tab as someone else, and
+/// [`browser.clear_persisted`](./browser.html#clear_persisted) empties it.
 pub fn with_offline_queue(
   inner: Connector,
   storage_key storage_key: String,
@@ -684,6 +691,8 @@ pub fn with_offline_queue(
     requeue: fn(frames, delivered) {
       ffi_offline_requeue(queue, frames, delivered)
     },
+    owner: fn() { ffi_offline_owner(queue) },
+    keep_owner: fn(owner) { ffi_offline_keep_owner(queue, owner) },
     queues: True,
   )
 }
@@ -760,6 +769,13 @@ pub fn decode_inbound(
   }
 }
 
+/// Empties every offline queue on the page and stops them reaching
+/// `sessionStorage` until it reloads.
+@internal
+pub fn discard_offline_queues() -> Nil {
+  ffi_discard_offline_queues()
+}
+
 /// A serialiser of your own ignores `format`.
 @internal
 pub fn encode_as(
@@ -778,7 +794,7 @@ pub fn format_for_host(format: Format, hostname: String) -> Format {
   case format {
     Json -> Json
     MessagePack -> MessagePack
-    ByHost ->
+    JsonOnLocalhost ->
       case is_local_host(hostname) {
         True -> Json
         False -> MessagePack
@@ -810,6 +826,12 @@ pub fn is_local_page() -> Bool {
   is_local_host(page_hostname())
 }
 
+/// Notes the session what's queued from here on belongs to.
+@internal
+pub fn keep_owner(connector: Connector, owner: String) -> Nil {
+  connector.keep_owner(owner)
+}
+
 /// The check a client message gets under `schema`, `Ok` without one.
 @internal
 pub fn message_conformer(schema: Option(Schema)) -> Conformer {
@@ -830,7 +852,7 @@ pub fn peek_message(bytes: BitArray) -> Option(#(SyncTarget, Int)) {
   let head = case detect_format(bytes) {
     Ok(MessagePack) -> codec.leading_fields(bytes, 3)
     Ok(Json) -> json_leading_fields(bytes, 3)
-    Ok(ByHost) | Error(Nil) -> []
+    Ok(JsonOnLocalhost) | Error(Nil) -> []
   }
   let message = case head {
     [
@@ -863,6 +885,13 @@ pub fn pending(connector: Connector) -> List(BitArray) {
 @internal
 pub fn pending_delivered(connector: Connector) -> Int {
   connector.delivered()
+}
+
+/// The `owner` of the last `Connected` this tab saw, the session
+/// [`pending`](#pending) was queued for.
+@internal
+pub fn pending_owner(connector: Connector) -> Option(String) {
+  connector.owner()
 }
 
 /// Whether a frame whose send failed is held and sent later.
@@ -983,7 +1012,8 @@ fn build(
       use client_id <- result.try(malformed(reader.string("client_id")))
       use resume <- result.try(malformed(reader.string("resume")))
       use answered <- result.try(malformed(reader.int("answered")))
-      Ok(Connected(client_id:, resume:, answered:))
+      use owner <- result.try(malformed(reader.string("owner")))
+      Ok(Connected(client_id:, resume:, answered:, owner:))
     }
     "dropped" -> {
       use target <- result.try(malformed(reader.target("target")))
@@ -1159,7 +1189,7 @@ fn decode_automatic(
     Ok(MessagePack) ->
       decode_message_pack(bytes, max_decode_depth, conform, from_client)
       |> found(MessagePack)
-    Ok(ByHost) | Error(Nil) -> Error(Malformed)
+    Ok(JsonOnLocalhost) | Error(Nil) -> Error(Malformed)
   }
 }
 
@@ -1310,7 +1340,8 @@ fn encode_in(protocol: Protocol(model, message), format: Format) -> BitArray {
   case format {
     Json -> encode_json(protocol)
     MessagePack -> encode_message_pack(protocol)
-    ByHost -> encode_in(protocol, format_for_host(ByHost, page_hostname()))
+    JsonOnLocalhost ->
+      encode_in(protocol, format_for_host(JsonOnLocalhost, page_hostname()))
   }
 }
 
@@ -1368,10 +1399,11 @@ fn frame_fields(
       #("sequence", writer.int(sequence)),
       #("id", writer.int(id)),
     ])
-    Connected(client_id:, resume:, answered:) -> #("connected", [
+    Connected(client_id:, resume:, answered:, owner:) -> #("connected", [
       #("client_id", writer.string(client_id)),
       #("resume", writer.string(resume)),
       #("answered", writer.int(answered)),
+      #("owner", writer.string(owner)),
     ])
     Dropped(target:, id:) -> #("dropped", [
       #("target", writer.target(target)),
@@ -1471,6 +1503,20 @@ fn json_field(
   |> result.replace_error(Nil)
 }
 
+// at most 16 digits, inside what either target holds
+fn json_head_int(
+  bytes: BitArray,
+  value: Int,
+  digits: Int,
+) -> Result(#(Int, BitArray), Nil) {
+  case bytes {
+    <<digit, rest:bytes>> if digit >= 0x30 && digit <= 0x39 && digits < 16 ->
+      json_head_int(rest, value * 10 + digit - 0x30, digits + 1)
+    _ if digits > 0 -> Ok(#(value, bytes))
+    _ -> Error(Nil)
+  }
+}
+
 // a JSON string at the front, unescaped by the JSON parser, bounded so a
 // hostile frame can't make the scan long
 fn json_head_string(bytes: BitArray) -> Result(#(String, BitArray), Nil) {
@@ -1489,20 +1535,6 @@ fn json_head_string(bytes: BitArray) -> Result(#(String, BitArray), Nil) {
   )
   use value <- result.map(wire_string(value))
   #(value, after)
-}
-
-// at most 16 digits, inside what either target holds
-fn json_head_int(
-  bytes: BitArray,
-  value: Int,
-  digits: Int,
-) -> Result(#(Int, BitArray), Nil) {
-  case bytes {
-    <<digit, rest:bytes>> if digit >= 0x30 && digit <= 0x39 && digits < 16 ->
-      json_head_int(rest, value * 10 + digit - 0x30, digits + 1)
-    _ if digits > 0 -> Ok(#(value, bytes))
-    _ -> Error(Nil)
-  }
 }
 
 // the first `limit` pairs of a JSON object whose values are strings or whole
@@ -1757,6 +1789,11 @@ fn wire_target(target: SyncTarget) -> Result(SyncTarget, Nil) {
 // PRIVATE FFI
 // =============================================================================
 
+@external(javascript, "./transport.ffi.mjs", "discardOfflineQueues")
+fn ffi_discard_offline_queues() -> Nil {
+  Nil
+}
+
 @external(javascript, "./transport.ffi.mjs", "offlineConnect")
 fn ffi_offline_connect(
   _connect: fn(ConnectorHandler) -> Channel,
@@ -1772,6 +1809,16 @@ fn ffi_offline_connect(
 @external(javascript, "./transport.ffi.mjs", "offlineDelivered")
 fn ffi_offline_delivered(_storage_key: String, _protocol: Int) -> Int {
   0
+}
+
+@external(javascript, "./transport.ffi.mjs", "offlineKeepOwner")
+fn ffi_offline_keep_owner(_queue: Dynamic, _owner: String) -> Nil {
+  Nil
+}
+
+@external(javascript, "./transport.ffi.mjs", "offlineOwner")
+fn ffi_offline_owner(_queue: Dynamic) -> Option(String) {
+  option.None
 }
 
 @external(javascript, "./transport.ffi.mjs", "offlinePending")

@@ -8,7 +8,7 @@
 //// usual case a single line:
 ////
 //// ```gleam
-//// component.simple(slice: ..., render: ...)
+//// component.dynamic(slice: ..., render: ...)
 //// |> event.on_input(handler: Search)
 //// ```
 ////
@@ -44,16 +44,17 @@
 //// )
 //// ```
 ////
-//// Three decoders read what only Lily knows. [`matched`](#matched) runs a
-//// decoder on the element the binding matched, [`data`](#data) reads one of
-//// its `data-*` attributes and [`form_fields`](#form_fields) reads the fields
-//// of its form. A decoder that can fail decodes to a type of your own and the
-//// message comes from mapping it, meaning a bad event is skipped rather than
-//// dispatched. The first time that happens for a binding, Lily logs why.
+//// Three decoders read what only Lily knows. [`from_element`](#from_element)
+//// runs a decoder on the element the binding matched,
+//// [`data_attribute`](#data_attribute) reads one of its `data-*` attributes
+//// and [`form_fields`](#form_fields) reads the fields of its form. A decoder
+//// that can fail decodes to a type of your own and the message comes from
+//// mapping it, meaning a bad event is skipped rather than dispatched. The
+//// first time that happens for a binding, Lily logs why.
 ////
 //// A binding fires for events inside the component it is piped onto, meaning a
 //// component should get the narrowest scope that works. Pipe
-//// [`selector`](#selector) after the binder for a listener that belongs to the
+//// [`bind_to`](#bind_to) after the binder for a listener that belongs to the
 //// page instead, a `document` keydown, a `window` resize, or something outside
 //// the component. The other modifiers, [`debounce`](#debounce),
 //// [`throttle`](#throttle), [`once`](#once),
@@ -63,7 +64,7 @@
 //// skipping a transition in between, and does nothing without one:
 ////
 //// ```gleam
-//// component.simple(slice: ..., render: ...)
+//// component.dynamic(slice: ..., render: ...)
 //// |> event.on_input(handler: Search)
 //// |> event.debounce(milliseconds: 200)
 //// ```
@@ -71,9 +72,9 @@
 //// A few events don't bubble, `focus`, `blur`, `scroll`, `mouseenter`,
 //// `mouseleave`, `pointerenter`, `pointerleave`, `toggle`, `load`, `error` and
 //// the media events. Lily still hears them, but a binding fires only for its
-//// own component's element or its direct child, and a `selector` must match
-//// the target itself. To react to focus anywhere inside, use
-//// [`on_focus_in`](#on_focus_in).
+//// own component's element or its direct child, and a [`bind_to`](#bind_to)
+//// selector must match the target itself. To react to focus anywhere inside,
+//// use [`on_focus_in`](#on_focus_in).
 ////
 //// Clicks on an element carrying `data-lily-message` need no binder at all.
 //// [`encode_message`](#encode_message) turns a message into an attribute-safe
@@ -205,17 +206,37 @@ pub type WheelEvent {
 // PUBLIC FUNCTIONS
 // =============================================================================
 
+/// Binds the listener to elements matching a CSS selector anywhere on the
+/// page rather than its component, or to `"document"` or `"window"`. Pipe it
+/// after the binder it applies to.
+///
+/// ```gleam
+/// event.on_key_down(component, handler: fn(key) { Ok(KeyPressed(key)) })
+/// |> event.bind_to("document")
+/// ```
+pub fn bind_to(
+  component: Component(model, message, html),
+  selector selector: String,
+) -> Component(model, message, html) {
+  use listener <- component.update_listener(component)
+  case listener {
+    component.Listener(..) ->
+      component.Listener(..listener, selector: option.Some(selector))
+    component.Transition(..) -> listener
+  }
+}
+
 /// Reads a `data-*` attribute of the element the binding matched, by its
-/// kebab-case name, meaning `data-card-id` is `data("card-id")`.
+/// kebab-case name, meaning `data-card-id` is `data_attribute("card-id")`.
 ///
 /// ```gleam
 /// event.on(
 ///   component,
 ///   event: "dragstart",
-///   decoder: event.data("card-id") |> decode.map(DragStarted),
+///   decoder: event.data_attribute("card-id") |> decode.map(DragStarted),
 /// )
 /// ```
-pub fn data(name: String) -> decode.Decoder(String) {
+pub fn data_attribute(name: String) -> decode.Decoder(String) {
   decode.at(["lilyMatched", "dataset", camel_case(name)], decode.string)
 }
 
@@ -253,6 +274,23 @@ pub fn decode_message(encoded: String) -> Result(message, Nil) {
   codec.decode_data_message(encoded)
 }
 
+/// Dispatches the message in the closest `data-lily-message` around the event's
+/// target, for an event other than a click. Only one inside the component,
+/// held to the store's [`schema`](./store.html#schema) and at most 16 KiB, the
+/// same as a click.
+///
+/// ```gleam
+/// event.dispatch_on(component, event: "focusin")
+/// ```
+pub fn dispatch_on(
+  component: Component(model, message, html),
+  event event: String,
+) -> Component(model, message, html) {
+  listener(component, event, fn(native) {
+    read_data_message(native) |> from_result
+  })
+}
+
 /// Serialises a message into a string for a `data-lily-message` attribute,
 /// which [`component.mount`](./component.html#mount) dispatches when the
 /// element is clicked.
@@ -288,13 +326,13 @@ pub fn form_fields() -> decode.Decoder(List(#(String, String))) {
 /// Runs a decoder on the element the binding matched rather than on the event,
 /// to read a property such as `value`.
 ///
-/// With a [`selector`](#selector) that is the closest match to the event's
+/// Under [`bind_to`](#bind_to) that's the closest match to the event's
 /// target, otherwise the target itself.
 ///
 /// ```gleam
-/// event.matched(decode.at(["value"], decode.string))
+/// event.from_element(decode.at(["value"], decode.string))
 /// ```
-pub fn matched(decoder: decode.Decoder(a)) -> decode.Decoder(a) {
+pub fn from_element(decoder: decode.Decoder(a)) -> decode.Decoder(a) {
   decode.at(["lilyMatched"], decoder)
 }
 
@@ -304,8 +342,8 @@ pub fn matched(decoder: decode.Decoder(a)) -> decode.Decoder(a) {
 /// Prefer a helper such as [`on_input`](#on_input) where one fits.
 ///
 /// Non-bubbling events such as `focus` or `scroll` fire only for the
-/// component's own element, and a [`selector`](#selector) must match the
-/// target itself.
+/// component's own element, and a [`bind_to`](#bind_to) selector must match
+/// the target itself.
 ///
 /// ```gleam
 /// event.on(
@@ -543,7 +581,7 @@ pub fn on_input(
 ///     _ -> Error(Nil)
 ///   }
 /// })
-/// |> event.selector("document")
+/// |> event.bind_to("document")
 /// |> event.prevent_default
 /// ```
 pub fn on_key_down(
@@ -575,23 +613,6 @@ pub fn on_media(
 ) -> Component(model, message, html) {
   listener(component, event, fn(native) {
     component.Dispatch(handler(read_media(native)))
-  })
-}
-
-/// Dispatches the message in the closest `data-lily-message` around the event's
-/// target, for an event other than a click. Only one inside the component,
-/// held to the store's [`schema`](./store.html#schema) and at most 16 KiB, the
-/// same as a click.
-///
-/// ```gleam
-/// event.on_message(component, event: "focusin")
-/// ```
-pub fn on_message(
-  component: Component(model, message, html),
-  event event: String,
-) -> Component(model, message, html) {
-  listener(component, event, fn(native) {
-    read_data_message(native) |> from_result
   })
 }
 
@@ -660,7 +681,7 @@ pub fn on_pointer_up(
 /// Dispatches a message built from the component's width and height, once
 /// when it mounts and whenever its size changes, for charts and panes that
 /// lay themselves out. It always watches the component's own element, a
-/// [`selector`](#selector) piped after it doesn't apply. For the window's
+/// [`bind_to`](#bind_to) piped after it doesn't apply. For the window's
 /// size see [`browser.viewport`](./browser.html#viewport).
 pub fn on_resize(
   component: Component(model, message, html),
@@ -783,26 +804,6 @@ pub fn reset_form(
   use listener <- component.update_listener(component)
   case listener {
     component.Listener(..) -> component.Listener(..listener, reset_form: True)
-    component.Transition(..) -> listener
-  }
-}
-
-/// Binds the listener to elements matching a CSS selector anywhere on the
-/// page rather than its component, or to `"document"` or `"window"`. Pipe it
-/// after the binder it applies to.
-///
-/// ```gleam
-/// event.on_key_down(component, handler: fn(key) { Ok(KeyPressed(key)) })
-/// |> event.selector("document")
-/// ```
-pub fn selector(
-  component: Component(model, message, html),
-  selector selector: String,
-) -> Component(model, message, html) {
-  use listener <- component.update_listener(component)
-  case listener {
-    component.Listener(..) ->
-      component.Listener(..listener, selector: option.Some(selector))
     component.Transition(..) -> listener
   }
 }

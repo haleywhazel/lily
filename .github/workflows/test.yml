@@ -26,3 +26,13 @@ jobs:
       - run: gleam test --target erlang
       - run: gleam test --target javascript
       - run: gleam format --check src test
+      - run: gleam docs build
+      - name: build examples
+        run: |
+          set -e
+          if [ ! -d examples ]; then exit 0; fi
+          for manifest in $(find examples -name gleam.toml -not -path '*/build/*' | sort); do
+            echo "::group::$(dirname "$manifest")"
+            (cd "$(dirname "$manifest")" && gleam build --warnings-as-errors)
+            echo "::endgroup::"
+          done

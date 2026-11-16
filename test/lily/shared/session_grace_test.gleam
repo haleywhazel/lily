@@ -215,7 +215,7 @@ pub fn session_grace_resume_rejoins_a_topic_it_held_test() {
   let #(_second, again) = arrive(app, "c2", [], resuming(token, [chat]))
   let _ = again()
 
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
 
   again()
   |> should.equal([
@@ -246,7 +246,7 @@ pub fn session_grace_a_half_open_session_is_resumed_test() {
   let #(_second, again) = arrive(app, "c2", [], resuming(token, []))
 
   connected_ids(again()) |> should.equal(["c2", "c1"])
-  server.incoming(first, bytes: wire_support.encode(wire_support.resync([])))
+  server.receive(first, bytes: wire_support.encode(wire_support.resync([])))
   |> should.equal(server.Closed)
   events() |> should.equal([])
 }

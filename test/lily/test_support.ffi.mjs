@@ -316,7 +316,7 @@ export function historyLength() {
   return dom.window.history.length;
 }
 
-/** The script `store.initial_snapshot` would render. */
+/** The script `store.embed` would render. */
 export function injectSnapshotScript(base64) {
   const script = dom.window.document.createElement("script");
   script.type = "application/octet-stream";

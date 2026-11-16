@@ -104,7 +104,7 @@ pub fn data_message_click_is_held_to_the_schema_test() {
       message: transport.Custom(module:, name: "Message", parameters: []),
       model: transport.Anything,
       types: [
-        transport.custom(module:, name: "Message", constructors: [
+        transport.custom_type(module:, name: "Message", constructors: [
           transport.constructor(name: "Increment", fields: []),
         ]),
       ],

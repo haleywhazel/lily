@@ -1,5 +1,6 @@
 -module(lily_server_ffi).
 -export([
+    digest_hex/1,
     gauge_add/2,
     gauge_release/1,
     gauge_set/2,
@@ -38,6 +39,11 @@ message_queue_length(Pid) ->
         {message_queue_len, Length} -> Length;
         undefined -> 0
     end.
+
+%% half a SHA-256, enough to tell two seeds apart
+digest_hex(Text) ->
+    <<Half:16/binary, _/binary>> = crypto:hash(sha256, Text),
+    string:lowercase(binary:encode_hex(Half)).
 
 monotonic_milliseconds() ->
     erlang:monotonic_time(millisecond).

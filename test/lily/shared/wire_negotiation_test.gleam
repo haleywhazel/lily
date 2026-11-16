@@ -20,7 +20,7 @@ import lily/wire_support
 // HELPERS
 // =============================================================================
 
-// `store.sync` store, making it `ByHost`
+// `store.sync` store, making it `JsonOnLocalhost`
 fn by_host_server() -> server.Server(Model, Message) {
   test_support.register_fixtures()
   test_support.start_server(server.new(
@@ -89,7 +89,7 @@ pub fn negotiation_greeting_goes_out_in_the_server_format_test() {
   list.map(sent, wire_support.decode_automatic)
   |> list.drop(1)
   |> should.equal([
-    transport.Connected(client_id: "c1", resume: "", answered: 0),
+    transport.Connected(client_id: "c1", resume: "", answered: 0, owner: ""),
   ])
 }
 
@@ -217,7 +217,7 @@ pub fn negotiation_ignores_a_frame_that_fails_to_decode_test() {
   let app = by_host_server()
   let #(connection, frames) = open_quiet(app, "c1")
 
-  server.incoming(connection, bytes: <<"{not json":utf8>>)
+  server.receive(connection, bytes: <<"{not json":utf8>>)
   wire_support.send_in(
     connection,
     transport.SessionMessage(id: wire_support.unique_id(), payload: Noop),
@@ -251,7 +251,7 @@ pub fn negotiation_topic_update_reaches_each_subscriber_in_its_format_test() {
   let #(_json_client, json_frames) = subscribed_in(app, "a", Json)
   let #(_pack_client, pack_frames) = subscribed_in(app, "b", MessagePack)
 
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
   let json_sent = json_frames()
   let pack_sent = pack_frames()
 
@@ -359,7 +359,7 @@ pub fn negotiation_topic_encodes_an_update_once_not_per_subscriber_test() {
   wire_support.settle(app)
   let _ = recorded()
 
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
   wire_support.settle(app)
 
   recorded()

@@ -92,7 +92,7 @@ pub fn crashing_decoder_drops_the_frame_test() {
   let app = test_support.new_server()
   let #(connection, frames) = wire_support.open(app, "a")
 
-  server.incoming(connection, bytes: <<"not a frame at all":utf8>>)
+  server.receive(connection, bytes: <<"not a frame at all":utf8>>)
 
   // dropped, not fatal
   frames()
@@ -223,7 +223,7 @@ pub fn crashing_subscriber_send_is_pruned_test() {
   wire_support.subscribe(healthy, "chat")
   wire_support.settle(app)
 
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
   wire_support.settle(app)
 
   // dead socket dropped, everyone else kept
@@ -261,7 +261,7 @@ pub fn crashing_topic_update_drops_the_message_test() {
       route: test_support.topic_route,
       serialiser: test_support.custom_serialiser(),
     )
-    |> store.topics(
+    |> store.topic_family(
       prefix: "room:",
       get: fn(model, _) { model },
       set: fn(_, _, model) { model },
@@ -311,8 +311,12 @@ pub fn crashing_encode_on_a_topic_update_drops_only_that_frame_test() {
   wire_support.subscribe(connection, "chat")
   let _ = frames()
 
-  server.dispatch_topic(app, topic_id: "chat", message: test_support.Decrement)
-  server.dispatch_topic(app, topic_id: "chat", message: Increment)
+  server.dispatch_to_topic(
+    app,
+    topic_id: "chat",
+    message: test_support.Decrement,
+  )
+  server.dispatch_to_topic(app, topic_id: "chat", message: Increment)
 
   // sequence 1 spent on the unencodable frame
   frames()

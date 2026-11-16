@@ -108,7 +108,7 @@ fn with_news(
 fn with_rooms(
   app_store: store.Store(OuterModel, Message, store.Synced),
 ) -> store.Store(OuterModel, Message, store.Synced) {
-  store.topics(
+  store.topic_family(
     app_store,
     prefix: "room:",
     get: fn(model: OuterModel, id) {
@@ -262,7 +262,7 @@ pub fn merge_snapshot_family_hands_the_rest_of_the_id_to_the_slice_test() {
 pub fn merge_snapshot_family_matching_its_whole_prefix_gets_an_empty_rest_test() {
   let app_store =
     base()
-    |> store.topics(
+    |> store.topic_family(
       prefix: "chat",
       get: fn(model: OuterModel, rest) {
         case rest {
@@ -288,7 +288,7 @@ pub fn merge_snapshot_longest_prefix_picks_the_slice_test() {
   let app_store =
     base()
     |> with_rooms
-    |> store.topics(
+    |> store.topic_family(
       prefix: "room:vip:",
       get: fn(model: OuterModel, _id) { model.news },
       set: fn(model, _id, news) { OuterModel(..model, news:) },

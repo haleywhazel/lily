@@ -82,7 +82,7 @@ fn every_frame() -> List(Protocol(Model, Message)) {
   [
     Acknowledge(target: Session, sequence: 42, id: 5),
     Acknowledge(target: Topic(id: "chat"), sequence: 1, id: 300),
-    Connected(client_id: "abc123", resume: "r1", answered: 3),
+    Connected(client_id: "abc123", resume: "r1", answered: 3, owner: ""),
     Dropped(target: Session, id: 2),
     Dropped(target: Topic(id: "chat"), id: 70_000),
     Rejected(topic_id: "secret", reason: AccessDenied),
@@ -162,8 +162,8 @@ pub fn snapshot_acknowledge_topic_test() {
 
 pub fn snapshot_connected_test() {
   assert_encoded(
-    Connected(client_id: "abc123", resume: "r1", answered: 3),
-    "84A474797065A9636F6E6E6563746564A9636C69656E745F6964A6616263313233A6726573756D65A27231A8616E73776572656403",
+    Connected(client_id: "abc123", resume: "r1", answered: 3, owner: ""),
+    "85A474797065A9636F6E6E6563746564A9636C69656E745F6964A6616263313233A6726573756D65A27231A8616E73776572656403A56F776E6572A0",
   )
 }
 
@@ -313,7 +313,12 @@ pub fn roundtrip_acknowledge_topic_test() {
 
 pub fn roundtrip_connected_test() {
   test_support.register_fixtures()
-  assert_roundtrip(Connected(client_id: "abc123", resume: "", answered: 0))
+  assert_roundtrip(Connected(
+    client_id: "abc123",
+    resume: "",
+    answered: 0,
+    owner: "",
+  ))
 }
 
 pub fn roundtrip_dropped_session_test() {
@@ -385,18 +390,18 @@ pub fn cross_message_pack_frames_decode_under_json_test() {
   assert_crosses(transport.MessagePack, transport.Json)
 }
 
-pub fn cross_by_host_frames_decode_under_either_format_test() {
-  assert_crosses(transport.ByHost, transport.Json)
-  assert_crosses(transport.ByHost, transport.MessagePack)
+pub fn cross_json_on_localhost_frames_decode_under_either_format_test() {
+  assert_crosses(transport.JsonOnLocalhost, transport.Json)
+  assert_crosses(transport.JsonOnLocalhost, transport.MessagePack)
 }
 
 // =============================================================================
 // INITIAL SNAPSHOT EMBED
 // =============================================================================
 
-pub fn initial_snapshot_wraps_in_script_tag_test() {
+pub fn embed_wraps_in_script_tag_test() {
   let snapshot =
-    store.initial_snapshot(
+    store.embed(
       embed_store(
         transport.automatic(
           format: transport.Json,
@@ -415,7 +420,7 @@ pub fn initial_snapshot_wraps_in_script_tag_test() {
   |> should.be_true
 }
 
-pub fn initial_snapshot_round_trips_via_decode_test() {
+pub fn embed_round_trips_via_decode_test() {
   test_support.register_fixtures()
   let model = test_support.initial_model()
   let serialiser =
@@ -424,7 +429,7 @@ pub fn initial_snapshot_round_trips_via_decode_test() {
       max_decode_depth: 128,
       modules: [],
     )
-  let embed = store.initial_snapshot(embed_store(serialiser), model:)
+  let embed = store.embed(embed_store(serialiser), model:)
 
   transport.decode(embed_payload(embed), serialiser:)
   |> should.equal(
@@ -432,7 +437,7 @@ pub fn initial_snapshot_round_trips_via_decode_test() {
   )
 }
 
-pub fn initial_snapshot_round_trips_message_pack_test() {
+pub fn embed_round_trips_message_pack_test() {
   test_support.register_fixtures()
   let model = test_support.initial_model()
   let serialiser =
@@ -441,7 +446,7 @@ pub fn initial_snapshot_round_trips_message_pack_test() {
       max_decode_depth: 128,
       modules: [],
     )
-  let embed = store.initial_snapshot(embed_store(serialiser), model:)
+  let embed = store.embed(embed_store(serialiser), model:)
 
   transport.decode(embed_payload(embed), serialiser:)
   |> should.equal(
@@ -449,12 +454,12 @@ pub fn initial_snapshot_round_trips_message_pack_test() {
   )
 }
 
-pub fn initial_snapshot_by_host_is_written_in_message_pack_test() {
+pub fn embed_json_on_localhost_is_written_in_message_pack_test() {
   test_support.register_fixtures()
   let model = test_support.initial_model()
   let embed =
-    store.initial_snapshot(
-      embed_store(test_support.automatic_serialiser(transport.ByHost)),
+    store.embed(
+      embed_store(test_support.automatic_serialiser(transport.JsonOnLocalhost)),
       model:,
     )
   let bytes = embed_payload(embed)
@@ -473,7 +478,7 @@ pub fn initial_snapshot_by_host_is_written_in_message_pack_test() {
   )
 }
 
-pub fn initial_snapshot_cannot_close_the_script_tag_test() {
+pub fn embed_cannot_close_the_script_tag_test() {
   test_support.register_fixtures()
   let model =
     test_support.Model(
@@ -487,7 +492,7 @@ pub fn initial_snapshot_cannot_close_the_script_tag_test() {
       modules: [],
     )
 
-  let embed = store.initial_snapshot(embed_store(serialiser), model:)
+  let embed = store.embed(embed_store(serialiser), model:)
 
   embed
   |> string.split("</script>")

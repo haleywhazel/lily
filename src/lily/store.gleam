@@ -78,7 +78,7 @@
 //// the `get` and `set` pair describes. Every copy starts from the initial
 //// model. A topic whose state lives somewhere else, like a database, can
 //// start from its own model with
-//// [`server.topic_init`](./server.html#topic_init).
+//// [`server.load_topic`](./server.html#load_topic).
 ////
 //// A snapshot carries just the slice, which relies on `get(set(init, x))`
 //// giving back `x`. Topic messages reach every subscriber as they were sent,
@@ -90,14 +90,14 @@
 ////
 //// Topics are basically shared stores with [`Access`](#Access) rules for
 //// subscriptions. [`topic`](#topic) declares one with a fixed id and
-//// [`topics`](#topics) a family of them whose ids share a prefix. An exact id
-//// beats any prefix, and among families the longest matching prefix wins,
-//// meaning a prefix should end with a separator (e.g. a colon). The server
-//// will start a topic the first time someone subscribes to it or the server
-//// dispatches to it with
-//// [`server.dispatch_topic`](./server.html#dispatch_topic). A topic stopped
-//// with [`server.stop_topic`](./server.html#stop_topic) starts the same way,
-//// and the clients that held it are subscribed again when it does.
+//// [`topic_family`](#topic_family) a family of them whose ids share a prefix.
+//// An exact id beats any prefix, and among families the longest matching
+//// prefix wins, meaning a prefix should end with a separator (e.g. a colon).
+//// The server will start a topic the first time someone subscribes to it or
+//// the server dispatches to it with
+//// [`server.dispatch_to_topic`](./server.html#dispatch_to_topic). A topic
+//// stopped with [`server.stop_topic`](./server.html#stop_topic) starts the
+//// same way, and the clients that held it are subscribed again when it does.
 ////
 //// [`Access`](#Access) only says who may subscribe, what a client may send is
 //// up to [`authorise`](#authorise). Its rule gets the sender's session and
@@ -109,7 +109,7 @@
 //// update and subscribes and unsubscribes to match.
 ////
 //// A server that renders the first page can embed the model the client starts
-//// from with [`initial_snapshot`](#initial_snapshot) using the same
+//// from with [`embed`](#embed) using the same
 //// serialiser the store syncs with.
 
 // =============================================================================
@@ -131,7 +131,7 @@ import lily/transport.{type Serialiser, type SyncTarget}
 // =============================================================================
 
 /// Who can subscribe to a topic, passed to [`topic`](#topic) and
-/// [`topics`](#topics).
+/// [`topic_family`](#topic_family).
 ///
 /// `Allow` gets the client id, the topic id and that client's session model,
 /// which holds whatever the server wrote into it. A client it refuses sees a
@@ -141,12 +141,13 @@ import lily/transport.{type Serialiser, type SyncTarget}
 /// reads, identity above all, must be written by a message routed `Local`.
 /// The server drops a client's `Local` message but applies one it sends
 /// itself, through a seed on [`server.connect_as`](./server.html#connect_as)
-/// or [`server.open_as`](./server.html#open_as), or through
+/// or [`server.admit_as`](./server.html#admit_as), or through
 /// [`server.dispatch_to`](./server.html#dispatch_to).
 pub type Access(model) {
   /// Anyone can subscribe
   Open
-  /// Only clients the function returns `True` for
+  /// Only clients the function returns `True` for, given the client id, the
+  /// topic id and the client's session model, in that order
   Allow(fn(String, String, model) -> Bool)
 }
 
@@ -220,10 +221,10 @@ pub fn authorise(
 /// ```gleam
 /// let body = "<!DOCTYPE html><html><body>"
 ///   <> "<div id=\"app\">" <> rendered_html <> "</div>"
-///   <> store.initial_snapshot(shared.store(), model: initial_model)
+///   <> store.embed(shared.store(), model: initial_model)
 ///   <> "</body></html>"
 /// ```
-pub fn initial_snapshot(
+pub fn embed(
   store: Store(model, message, Synced),
   model model: model,
 ) -> String {
@@ -254,7 +255,7 @@ pub fn initial_snapshot(
     Error(reason) -> {
       actor.log(
         transport.Failure,
-        "lily: initial_snapshot couldn't encode the model: " <> reason,
+        "lily: store.embed couldn't encode the model: " <> reason,
       )
       ""
     }
@@ -378,7 +379,7 @@ pub fn sync(
     store,
     route:,
     serialiser: transport.automatic(
-      format: transport.ByHost,
+      format: transport.JsonOnLocalhost,
       max_decode_depth: codec.default_max_depth,
       modules:,
     ),
@@ -437,7 +438,7 @@ pub fn topic(
 /// matching prefix wins, meaning a prefix should end with a separator.
 ///
 /// ```gleam
-/// store.topics(
+/// store.topic_family(
 ///   prefix: "room:",
 ///   get: fn(model, room) {
 ///     dict.get(model.rooms, room) |> result.unwrap(new_room())
@@ -448,7 +449,7 @@ pub fn topic(
 ///   access: store.Open,
 /// )
 /// ```
-pub fn topics(
+pub fn topic_family(
   store: Store(model, message, Synced),
   prefix prefix: String,
   get get: fn(model, String) -> slice,

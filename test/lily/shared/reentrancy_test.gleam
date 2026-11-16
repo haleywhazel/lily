@@ -56,12 +56,12 @@ pub fn reentrancy_session_applied_dispatch_to_keeps_both_updates_test() {
   ])
 }
 
-pub fn reentrancy_subscribed_dispatch_topic_reaches_the_new_subscriber_test() {
+pub fn reentrancy_subscribed_dispatch_to_topic_reaches_the_new_subscriber_test() {
   let app =
     server.observe(test_support.topic_builder(), fn(event, app) {
       case event {
         server.Subscribed(topic_id:, ..) ->
-          server.dispatch_topic(app, topic_id:, message: Increment)
+          server.dispatch_to_topic(app, topic_id:, message: Increment)
         _ -> Nil
       }
     })

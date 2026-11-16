@@ -41,12 +41,12 @@ pub fn render_static_returns_content_test() {
 }
 
 // =============================================================================
-// SIMPLE
+// DYNAMIC
 // =============================================================================
 
-pub fn render_simple_passes_slice_to_renderer_test() {
+pub fn render_dynamic_passes_slice_to_renderer_test() {
   render(fn(_) {
-    component.simple(
+    component.dynamic(
       slice: fn(model: Model) { model.count },
       render: fn(count, _) { "<span>" <> int.to_string(count) <> "</span>" },
     )
@@ -103,10 +103,10 @@ pub fn render_live_uses_initial_test() {
 // NESTING
 // =============================================================================
 
-pub fn render_simple_nested_via_nest_test() {
+pub fn render_dynamic_nested_via_nest_test() {
   // nest renders inner inline, from_string rewraps it as html (String)
   render(fn(_) {
-    component.simple(slice: fn(_) { Nil }, render: fn(_, nest) {
+    component.dynamic(slice: fn(_) { Nil }, render: fn(_, nest) {
       "<outer>" <> nest(component.static(fn(_) { "<inner/>" })) <> "</outer>"
     })
   })
@@ -121,7 +121,7 @@ pub fn render_transition_passes_through_test() {
   render(fn(_) {
     component.static(fn(_) { "<inner/>" })
     |> component.transition(enter: "fade-in", exit: "fade-out")
-    |> component.duration(milliseconds: 200)
+    |> component.transition_duration(milliseconds: 200)
   })
   |> should.equal("<inner/>")
 }

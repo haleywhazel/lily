@@ -127,7 +127,7 @@ pub fn event_a_selector_binds_to_elements_anywhere_test() {
         component.fragment([
           component.static(fn(_) { "" })
             |> event.on_click(message: Increment)
-            |> event.selector("#far"),
+            |> event.bind_to("#far"),
           component.static(fn(_) { "<button id=\"far\">x</button>" }),
         ])
       },
@@ -147,7 +147,7 @@ pub fn event_the_document_selector_hears_every_click_test() {
     "<button id=\"anywhere\">x</button>",
     fn(component) {
       event.on_click(component, message: Decrement)
-      |> event.selector("document")
+      |> event.bind_to("document")
     },
   )
 
@@ -161,7 +161,7 @@ pub fn event_a_component_with_only_selector_listeners_gets_no_wrapper_test() {
   let runtime = setup()
   test_support.mount_html(runtime, "<i id=\"bare\"></i>", fn(component) {
     event.on_click(component, message: Increment)
-    |> event.selector("document")
+    |> event.bind_to("document")
   })
 
   test_support.inner_html("#app")
@@ -218,7 +218,7 @@ pub fn event_the_deepest_listener_runs_first_test() {
       to_html: test_support.to_html,
       to_placeholder: test_support.to_placeholder,
       view: fn(_) {
-        component.simple(slice: fn(_) { Nil }, render: fn(_, nest) {
+        component.dynamic(slice: fn(_) { Nil }, render: fn(_, nest) {
           "<div>"
           <> nest(
             component.static(fn(_) { "<button id=\"deep\">x</button>" })
@@ -246,7 +246,7 @@ pub fn event_stop_propagation_ends_the_chain_test() {
       to_html: test_support.to_html,
       to_placeholder: test_support.to_placeholder,
       view: fn(_) {
-        component.simple(slice: fn(_) { Nil }, render: fn(_, nest) {
+        component.dynamic(slice: fn(_) { Nil }, render: fn(_, nest) {
           "<div>"
           <> nest(
             component.static(fn(_) { "<button id=\"deep\">x</button>" })
@@ -456,9 +456,9 @@ pub fn event_selector_binds_to_matching_descendants_test() {
       event.on(
         component,
         event: "click",
-        decoder: event.data("card-id") |> decode.map(SetName),
+        decoder: event.data_attribute("card-id") |> decode.map(SetName),
       )
-      |> event.selector(".item")
+      |> event.bind_to(".item")
     },
   )
 
@@ -478,9 +478,9 @@ pub fn event_stop_propagation_stops_an_outer_selector_binding_test() {
     fn(component) {
       component
       |> event.on_click(message: Increment)
-      |> event.selector("#outer")
+      |> event.bind_to("#outer")
       |> event.on_click(message: Decrement)
-      |> event.selector("#inner")
+      |> event.bind_to("#inner")
       |> event.stop_propagation
     },
   )
@@ -515,7 +515,7 @@ pub fn event_a_modifier_skips_a_transition_in_between_test() {
     component
     |> event.on_click(message: Increment)
     |> component.transition(enter: "fade-in", exit: "fade-out")
-    |> component.duration(milliseconds: 10)
+    |> component.transition_duration(milliseconds: 10)
     |> event.once
   })
 
@@ -532,7 +532,7 @@ pub fn event_a_modifier_without_a_listener_does_nothing_test() {
   test_support.mount_html(runtime, "<button id=\"b\">x</button>", fn(component) {
     component
     |> event.once
-    |> event.selector("#elsewhere")
+    |> event.bind_to("#elsewhere")
     |> event.on_click(message: Increment)
   })
 
@@ -562,7 +562,7 @@ pub fn event_two_runtimes_with_the_same_selector_both_hear_it_test() {
       view: fn(_) {
         component.static(fn(_) { "<button id=\"shared\">x</button>" })
         |> event.on_click(message: Increment)
-        |> event.selector("#shared")
+        |> event.bind_to("#shared")
       },
     )
   let _ =
@@ -574,7 +574,7 @@ pub fn event_two_runtimes_with_the_same_selector_both_hear_it_test() {
       view: fn(_) {
         component.static(fn(_) { "" })
         |> event.on_click(message: Decrement)
-        |> event.selector("#shared")
+        |> event.bind_to("#shared")
       },
     )
 
@@ -669,7 +669,7 @@ pub fn event_on_key_down_skips_unhandled_keys_test() {
   let messages = record(runtime)
   test_support.mount_html(runtime, "<input id=\"f\" />", fn(component) {
     event.on_key_down(component, handler: search_shortcut)
-    |> event.selector("document")
+    |> event.bind_to("document")
   })
 
   test_support.key_event_prevented("#f", "keydown", "a", False, False)
@@ -685,7 +685,7 @@ pub fn event_prevent_default_only_for_handled_keys_test() {
   let runtime = setup()
   test_support.mount_html(runtime, "<input id=\"f\" />", fn(component) {
     event.on_key_down(component, handler: search_shortcut)
-    |> event.selector("document")
+    |> event.bind_to("document")
     |> event.prevent_default
   })
 
@@ -827,7 +827,7 @@ pub fn event_on_message_dispatches_the_closest_data_message_test() {
       <> event.encode_message(Increment)
       <> "\">"
       <> "<span id=\"label\">x</span></div>",
-    event.on_message(_, event: "focusin"),
+    event.dispatch_on(_, event: "focusin"),
   )
 
   test_support.fire_event("#label", "focusin", True)
@@ -842,7 +842,7 @@ pub fn event_on_message_skips_a_target_without_one_test() {
   test_support.mount_html(
     runtime,
     "<span id=\"label\">x</span>",
-    event.on_message(_, event: "focusin"),
+    event.dispatch_on(_, event: "focusin"),
   )
 
   test_support.fire_event("#label", "focusin", True)
@@ -1207,9 +1207,9 @@ pub fn event_data_reads_an_attribute_of_the_matched_element_test() {
       event.on(
         component,
         event: "click",
-        decoder: event.data("card-id") |> decode.map(SetName),
+        decoder: event.data_attribute("card-id") |> decode.map(SetName),
       )
-      |> event.selector("li")
+      |> event.bind_to("li")
     },
   )
 
@@ -1228,7 +1228,7 @@ pub fn event_matched_runs_a_decoder_on_the_element_test() {
     event.on(
       _,
       event: "input",
-      decoder: event.matched(decode.at(["value"], decode.string))
+      decoder: event.from_element(decode.at(["value"], decode.string))
         |> decode.map(SetName),
     ),
   )

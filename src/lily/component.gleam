@@ -11,18 +11,17 @@
 //// your `html` type:
 ////
 //// 1. [`static`](#static) renders once and never updates again
-//// 2. [`simple`](#simple) morphs the subtree in place when the slice changes
+//// 2. [`dynamic`](#dynamic) morphs the subtree in place when the slice changes
 //// 3. [`live`](#live) applies targeted patches you hand-write
 //// 4. [`each`](#each) is a keyed list of rows, and
 ////    [`each_live`](#each_live) is the same list patched in place
 //// 5. [`fragment`](#fragment) groups other components into one
 ////
-//// `simple` is usually best for any dynamic component that you want to use
-//// (that reacts to changes in the store), and `live` lets you hand-write
-//// patches if you want smoother patching of dynamic components instead of
-//// having to run through a large DOM subtree at every frame. Lily doesn't use
-//// a VDOM so these choices are yours to make for your own performance
-//// requirements.
+//// `dynamic` is usually best for any component that reacts to changes in the
+//// store, and `live` lets you hand-write patches if you want smoother patching
+//// instead of having to run through a large DOM subtree at every frame. Lily
+//// doesn't use a VDOM so these choices are yours to make for your own
+//// performance requirements.
 ////
 //// A `live` component's `render` must carry the state, not just the layout.
 //// It builds the first paint, and it is also what renders on the server and
@@ -69,7 +68,7 @@
 //// When a component has no children, just ignore the parameter:
 ////
 //// ```gleam
-//// component.simple(
+//// component.dynamic(
 ////   slice: fn(model) { model.count },
 ////   render: fn(count, _) {
 ////     html.div([], [html.text(int.to_string(count))])
@@ -141,7 +140,7 @@
 //// import lustre/element/html
 ////
 //// fn app(_model: Model) {
-////   component.simple(
+////   component.dynamic(
 ////     slice: fn(model: Model) { model.count },
 ////     render: fn(count, _) {
 ////       html.div([], [
@@ -214,7 +213,7 @@ import lily/store
 // =============================================================================
 
 /// A piece of UI that renders part of the model, built with
-/// [`simple`](#simple), [`live`](#live), [`each`](#each), [`static`](#static)
+/// [`dynamic`](#dynamic), [`live`](#live), [`each`](#each), [`static`](#static)
 /// or [`fragment`](#fragment).
 ///
 /// `html` is whatever type your HTML library uses for markup.
@@ -240,7 +239,8 @@ pub type Patch {
   RemoveAttribute(target: String, name: String)
   /// Set an HTML attribute
   SetAttribute(target: String, name: String, value: String)
-  /// Set a CSS style property
+  /// Set a CSS style property. A value that loads from another origin, a
+  /// `url()` say, is refused
   SetStyle(target: String, property: String, value: String)
   /// Set an element's textContent (wipes children)
   SetText(target: String, value: String)
@@ -250,27 +250,29 @@ pub type Patch {
 // PUBLIC FUNCTIONS
 // =============================================================================
 
-/// Overrides the [`transition`](#transition) piped before it, as the
-/// `--lily-transition-duration` custom property for your CSS to read:
+/// The default component, re-rendered when its slice changes while keeping
+/// focus, cursor and in-progress input.
 ///
-/// ```css
-/// .panel-exit {
-///   animation: panel-out var(--lily-transition-duration, 200ms) forwards;
-/// }
-/// ```
+/// Reach for [`live`](#live) only when a large subtree updates so often that
+/// this is measurably too slow.
 ///
 /// ```gleam
-/// panel()
-/// |> component.transition(enter: "panel-enter", exit: "panel-exit")
-/// |> component.duration(milliseconds: 400)
+/// component.dynamic(
+///   slice: fn(model) { model.count },
+///   render: fn(count, _) {
+///     html.div([], [html.text("Count: " <> int.to_string(count))])
+///   }
+/// )
 /// ```
-pub fn duration(
-  component: Component(model, message, html),
-  milliseconds milliseconds: Int,
+pub fn dynamic(
+  slice slice: fn(model) -> a,
+  render render: fn(a, Nest(model, message, html)) -> html,
 ) -> Component(model, message, html) {
-  Component(
-    ..component,
-    decorations: update_first_transition(component.decorations, milliseconds),
+  new_component(
+    Simple(
+      slice: fn(model) { to_dynamic(slice(model)) },
+      render: fn(data, nest) { render(from_dynamic(data), nest) },
+    ),
   )
 }
 
@@ -341,7 +343,7 @@ pub fn each_live(
 /// fn app(_model: Model) -> Component(Model, Message, Element(Message)) {
 ///   component.fragment([
 ///     component.static(fn(_) { html.h1([], [html.text("My App")]) }),
-///     component.simple(...),
+///     component.dynamic(...),
 ///     component.each(...),
 ///   ])
 /// }
@@ -355,8 +357,8 @@ pub fn fragment(
 /// Renders once, then applies the [`Patch`](#Patch)es you return when its
 /// slice changes.
 ///
-/// Use it for a hot path where [`simple`](#simple) is measurably too slow, not
-/// just to keep focus or input, which `simple` already does.
+/// Use it for a hot path where [`dynamic`](#dynamic) is measurably too slow,
+/// not just to keep focus or input, which `dynamic` already does.
 ///
 /// `render` must draw the slice's current state, not only the layout.
 ///
@@ -448,7 +450,7 @@ pub fn mount(
 
 /// Renders a view to an HTML string without a DOM, for a server or a build
 /// step to produce the first paint. Pair with
-/// [`store.initial_snapshot`](./store.html#initial_snapshot).
+/// [`store.embed`](./store.html#embed).
 ///
 /// `from_string` wraps a child's string back into your `html` type, such as an
 /// `unsafe_raw_html` constructor for Lustre. Listeners and transitions are
@@ -471,32 +473,6 @@ pub fn render_to_string(
   walk_to_string(view(model), model, to_html, from_string)
 }
 
-/// The default component, re-rendered when its slice changes while keeping
-/// focus, cursor and in-progress input.
-///
-/// Reach for [`live`](#live) only when a large subtree updates so often that
-/// this is measurably too slow.
-///
-/// ```gleam
-/// component.simple(
-///   slice: fn(model) { model.count },
-///   render: fn(count, _) {
-///     html.div([], [html.text("Count: " <> int.to_string(count))])
-///   }
-/// )
-/// ```
-pub fn simple(
-  slice slice: fn(model) -> a,
-  render render: fn(a, Nest(model, message, html)) -> html,
-) -> Component(model, message, html) {
-  new_component(
-    Simple(
-      slice: fn(model) { to_dynamic(slice(model)) },
-      render: fn(data, nest) { render(from_dynamic(data), nest) },
-    ),
-  )
-}
-
 /// Renders once and never updates again, for anything that doesn't depend on
 /// the model.
 ///
@@ -510,7 +486,7 @@ pub fn static(
 }
 
 /// Adds CSS enter and exit classes to a component, letting it animate out
-/// before a list or a `simple` re-render removes it.
+/// before a list or a `dynamic` re-render removes it.
 ///
 /// Removal waits for the CSS animations to end, or happens at once with none.
 /// Use `forwards` on the exit animation, and pass `""` for a side you don't
@@ -533,6 +509,30 @@ pub fn transition(
   decorate(
     component,
     Transition(enter:, exit:, duration_milliseconds: option.None),
+  )
+}
+
+/// Overrides the [`transition`](#transition) piped before it, as the
+/// `--lily-transition-duration` custom property for your CSS to read:
+///
+/// ```css
+/// .panel-exit {
+///   animation: panel-out var(--lily-transition-duration, 200ms) forwards;
+/// }
+/// ```
+///
+/// ```gleam
+/// panel()
+/// |> component.transition(enter: "panel-enter", exit: "panel-exit")
+/// |> component.transition_duration(milliseconds: 400)
+/// ```
+pub fn transition_duration(
+  component: Component(model, message, html),
+  milliseconds milliseconds: Int,
+) -> Component(model, message, html) {
+  Component(
+    ..component,
+    decorations: update_first_transition(component.decorations, milliseconds),
   )
 }
 

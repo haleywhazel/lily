@@ -129,7 +129,7 @@ pub fn automatic_session_store(
   |> store.session(get: fn(model) { model }, set: fn(_, model) { model })
 }
 
-/// [`topic_store`](#topic_store) via `store.sync`, default `ByHost` format.
+/// [`topic_store`](#topic_store) via `store.sync`, default `JsonOnLocalhost` format.
 pub fn automatic_topic_store() -> store.Store(Model, Message, store.Synced) {
   store.new(init: initial_model(), update: update)
   |> store.sync(route: topic_route, modules: [])
@@ -625,6 +625,23 @@ pub fn new_topic_server_with_access(
 pub fn observed_tags(_kind: String) -> List(String)
 
 @target(javascript)
+/// Opens `handler` and hands it the server's greeting, which the client's
+/// resync waits for.
+pub fn open(handler: transport.ConnectorHandler) -> Nil {
+  handler.opened()
+  handler.received(greeting(owner: ""))
+}
+
+/// A `Connected` either serialiser reads.
+pub fn greeting(owner owner: String) -> BitArray {
+  <<
+    "{\"type\":\"connected\",\"client_id\":\"c0\",\"resume\":\"\",\"answered\":0,\"owner\":\"":utf8,
+    owner:utf8,
+    "\"}":utf8,
+  >>
+}
+
+@target(javascript)
 /// Open before `connect` returns, drops everything sent.
 pub fn opened_connector() -> transport.Connector {
   transport.connector(fn(handler) {
@@ -810,7 +827,7 @@ pub fn topic_store() -> store.Store(Model, Message, store.Synced) {
 }
 
 /// Each topic with its access rule, every slice the whole model. An id ending
-/// in ':' declares a family with `store.topics`, anything else an exact id.
+/// in ':' declares a family with `store.topic_family`, anything else an exact id.
 pub fn topic_store_with(
   topics: List(#(String, store.Access(Model))),
 ) -> store.Store(Model, Message, store.Synced) {
@@ -951,7 +968,7 @@ fn declare_topics(
   list.fold(topics, base, fn(app_store, topic) {
     case string.ends_with(topic.0, ":") {
       True ->
-        store.topics(
+        store.topic_family(
           app_store,
           prefix: topic.0,
           get: fn(model, _rest) { model },
@@ -986,7 +1003,8 @@ fn frame_decoder(
       use client_id <- decode.field("client_id", decode.string)
       use resume <- decode.field("resume", decode.string)
       use answered <- decode.field("answered", decode.int)
-      decode.success(transport.Connected(client_id:, resume:, answered:))
+      use owner <- decode.field("owner", decode.string)
+      decode.success(transport.Connected(client_id:, resume:, answered:, owner:))
     }
     "dropped" -> {
       use target <- decode.field("target", target_decoder())
@@ -1066,11 +1084,12 @@ fn frame_json(
         #("sequence", json.int(sequence)),
         #("id", json.int(id)),
       ])
-    transport.Connected(client_id:, resume:, answered:) ->
+    transport.Connected(client_id:, resume:, answered:, owner:) ->
       tagged("connected", [
         #("client_id", json.string(client_id)),
         #("resume", json.string(resume)),
         #("answered", json.int(answered)),
+        #("owner", json.string(owner)),
       ])
     transport.Dropped(target:, id:) ->
       tagged("dropped", [
