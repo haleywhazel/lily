@@ -693,7 +693,7 @@ pub fn connect_discards_a_queue_another_session_left_test() {
   recorded()
   |> should.equal([
     <<
-      "lily: 1 unsent messages were queued under another session, they're discarded":utf8,
+      "lily: discarded 1 queued messages, they belong to another session":utf8,
     >>,
   ])
 

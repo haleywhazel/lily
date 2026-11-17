@@ -141,7 +141,7 @@ pub fn hardening_an_oversized_frame_is_refused_before_decode_test() {
   |> should.equal([
     server.Diagnostic(
       level: transport.Warning,
-      message: "dropped an oversized frame from \"c1\"",
+      message: "lily: dropped an oversized frame from \"c1\"",
     ),
   ])
 }
@@ -186,7 +186,7 @@ pub fn hardening_a_server_frame_from_a_client_is_refused_test() {
   |> should.equal([
     server.Diagnostic(
       level: transport.Warning,
-      message: "dropped a frame from \"c1\" that failed to decode",
+      message: "lily: dropped a frame from \"c1\" that failed to decode",
     ),
   ])
 }
@@ -258,7 +258,8 @@ pub fn hardening_an_undecodable_payload_without_a_schema_is_dropped_test() {
   |> should.equal([
     server.Diagnostic(
       level: transport.Warning,
-      message: "dropped a message from \"c1\" whose payload failed to decode",
+      message: "lily: dropped a message from \"c1\" whose payload failed to "
+        <> "decode",
     ),
   ])
 }
@@ -1070,7 +1071,7 @@ pub fn hardening_diagnostics_are_throttled_per_client_test() {
   |> should.equal([
     server.Diagnostic(
       level: transport.Warning,
-      message: "dropped a frame from \"c1\" that failed to decode",
+      message: "lily: dropped a frame from \"c1\" that failed to decode",
     ),
   ])
 
@@ -1080,7 +1081,8 @@ pub fn hardening_diagnostics_are_throttled_per_client_test() {
   |> should.equal([
     server.Diagnostic(
       level: transport.Warning,
-      message: "dropped a frame from \"c1\" that failed to decode (4 similar since)",
+      message: "lily: dropped a frame from \"c1\" that failed to decode (4 "
+        <> "similar since)",
     ),
   ])
 }
@@ -1099,7 +1101,10 @@ pub fn hardening_a_diagnostic_escapes_and_truncates_the_client_id_test() {
   |> should.equal([
     server.Diagnostic(
       level: transport.Warning,
-      message: "dropped a frame from " <> shown <> " that failed to decode",
+      message: "lily: dropped a frame from "
+        <> shown
+        <> " that failed to "
+        <> "decode",
     ),
   ])
 }
@@ -1121,7 +1126,8 @@ pub fn hardening_a_crashing_topic_update_is_diagnosed_through_the_server_test() 
   let assert [server.Diagnostic(message:, ..)] = events(app)
   string.starts_with(
     message,
-    "dropped malformed topic message on \"chat\" from \"c1\": ",
+    "lily: dropped a topic message on \"chat\" from \"c1\", its update "
+      <> "crashed [reason: ",
   )
   |> should.be_true
 }
@@ -1344,7 +1350,7 @@ pub fn hardening_a_resync_rechecks_a_pending_topic_test() {
 // =============================================================================
 
 pub fn hardening_start_up_warns_once_without_a_schema_test() {
-  logged("automatic serialiser and no schema", fn() {
+  logged("no schema set", fn() {
     let app =
       test_support.start_server(server.new(
         test_support.automatic_session_store(transport.Json),
@@ -1356,7 +1362,7 @@ pub fn hardening_start_up_warns_once_without_a_schema_test() {
 }
 
 pub fn hardening_start_up_warns_about_any_origin_test() {
-  logged("AnyOrigin lets a page on any site connect", fn() {
+  logged("AnyOrigin lets any site send your cookies", fn() {
     let app =
       test_support.start_server(server.new(
         test_support.session_store(),
@@ -1386,7 +1392,7 @@ pub fn hardening_start_up_warns_when_a_schema_meets_a_custom_serialiser_test() {
       model: transport.Anything,
       types: [],
     )
-  logged("only checks the automatic serialiser", fn() {
+  logged("store.schema is ignored", fn() {
     let app =
       test_support.start_server(server.new(
         test_support.session_store() |> store.schema(schema),
@@ -1400,7 +1406,7 @@ pub fn hardening_start_up_warns_when_a_schema_meets_a_custom_serialiser_test() {
 pub fn hardening_a_session_routed_seed_warns_once_test() {
   let app = test_support.new_topic_server()
 
-  logged("a seed message is routed to store.Session", fn() {
+  logged("a seed message routes to store.Session", fn() {
     let _ = wire_support.open_seeded(app, "c1", [IncrementSecondary])
     let _ = wire_support.open_seeded(app, "c2", [IncrementSecondary])
     wire_support.settle(app)
@@ -1411,7 +1417,7 @@ pub fn hardening_a_session_routed_seed_warns_once_test() {
 pub fn hardening_a_local_routed_seed_does_not_warn_test() {
   let app = test_support.new_topic_server()
 
-  logged("a seed message is routed to store.Session", fn() {
+  logged("a seed message routes to store.Session", fn() {
     let _ = wire_support.open_seeded(app, "c1", [Reset])
     wire_support.settle(app)
   })

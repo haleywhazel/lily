@@ -362,7 +362,7 @@ pub fn observers_see_a_crashing_access_rule_rejected_as_denied_test() {
     events()
   string.starts_with(
     message,
-    "access to \"private\" crashed for \"c1\", refused: ",
+    "lily: access to \"private\" crashed for \"c1\", refused [reason: ",
   )
   |> should.be_true
   rejected
@@ -408,7 +408,7 @@ pub fn observers_see_an_undecodable_frame_as_a_diagnostic_test() {
   |> should.equal([
     server.Diagnostic(
       level: transport.Warning,
-      message: "dropped a frame from \"c1\" that failed to decode",
+      message: "lily: dropped a frame from \"c1\" that failed to decode",
     ),
   ])
 }

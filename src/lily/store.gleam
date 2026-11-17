@@ -255,7 +255,9 @@ pub fn embed(
     Error(reason) -> {
       actor.log(
         transport.Failure,
-        "lily: store.embed couldn't encode the model: " <> reason,
+        "lily: store.embed could not encode the model [reason: "
+          <> reason
+          <> "]",
       )
       ""
     }

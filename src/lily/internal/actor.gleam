@@ -152,7 +152,8 @@ pub fn call(
     True -> {
       log(
         transport.Warning,
-        "lily: call into a cell that is mid-reduction, returned its default",
+        "lily: ignored a call made while still handling the previous one, "
+          <> "returned the default",
       )
       default
     }
@@ -229,7 +230,7 @@ pub fn rescue_or(
       log_limited(
         label,
         transport.Failure,
-        "lily: " <> label <> " crashed: " <> reason,
+        "lily: " <> label <> " crashed [reason: " <> reason <> "]",
       )
       default
     }
@@ -250,7 +251,7 @@ pub fn rescue_send(
       log_limited(
         label <> " send",
         transport.Failure,
-        "lily: " <> label <> " send crashed: " <> reason,
+        "lily: sending to " <> label <> " crashed [reason: " <> reason <> "]",
       )
       False
     }

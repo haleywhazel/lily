@@ -308,7 +308,9 @@ pub fn encode_message(message: a) -> String {
     Error(reason) -> {
       actor.log(
         transport.Failure,
-        "lily: encode_message couldn't encode a message: " <> reason,
+        "lily: encode_message could not encode a message [reason: "
+          <> reason
+          <> "]",
       )
       ""
     }

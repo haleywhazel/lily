@@ -271,7 +271,7 @@ pub fn observer_an_undecodable_frame_is_a_diagnostic_test() {
   |> should.equal([
     client.Diagnostic(
       level: transport.Warning,
-      message: "dropped a frame that failed to decode",
+      message: "lily: dropped a frame that failed to decode",
     ),
   ])
 }

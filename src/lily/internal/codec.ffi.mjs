@@ -141,8 +141,8 @@ export function requestModule(packageName, path) {
     requestedModules.add(key);
     log(
       "error",
-      `lily: ${key} is not in the bundle, so its types won't decode, ` +
-        "pass its namespace to registerBundled",
+      `lily: ${key} is not in the bundle, pass its namespace to ` +
+        "registerBundled",
     );
     return;
   }
@@ -155,8 +155,7 @@ export function requestModule(packageName, path) {
     .catch((error) =>
       log(
         "error",
-        `lily: could not load ${packageName}/${path}.mjs to register its ` +
-          `types: ${error}`,
+        `lily: could not load ${packageName}/${path}.mjs [reason: ${error}]`,
       ),
     )
     .finally(() => {
@@ -234,8 +233,7 @@ function constructInner(reflected, lookup) {
         log(
           "error",
           `lily: unknown constructor ${JSON.stringify(key.slice(0, 64))}, ` +
-            "name its module in modules: (transport.module) so the decoder " +
-            "can rebuild it",
+            "name its module in transport.module",
         );
       }
       throw new globalThis.Error(`Unknown constructor: ${key}`);
@@ -334,8 +332,8 @@ function registerClass(constructor, builtin) {
       "warn",
       builtinKeys.has(key)
         ? `lily: a type of yours replaces the built-in constructor ${key}, ` +
-            "so values of the built-in type won't decode"
-        : `lily: two types register the constructor ${key}, the later one wins`,
+            "built-in values won't decode"
+        : `lily: two types register constructor ${key}, the later one wins`,
     );
   }
   constructorRegistry.set(key, constructor);
@@ -356,7 +354,7 @@ function runWaiting() {
     } catch (error) {
       log(
         "error",
-        `lily: a callback waiting on module registration crashed: ${error}`,
+        `lily: a module-registration callback crashed [reason: ${error}]`,
       );
     }
   }

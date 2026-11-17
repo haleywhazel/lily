@@ -426,7 +426,8 @@ fn apply_message(
         model,
         Diagnostic(
           level: transport.Warning,
-          message: "skipped a message the store's authorise rule refused",
+          message: "lily: skipped a message, the store's authorise rule "
+            <> "refused it",
         ),
       )
     }
@@ -484,7 +485,7 @@ fn connect_with(
   use <- bool.lazy_guard(when: mark_connected(handle), return: fn() {
     actor.log(
       transport.Warning,
-      "lily: client.connect was called twice on one runtime, the second is ignored",
+      "lily: ignored a second call to client.connect",
     )
     runtime
   })
@@ -601,9 +602,9 @@ fn discard_pending(sync: SyncSession(model, message)) -> Nil {
     )
   })
   let message =
-    "lily: "
+    "lily: discarded "
     <> int.to_string(list.length(pending))
-    <> " unsent messages were queued under another session, they're discarded"
+    <> " queued messages, they belong to another session"
   actor.log(transport.Warning, message)
   emit(sync.runtime.handle, Diagnostic(level: transport.Warning, message:))
 }
@@ -783,7 +784,7 @@ fn handle_incoming(
         handle,
         Diagnostic(
           level: transport.Warning,
-          message: "dropped a frame that failed to decode",
+          message: "lily: dropped a frame that failed to decode",
         ),
       )
   }
@@ -970,7 +971,7 @@ fn replay(
         runtime.handle,
         Diagnostic(
           level: transport.Warning,
-          message: "dropped an unreadable frame from the offline queue",
+          message: "lily: dropped an unreadable frame from the offline queue",
         ),
       )
   }
@@ -1120,7 +1121,10 @@ fn send_frame(
     actor.rescue(fn() { transport.encode(frame, serialiser: sync.serialiser) })
   {
     Error(reason) -> {
-      actor.log(transport.Failure, "lily: a frame failed to encode: " <> reason)
+      actor.log(
+        transport.Failure,
+        "lily: a frame failed to encode [reason: " <> reason <> "]",
+      )
       Unencodable
     }
     Ok(bytes) ->
@@ -1262,11 +1266,11 @@ fn stop(sync: SyncSession(model, message), server: Int) -> Nil {
   }
   let client = transport.protocol_version
   let message =
-    "lily: the server speaks wire protocol "
+    "lily: closed the connection, server speaks wire protocol "
     <> int.to_string(server)
-    <> " but this page speaks "
+    <> ", this page speaks "
     <> int.to_string(client)
-    <> ", the connection is closed until the page reloads"
+    <> ", reload to reconnect"
   actor.log(transport.Failure, message)
   emit(sync.runtime.handle, ProtocolMismatch(server:, client:))
   emit(sync.runtime.handle, Diagnostic(level: transport.Failure, message:))
@@ -1413,9 +1417,8 @@ fn warn_if_no_session(sync: SyncSession(model, message)) -> Nil {
         SyncState(..state, warned_no_session: True)
       })
       let message =
-        "lily: a message was routed to store.Session but the store declares no "
-        <> "store.session, meaning session snapshots from the server are "
-        <> "dropped"
+        "lily: dropped session snapshots from the server, no store.session "
+        <> "is declared"
       actor.log(transport.Warning, message)
       emit(sync.runtime.handle, Diagnostic(level: transport.Warning, message:))
     }

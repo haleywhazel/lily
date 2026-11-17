@@ -121,7 +121,10 @@ function drain(runtime) {
       try {
         next = step(runtime.model);
       } catch (error) {
-        log("error", `lily: a client update crashed: ${describe(error)}`);
+        log(
+          "error",
+          `lily: a client update crashed [reason: ${describe(error)}]`,
+        );
         continue;
       }
       // an effect, nothing changed and nothing to observe
@@ -131,7 +134,10 @@ function drain(runtime) {
         try {
           observer(next[1], runtime.model);
         } catch (error) {
-          log("error", `lily: an observer crashed: ${describe(error)}`);
+          log(
+            "error",
+            `lily: an observer crashed [reason: ${describe(error)}]`,
+          );
         }
       }
     }
@@ -150,7 +156,7 @@ function flushNotify(runtime) {
     } catch (error) {
       if (crashedRenderers.has(renderer)) continue;
       crashedRenderers.add(renderer);
-      log("error", `lily: a renderer crashed: ${describe(error)}`);
+      log("error", `lily: a renderer crashed [reason: ${describe(error)}]`);
     }
   }
 }

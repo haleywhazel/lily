@@ -448,7 +448,8 @@ function runBinding(state, binding, event, matched) {
       binding.runtime.crashed = true;
       log(
         "error",
-        `lily: a "${binding.name}" handler crashed: ${error?.stack ?? error}`,
+        `lily: a "${binding.name}" handler crashed ` +
+          `[reason: ${error?.stack ?? error}]`,
       );
     }
     return false;
@@ -481,8 +482,9 @@ function runBinding(state, binding, event, matched) {
       binding.runtime.reported = true;
       log(
         "warn",
-        `lily: a "${binding.name}" binding skipped an event it could not ` +
-          `decode (${binding.selector ?? "its component"}): ${outcome.reason}`,
+        `lily: skipped an undecodable "${binding.name}" event on ` +
+          `${binding.selector ?? "its component"} ` +
+          `[reason: ${outcome.reason}]`,
       );
     }
   }

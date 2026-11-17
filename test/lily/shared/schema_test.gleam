@@ -327,7 +327,7 @@ pub fn server_drops_a_topic_message_that_fails_the_schema_test() {
   |> should.equal([
     server.Diagnostic(
       level: transport.Warning,
-      message: "dropped a message from \"c1\" that fails the schema",
+      message: "lily: dropped a message from \"c1\" that fails the schema",
     ),
   ])
   test_support.subscriber_count(app, "chat")

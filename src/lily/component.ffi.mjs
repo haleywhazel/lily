@@ -62,7 +62,7 @@ export function renderTree(
   if (!root) {
     log(
       "error",
-      `lily: nothing was rendered, no element matches the mount selector ` +
+      `lily: rendered nothing, no element matches mount selector ` +
         `"${rootSelector}"`,
     );
     return;
@@ -172,7 +172,10 @@ function applyPatches(rootElement, patches, matchRoot = false) {
     try {
       applyPatch(rootElement, patch, matchRoot);
     } catch (error) {
-      log("warn", `lily: a live patch failed: ${error?.stack ?? error}`);
+      log(
+        "warn",
+        `lily: a live patch failed [reason: ${error?.stack ?? error}]`,
+      );
     }
   }
 }
@@ -917,9 +920,8 @@ function renderNested(context, model, toHtml, toPlaceholder, produce) {
     }
     log(
       "error",
-      "lily: <lily-nest> placeholder missing from rendered HTML, child " +
-        "component dropped. Make sure nest() return values are placed in the " +
-        "template.",
+      "lily: dropped a child component, its <lily-nest> placeholder is " +
+        "missing, place the nest() value in the template",
     );
     for (let number = start; number < context.counter; number++) {
       unregister(context, context.prefix + "c" + number);
@@ -1099,7 +1101,8 @@ function runHandler(context, id, handler, model) {
     context.crashed.add(id);
     log(
       "error",
-      `lily: component ${id} crashed rendering: ${error?.stack ?? error}`,
+      `lily: component ${id} crashed rendering ` +
+        `[reason: ${error?.stack ?? error}]`,
     );
   }
 }

@@ -169,7 +169,7 @@ export function loadExternal(address) {
     log(
       "warn",
       `lily: browser.load_external refused ${JSON.stringify(address)}, it ` +
-        "only loads an absolute http or https URL",
+        "needs an absolute http or https URL",
     );
     return;
   }
@@ -183,8 +183,8 @@ export function loadPage(path) {
   if (!url) {
     log(
       "warn",
-      `lily: browser.load_page refused ${JSON.stringify(path)}, it only loads ` +
-        "pages on this origin, use browser.load_external for another site",
+      `lily: browser.load_page refused ${JSON.stringify(path)}, use ` +
+        "browser.load_external for another site",
     );
     return;
   }
@@ -263,8 +263,8 @@ export function reloadForProtocol(server, client) {
     if (sessionStorage.getItem(PROTOCOL_RELOAD_KEY) === pair) {
       log(
         "warn",
-        `lily: still on wire protocol ${client} after a reload, the server ` +
-          `speaks ${server}, not reloading again`,
+        `lily: skipped a reload, still on wire protocol ${client} after ` +
+          "the last one",
       );
       return;
     }
@@ -280,8 +280,8 @@ export function reloadForVersion() {
   if (!versionReloadAllowed()) {
     log(
       "warn",
-      "lily: the server announced another build again, not reloading, the " +
-        "page reloaded for a new build too often already",
+      "lily: server announced another build, not reloading, too many " +
+        "reloads already",
     );
     return;
   }
@@ -296,7 +296,7 @@ export function writeStored(key, value) {
   try {
     localStorage.setItem(key, value);
   } catch (error) {
-    log("warn", `lily: failed to persist "${key}": ${error}`);
+    log("warn", `lily: failed to persist "${key}" [reason: ${error}]`);
   }
 }
 
@@ -358,7 +358,7 @@ function connectDevReload(
         log("info", `lily: rebuilt ${changed.join(", ")}`);
       }
       if (reloadedTooRecently(guardMilliseconds)) {
-        log("warn", "lily: reload suppressed (storm guard)");
+        log("warn", "lily: suppressed a reload, too many reloads in a row");
         return;
       }
       stashModelForReload(getModel());

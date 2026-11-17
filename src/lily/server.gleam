@@ -514,7 +514,7 @@ pub fn attach(
       actor.log_limited(
         "attach",
         transport.Warning,
-        "lily: refused a socket, the server holds max_clients already",
+        "lily: refused a socket, max_clients is already reached",
       )
       Connection(
         server:,
@@ -693,7 +693,7 @@ pub fn disconnect(connection: Connection(model, message)) -> Nil {
   case connection.link {
     Registered(token:, ..) -> {
       let left = ClientLeft(client_id:, token: Token(token))
-      actor.rescue_or("unwatch", Nil, fn() {
+      actor.rescue_or("stop watching", Nil, fn() {
         actor.unwatch(connection.server.handle, down: left)
       })
       cast(connection.server, left)
@@ -1969,20 +1969,22 @@ fn apply_to_session(
                 state,
                 client_id,
                 transport.Warning,
-                "dropped malformed session message from "
+                "dropped a session message from "
                   <> shown(client_id)
-                  <> ": "
-                  <> reason,
+                  <> ", its update crashed [reason: "
+                  <> reason
+                  <> "]",
               )
               |> push_dropped(client_id, transport.Session, id)
             FromServer -> {
               diagnose(
                 state,
                 transport.Warning,
-                "dropped crashing dispatch to "
+                "dropped a crashing dispatch to "
                   <> shown(client_id)
-                  <> ": "
-                  <> reason,
+                  <> " [reason: "
+                  <> reason
+                  <> "]",
               )
               state
             }
@@ -2103,8 +2105,9 @@ fn check_access(
               <> shown(topic_id)
               <> " crashed for "
               <> shown(client_id)
-              <> ", refused: "
-              <> reason,
+              <> ", refused [reason: "
+              <> reason
+              <> "]",
           ),
           False,
         )
@@ -2186,7 +2189,7 @@ fn delivered(
       actor.log_limited(
         "cast",
         transport.Failure,
-        "lily: cast crashed: " <> reason,
+        "lily: an asynchronous callback crashed [reason: " <> reason <> "]",
       )
       False
     }
@@ -2235,8 +2238,9 @@ fn diagnose(
   level: transport.DiagnosticLevel,
   description: String,
 ) -> Nil {
-  actor.log(level, "lily: " <> description)
-  notify(state, Diagnostic(level:, message: description))
+  let text = "lily: " <> description
+  actor.log(level, text)
+  notify(state, Diagnostic(level:, message: text))
 }
 
 // at most one per client per window, and only while the shared budget lasts,
@@ -2303,9 +2307,9 @@ fn diagnose_refused(
   crash: Option(String),
 ) -> ServerState(model, message) {
   let why = case crash {
-    option.None -> " that the store's authorise rule refused"
+    option.None -> ", the store's authorise rule refused it"
     option.Some(reason) ->
-      ", the store's authorise rule crashed on it: " <> reason
+      ", the store's authorise rule crashed [reason: " <> reason <> "]"
   }
   diagnose_client(
     state,
@@ -2621,7 +2625,7 @@ fn forget_topic(
     state,
     "forget",
     transport.Failure,
-    "gave up on topic " <> shown(id) <> ", " <> why,
+    "gave up on topic " <> shown(id) <> why,
   )
   drop_topic(state, id, ServerTells)
 }
@@ -2853,7 +2857,7 @@ fn handle_dispatch_topic(
       find_or_start_topic(state, topic_id)
       |> result.map_error(fn(reason) {
         case reason {
-          OverLimit -> ", the topic limit is reached and every topic is held"
+          OverLimit -> ", the topic limit is reached, every topic is held"
           AccessDenied | NotFound -> ", the topic would not start"
         }
       })
@@ -2906,7 +2910,7 @@ fn handle_frame(
             transport.Session,
             id,
             "a session message",
-            " that the store routes elsewhere",
+            ", the store routes it elsewhere",
           )
         Error(reason) ->
           drop_misrouted(
@@ -2915,7 +2919,7 @@ fn handle_frame(
             transport.Session,
             id,
             "a session message",
-            ", the store's route crashed on it: " <> reason,
+            ", the store's route crashed [reason: " <> reason <> "]",
           )
       }
     }
@@ -3232,9 +3236,9 @@ fn handle_topic_down(
           forget_topic(
             state,
             id,
-            "it crashed " <> int.to_string(restarts + 1) <> " times",
+            " after " <> int.to_string(restarts + 1) <> " crashes",
           )
-        False, Error(Nil) -> forget_topic(state, id, "it would not restart")
+        False, Error(Nil) -> forget_topic(state, id, ", it would not restart")
         False, Ok(#(topic, incarnation)) -> {
           let state =
             reinstate_topic(state, id, topic, incarnation, restarts + 1)
@@ -3266,7 +3270,7 @@ fn handle_topic_message(
         target,
         id,
         what,
-        ", the store's route crashed on it: " <> reason,
+        ", the store's route crashed [reason: " <> reason <> "]",
       )
     Ok(route), _ if route != store.Topic(topic_id) ->
       drop_misrouted(
@@ -3275,7 +3279,7 @@ fn handle_topic_message(
         target,
         id,
         what,
-        " that the store routes elsewhere",
+        ", the store routes it elsewhere",
       )
     Ok(_), Error(_) -> state
     Ok(_), Ok(client) ->
@@ -3305,7 +3309,7 @@ fn handle_topic_message(
               <> what
               <> " from "
               <> shown(client_id)
-              <> ", which hasn't joined it",
+              <> ", who hasn't joined it",
           )
           |> push_dropped(client_id, target, id)
       }
@@ -3327,8 +3331,9 @@ fn handle_topic_report(
         transport.Failure,
         "loading topic "
           <> shown(topic_id)
-          <> " crashed, it started from the initial model: "
-          <> reason,
+          <> " crashed, started from the initial model [reason: "
+          <> reason
+          <> "]",
       )
       state
     }
@@ -3337,22 +3342,24 @@ fn handle_topic_report(
         state,
         client_id,
         transport.Warning,
-        "dropped malformed topic message on "
+        "dropped a topic message on "
           <> shown(topic_id)
           <> " from "
           <> shown(client_id)
-          <> ": "
-          <> reason,
+          <> ", its update crashed [reason: "
+          <> reason
+          <> "]",
       )
     ProjectionFailed(reason:) -> {
       diagnose_limited(
         state,
         "project",
         transport.Warning,
-        "the get or set of topic "
+        "get or set of topic "
           <> shown(topic_id)
-          <> " crashed, its snapshot carries the whole model: "
-          <> reason,
+          <> " crashed, its snapshot carries the whole model [reason: "
+          <> reason
+          <> "]",
       )
       state
     }
@@ -3372,10 +3379,11 @@ fn handle_topic_report(
       diagnose(
         state,
         transport.Warning,
-        "dropped crashing dispatch to topic "
+        "dropped a crashing dispatch to topic "
           <> shown(topic_id)
-          <> ": "
-          <> reason,
+          <> " [reason: "
+          <> reason
+          <> "]",
       )
       state
     }
@@ -3808,7 +3816,7 @@ fn note_over_limit(
             state,
             client_id,
             transport.Warning,
-            "throttled " <> shown(client_id) <> ", it went past its rate limit",
+            "throttled " <> shown(client_id) <> " for exceeding its rate limit",
           )
         }
       }
@@ -3923,8 +3931,10 @@ fn project_session(state: ServerState(model, message), model: model) -> model {
         state,
         "project",
         transport.Warning,
-        "the session's get or set crashed, its snapshot carries the whole model: "
-          <> reason,
+        "the session's get or set crashed, its snapshot carries the whole "
+          <> "model [reason: "
+          <> reason
+          <> "]",
       )
       model
     }
@@ -4166,7 +4176,7 @@ fn reduce(
             TopicInspection(
               subscriber_count: fn() {
                 // the topic may be gone by the time this runs
-                actor.rescue_or("subscriber_count", -1, fn() {
+                actor.rescue_or("count subscribers", -1, fn() {
                   actor.call(entry.actor, TopicSubscriberCount, default: -1)
                 })
               },
@@ -4299,7 +4309,7 @@ fn reinstate_topic(
   actor.log_limited(
     "restart",
     transport.Failure,
-    "lily: topic actor died, restarted: " <> shown(id),
+    "lily: topic " <> shown(id) <> " crashed, restarted",
   )
   case dict.get(state.topics, id) {
     Error(_) -> state
@@ -5541,13 +5551,14 @@ fn warn_about_origins(origins: Origins) -> Nil {
     AnyOrigin ->
       actor.log(
         transport.Warning,
-        "lily: AnyOrigin lets a page on any site connect, and a browser sends "
-          <> "your cookies with it, so don't sign clients in by cookie",
+        "lily: AnyOrigin lets any site send your cookies, don't sign clients "
+          <> "in by cookie",
       )
     AllowedOrigins([]) ->
       actor.log(
         transport.Warning,
-        "lily: AllowedOrigins([]) lets no browser connect, every origin is refused",
+        "lily: AllowedOrigins([]) refuses every browser, add at least one "
+          <> "origin",
       )
     AllowedOrigins(allowed) ->
       list.each(allowed, fn(entry) {
@@ -5556,8 +5567,13 @@ fn warn_about_origins(origins: Origins) -> Nil {
           _ if origin == "null" -> Error(Nil)
           Ok(#(_, rest)) ->
             case string.contains(rest, "/"), string.contains(rest, "*") {
-              True, _ -> Ok("has a path, a browser never sends one")
-              _, True -> Ok("has a wildcard, origins are matched exactly")
+              True, _ ->
+                Ok("has a path, browsers never send one, drop the " <> "path")
+              _, True ->
+                Ok(
+                  "has a wildcard, origins match exactly, remove "
+                  <> "the wildcard",
+                )
               False, False -> Error(Nil)
             }
           Error(Nil) -> Ok("has no scheme, write it as https://host")
@@ -5566,11 +5582,7 @@ fn warn_about_origins(origins: Origins) -> Nil {
           Ok(why) ->
             actor.log(
               transport.Warning,
-              "lily: the allowed origin "
-                <> string.inspect(entry)
-                <> " "
-                <> why
-                <> ", so it matches nothing",
+              "lily: allowed origin " <> string.inspect(entry) <> " " <> why,
             )
           Error(Nil) -> Nil
         }
@@ -5587,7 +5599,7 @@ fn warn_about_seed(
     False, Ok(store.Session) -> {
       actor.log(
         transport.Warning,
-        "lily: a seed message is routed to store.Session, so a client can send "
+        "lily: a seed message routes to store.Session, a client could send "
           <> "it too, route server-written messages store.Local",
       )
       ServerState(..state, warned_session_seed: True)
@@ -5610,15 +5622,13 @@ fn warn_about_setup(builder: Builder(model, message)) -> Nil {
     True, False ->
       actor.log(
         transport.Warning,
-        "lily: the server decodes with the automatic serialiser and no schema, "
-          <> "so a client can put any type in any field, build one with "
-          <> "transport.schema and pipe it into store.schema",
+        "lily: no schema set, any type fits any field, pipe transport.schema "
+          <> "into store.schema",
       )
     False, True ->
       actor.log(
         transport.Warning,
-        "lily: store.schema only checks the automatic serialiser, it's ignored "
-          <> "with a serialiser of your own",
+        "lily: store.schema is ignored, a custom serialiser bypasses it",
       )
     True, True | False, False -> Nil
   }
