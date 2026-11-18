@@ -1,5 +1,5 @@
 name = "lily"
-version = "1.0.0"
+version = "1.0.0-rc1"
 gleam = ">= 1.19.0"
 
 description = "Lily is designed to be a web framework for Gleam that allows for real-time updates while preserving offline functionality!"
